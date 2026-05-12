@@ -5,7 +5,10 @@ import {
   signInWithEmailAndPassword,
   signOut,
   updatePassword,
-  deleteUser
+  deleteUser,
+  setPersistence,
+  browserLocalPersistence,
+  browserSessionPersistence
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 import {
   getFirestore,
@@ -22,7 +25,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-console.log("VILLAGE VIBES PHASE 1 VERSION: v51-click-loading-everywhere");
+console.log("VILLAGE VIBES PHASE 1 VERSION: v54-login-stay-slider");
 const DEV_MODE = false;
 
 // Firebase config is already filled in for this project.
@@ -46,6 +49,7 @@ const SAVED_SCHOOL_KEY = "villageVibesLastSchoolId";
 const RECENT_USERS_KEY = "villageVibesRecentLoginUsers";
 const TOOL_PREFS_KEY = "villageVibesToolPrefs";
 const THEME_PREF_KEY = "villageVibesTheme";
+const STAY_LOGGED_IN_KEY = "villageVibesStayLoggedIn";
 
 function readLocalJson(key, fallback) {
   try {
@@ -76,6 +80,18 @@ function toggleThemePreference() {
   const nextTheme = getThemePreference() === "dark" ? "light" : "dark";
   applyThemePreference(nextTheme);
   return nextTheme;
+}
+
+function getStayLoggedInPreference() {
+  try { return localStorage.getItem(STAY_LOGGED_IN_KEY) === "true"; } catch (err) { return false; }
+}
+
+function setStayLoggedInPreference(value) {
+  try { localStorage.setItem(STAY_LOGGED_IN_KEY, value ? "true" : "false"); } catch (err) {}
+}
+
+async function applyLoginPersistence(stayLoggedIn) {
+  await setPersistence(auth, stayLoggedIn ? browserLocalPersistence : browserSessionPersistence);
 }
 
 
@@ -256,7 +272,8 @@ let state = {
   currentView: "landing",
   adminLoginOpen: false,
   devViewRoleKey: "",
-  devViewPosition: ""
+  devViewPosition: "",
+  editMoneyRequestId: ""
 };
 
 const $app = document.getElementById("app");
@@ -516,7 +533,7 @@ function userMatchesNotification(n) {
 async function loadNotifications() {
   try {
     const snap = await getDocs(collection(db, "notifications"));
-    state.notifications = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(userMatchesNotification).sort((a,b)=>{
+    state.notifications = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(n => n.cleared !== true).filter(userMatchesNotification).sort((a,b)=>{
       const at = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
       const bt = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
       return bt-at;
@@ -580,7 +597,9 @@ function generateFakeEmail(firstName, lastName) {
   return `${base}${suffix}@${SYSTEM_EMAIL_DOMAIN}`;
 }
 
-async function loginUser(user, credential) {
+async function loginUser(user, credential, stayLoggedIn = false) {
+  await applyLoginPersistence(stayLoggedIn);
+  setStayLoggedInPreference(stayLoggedIn);
   if (user.passwordSet) {
     await signInWithEmailAndPassword(auth, user.fakeEmail, credential);
     const fresh = await readUser(user.uid);
@@ -596,6 +615,7 @@ async function loginUser(user, credential) {
     throw new Error("Incorrect PIN.");
   }
 
+  await applyLoginPersistence(stayLoggedIn);
   await signInWithEmailAndPassword(auth, user.fakeEmail, DEFAULT_AUTH_PASSWORD);
   const fresh = await readUser(user.uid);
   state.session = fresh;
@@ -1058,7 +1078,19 @@ function renderNotificationsPanel() {
         <span>${n.body || ""}</span>
       </button>
     `).join("") : `<div class="empty">No notifications yet.</div>`}
+    ${state.notifications.length ? `<button type="button" class="clear-notifications-link" data-clear-notifications>Clear Notifications</button>` : ""}
   </div>`;
+}
+
+function getNotificationTargetTab(n) {
+  if (n?.targetTab) return n.targetTab;
+  const title = String(n?.title || "").toLowerCase();
+  const body = String(n?.body || "").toLowerCase();
+  if (title.includes("denied") || body.includes("denied") || body.includes("needs changes")) return "myRequests";
+  if (title.includes("owner approval")) return "pendingOwner";
+  if (title.includes("new money request") || title.includes("resubmitted")) return "pendingDoso";
+  if (title.includes("approved") || title.includes("receipt")) return "receipts";
+  return "submit";
 }
 
 function renderDevPreviewControls() {
@@ -1353,7 +1385,7 @@ function formatMoneyAmount(value) {
 }
 
 function passwordFieldHtml(name = "password", label = "Password", opts = {}) {
-  const autocomplete = opts.autocomplete || "current-password";
+  const autocomplete = opts.autocomplete || "new-password";
   const minlength = opts.minlength ? ` minlength="${opts.minlength}"` : "";
   const inputmode = opts.inputmode ? ` inputmode="${opts.inputmode}"` : "";
   const maxlength = opts.maxlength ? ` maxlength="${opts.maxlength}"` : "";
@@ -1381,9 +1413,138 @@ function renderMoneyRequestDetails(request) {
           ${(item.customFields || []).map(f => `<span><b>${f.label || "Field"}:</b> ${f.value || "—"}</span>`).join("")}
         </div>
       `).join("")}
+      ${request.denialNote ? `<div class="denial-note"><b>Denied:</b> ${request.denialNote}</div>` : ""}
       ${(request.receipts || []).length ? `<div class="receipt-summary"><b>Receipts:</b> ${(request.receipts || []).length} attached</div>` : ""}
     </div>
   `;
+}
+
+
+function moneyStatusLabel(status) {
+  const s = normalizeMoneyRequestStatus(status);
+  if (s === "pendingDoso") return "Pending DOSO Approval";
+  if (s === "pendingOwner") return "Pending Owner Approval";
+  if (s === "finalApproved") return "Approved";
+  if (s === "deniedByDoso") return "Denied by DOSO";
+  if (s === "deniedByOwner") return "Denied by Owner";
+  if (s === "selfDosoPasswordNeeded") return "Waiting for your DOSO approval";
+  return s;
+}
+
+function renderMyMoneyRequests() {
+  const mine = state.moneyRequests
+    .filter(r => r.submittedByUid === state.session?.uid)
+    .sort((a,b)=>String(b.todayDate || "").localeCompare(String(a.todayDate || "")));
+  if (!mine.length) return `<div class="empty">You have not submitted any money requests yet.</div>`;
+  return `<div class="money-request-queue my-money-requests">
+    ${mine.map(request => {
+      const isOpen = state.expandedMoneyRequestId === request.id;
+      const status = normalizeMoneyRequestStatus(request.status);
+      const canEdit = status === "deniedByDoso" || status === "deniedByOwner";
+      return `<div class="money-request-card ${isOpen ? "open" : ""} ${canEdit ? "denied" : ""}">
+        <div class="money-summary-row">
+          <button class="money-request-summary" type="button" data-expand-money-request="${request.id}">
+            <strong>${moneyStatusLabel(status)}</strong>
+            <span>${getRequestSchoolName(request)}</span>
+            <span>Submitted: ${formatMoneyDate(request.todayDate)}</span>
+            <span>Needed: ${formatMoneyDate(request.requestedByDate)}</span>
+            <b>${formatMoneyAmount(getMoneyRequestTotal(request))}</b>
+          </button>
+          <div class="money-summary-actions">
+            ${canEdit ? `<button class="small" type="button" data-edit-denied-money-request="${request.id}">Edit & Resubmit</button>` : ""}
+          </div>
+        </div>
+        ${request.denialNote ? `<div class="denial-note"><b>Note:</b> ${request.denialNote}</div>` : ""}
+        ${isOpen ? renderMoneyRequestDetails(request) : ""}
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderEditDeniedMoneyRequestModal(request) {
+  if (!request) return "";
+  return `
+    <div class="modal-backdrop"><form class="modal card wide-modal" id="editDeniedMoneyRequestForm" data-request-id="${request.id}">
+      <h2>Edit & Resubmit</h2>
+      <p class="helper">Update the request, then resubmit it for approval.</p>
+      ${request.denialNote ? `<div class="denial-note"><b>Denial note:</b> ${request.denialNote}</div>` : ""}
+      <div class="grid three compact-dates">
+        <label>Location<select name="requestSchoolId" required>${renderSchoolOptionsForUser(state.session, request.requestSchoolId)}</select></label>
+        <label>Today’s Date<input name="todayDate" type="date" value="${todayIso()}" readonly /></label>
+        <label>Date Requested By<input name="requestedByDate" type="date" value="${request.requestedByDate || ""}" required /></label>
+      </div>
+      <div class="edit-money-items">
+        ${(request.items || []).map((item, i) => `
+          <div class="money-request-line edit-money-line" data-edit-item-index="${i}">
+            <strong class="money-line-kind">${item.requestTypeName || "Request"}</strong>
+            <label class="money-budget-code">Budget Code<input name="budgetCode_${i}" data-budget-code value="${item.budgetCode || ""}" required /></label>
+            <label class="money-budget-category">Budget Category<select name="budgetCategory_${i}" data-budget-category required>${renderBudgetCategoryOptions(item.budgetCategory || "")}</select></label>
+            ${(item.customFields || []).map((f, j) => {
+              const name = `field_${i}_${j}`;
+              const label = f.label || "Field";
+              if (f.type === "money") return `<label class="money-custom-field money-custom-money">${label}<span class="money-input-wrap"><span class="money-symbol">$</span><input name="${name}" data-money-input inputmode="decimal" value="${f.value || ""}" /></span></label>`;
+              if (f.type === "longText" || f.type === "textarea") return `<label class="money-custom-field money-custom-wide">${label}<textarea name="${name}">${f.value || ""}</textarea></label>`;
+              return `<label class="money-custom-field">${label}<input name="${name}" value="${f.value || ""}" /></label>`;
+            }).join("")}
+          </div>
+        `).join("")}
+      </div>
+      <div class="actions"><button>Resubmit Request</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+    </form></div>`;
+}
+
+async function saveEditedDeniedMoneyRequest(form) {
+  const requestId = form.dataset.requestId;
+  const request = state.moneyRequests.find(r => r.id === requestId);
+  if (!request) throw new Error("Request not found.");
+  const items = (request.items || []).map((item, i) => ({
+    ...item,
+    budgetCode: form[`budgetCode_${i}`]?.value?.trim() || "",
+    budgetCategory: form[`budgetCategory_${i}`]?.value?.trim() || "",
+    customFields: (item.customFields || []).map((f, j) => ({ ...f, value: form[`field_${i}_${j}`]?.value || "" }))
+  }));
+  const requestSchoolId = form.requestSchoolId.value;
+  await updateDoc(doc(db, "moneyRequests", requestId), {
+    status: "pendingDoso",
+    requestSchoolId,
+    requestSchoolName: getSchoolNameById(requestSchoolId),
+    todayDate: form.todayDate.value,
+    requestedByDate: form.requestedByDate.value,
+    items,
+    denialNote: "",
+    deniedByUid: "",
+    deniedByName: "",
+    deniedAt: null,
+    updatedAt: serverTimestamp()
+  });
+  await createNotification({ title: "Money request resubmitted", body: `${state.session?.firstName || "Someone"} resubmitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests", targetTab: "pendingDoso" });
+  state.modal = null;
+  await loadMoneyRequests();
+  await loadNotifications();
+  state.moneyRequestsTab = "myRequests";
+  showToast("Request resubmitted.");
+  renderMoneyRequestsTool();
+}
+
+async function denyMoneyRequest(requestId, stage, note) {
+  const request = state.moneyRequests.find(r => r.id === requestId);
+  if (!request) throw new Error("Request not found.");
+  const isDoso = stage === "pendingDoso";
+  await updateDoc(doc(db, "moneyRequests", requestId), {
+    status: isDoso ? "deniedByDoso" : "deniedByOwner",
+    denialNote: note,
+    deniedByUid: state.session?.uid || null,
+    deniedByName: `${state.session?.firstName || ""} ${state.session?.lastName || ""}`.trim(),
+    deniedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+  await createNotification({ title: "Money request denied", body: note || "A money request needs changes before resubmitting.", toUids: [request.submittedByUid], schoolIds: [request.requestSchoolId].filter(Boolean), toolKey: "moneyRequests", targetTab: "myRequests" });
+  state.modal = null;
+  await loadMoneyRequests();
+  await loadNotifications();
+  state.moneyRequestsTab = stage;
+  showToast("Request denied with note.");
+  renderMoneyRequestsTool();
 }
 
 function renderReceiptLine(line = {}, index = 0) {
@@ -1497,6 +1658,7 @@ function normalizeMoneyRequestStatus(status) {
   const value = String(status || "pendingDoso");
   if (value === "pending") return "pendingDoso";
   if (value === "approved") return "pendingOwner";
+  if (value === "selfDosoPasswordNeeded") return "selfDosoPasswordNeeded";
   return value;
 }
 
@@ -1536,8 +1698,8 @@ function renderMoneyRequestQueue(status, canApproveDoso, canApproveOwner) {
           <b>${formatMoneyAmount(total)}</b>
         </button>
         <div class="money-summary-actions">
-          ${!canBulk && status === "pendingDoso" && canApproveDoso ? `<button class="small" type="button" data-doso-approve-money-request="${request.id}">DOSO Approve</button>` : ""}
-          ${!canBulk && status === "pendingOwner" && canApproveOwner ? `<button class="small" type="button" data-owner-approve-money-request="${request.id}">Owner Approve</button>` : ""}
+          ${!canBulk && status === "pendingDoso" && canApproveDoso ? `<button class="small" type="button" data-doso-approve-money-request="${request.id}">DOSO Approve</button><button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingDoso">Deny</button>` : ""}
+          ${!canBulk && status === "pendingOwner" && canApproveOwner ? `<button class="small" type="button" data-owner-approve-money-request="${request.id}">Owner Approve</button><button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingOwner">Deny</button>` : ""}
           ${status === "finalApproved" && canApproveOwner ? `<button class="secondary small" type="button" disabled>Final Approved</button>` : ""}
         </div>
       </div>
@@ -1614,7 +1776,7 @@ async function approveMoneyRequests(ids, stage, passwordVerified = false) {
   }
   if (isDoso) {
     const approvedSchoolIds = Array.from(new Set(ids.map(id => state.moneyRequests.find(r => r.id === id)?.requestSchoolId).filter(Boolean)));
-    await createNotification({ title: "PO ready for owner approval", body: `${ids.length} money request(s) approved by DOSO.`, toRoles: ["owner"], toPositions: ["CFO"], schoolIds: approvedSchoolIds, toolKey: "moneyRequests" });
+    await createNotification({ title: "PO ready for owner approval", body: `${ids.length} money request(s) approved by DOSO.`, toRoles: ["owner"], toPositions: ["CFO"], schoolIds: approvedSchoolIds, toolKey: "moneyRequests", targetTab: "pendingOwner" });
   }
   await loadMoneyRequests();
   await loadNotifications();
@@ -1646,8 +1808,11 @@ async function submitMoneyRequest(form) {
   });
 
   const requestSchoolId = form.requestSchoolId?.value || getDefaultRequestSchoolId();
-  await setDoc(doc(collection(db, "moneyRequests")), {
-    status: "pendingDoso",
+  const permissionUser = getPermissionUser(state.session);
+  const canAutoApproveDoso = hasToolPermission(permissionUser, "moneyRequests", "approvePending") && userSchoolMatchesScope([requestSchoolId], state.session);
+  const newRequestRef = doc(collection(db, "moneyRequests"));
+  await setDoc(newRequestRef, {
+    status: canAutoApproveDoso ? "selfDosoPasswordNeeded" : "pendingDoso",
     requestSchoolId,
     requestSchoolName: getSchoolNameById(requestSchoolId),
     todayDate: form.todayDate.value,
@@ -1660,10 +1825,14 @@ async function submitMoneyRequest(form) {
     updatedAt: serverTimestamp()
   });
 
-  await createNotification({ title: "New money request", body: `${state.session?.firstName || "Someone"} submitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests" });
+  if (canAutoApproveDoso) {
+    state.modal = { type: "selfDosoApproval", ids: [newRequestRef.id], stage: "pendingDoso", error: "" };
+  } else {
+    await createNotification({ title: "New money request", body: `${state.session?.firstName || "Someone"} submitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests", targetTab: "pendingDoso" });
+  }
   await loadMoneyRequests();
   await loadNotifications();
-  state.moneyRequestsTab = "pendingDoso";
+  state.moneyRequestsTab = canAutoApproveDoso ? "myRequests" : "pendingDoso";
   state.expandedMoneyRequestId = "";
   showToast("Money request submitted.");
   renderMoneyRequestsTool();
@@ -1678,7 +1847,7 @@ function renderMoneyRequestsTool() {
   const canApproveOwner = hasToolPermission(permissionUser, "moneyRequests", "processApproved") || hasFullDevAccess(state.session);
   const canAddReceipts = hasToolPermission(permissionUser, "moneyRequests", "addReceipts") || hasFullDevAccess(state.session);
   const availableTabs = [
-    ...(canSubmit ? ["submit"] : []),
+    ...(canSubmit ? ["submit", "myRequests"] : []),
     ...(canApproveDoso ? ["pendingDoso"] : []),
     ...(canApproveOwner ? ["pendingOwner", "finalApproved"] : []),
     ...(canAddReceipts ? ["receipts"] : [])
@@ -1699,7 +1868,7 @@ function renderMoneyRequestsTool() {
       </div>
 
       <div class="tab-row money-workspace-tabs">
-        ${canSubmit ? `<button class="${activeTab === "submit" ? "active" : ""}" data-money-queue-tab="submit" type="button">Money Requests</button>` : ""}
+        ${canSubmit ? `<button class="${activeTab === "submit" ? "active" : ""}" data-money-queue-tab="submit" type="button">Money Requests</button><button class="${activeTab === "myRequests" ? "active" : ""}" data-money-queue-tab="myRequests" type="button">My Requests</button>` : ""}
         ${canApproveDoso ? `<button class="${activeTab === "pendingDoso" ? "active" : ""}" data-money-queue-tab="pendingDoso" type="button">Pending DOSO Approval</button>` : ""}
         ${canApproveOwner ? `<button class="${activeTab === "pendingOwner" ? "active" : ""}" data-money-queue-tab="pendingOwner" type="button">Pending Owner Approval</button>` : ""}
         ${canApproveOwner ? `<button class="${activeTab === "finalApproved" ? "active" : ""}" data-money-queue-tab="finalApproved" type="button">Approved</button>` : ""}
@@ -1736,6 +1905,7 @@ function renderMoneyRequestsTool() {
         </form>
       ` : ""}
 
+      ${activeTab === "myRequests" && canSubmit ? renderMyMoneyRequests() : ""}
       ${activeTab === "pendingDoso" ? renderMoneyRequestQueue("pendingDoso", canApproveDoso, canApproveOwner) : ""}
       ${activeTab === "pendingOwner" ? renderMoneyRequestQueue("pendingOwner", canApproveDoso, canApproveOwner) : ""}
       ${activeTab === "finalApproved" ? renderMoneyRequestQueue("finalApproved", canApproveDoso, canApproveOwner) : ""}
@@ -2191,10 +2361,15 @@ function renderModal() {
   if (state.modal.type === "login") {
     const u = state.modal.user;
     return `
-      <div class="modal-backdrop"><form class="modal card" id="loginForm">
+      <div class="modal-backdrop"><form class="modal card" id="loginForm" autocomplete="off">
         <h2>${u.firstName} ${u.lastName}</h2>
         <p class="helper">${u.passwordSet ? "Enter your password." : "Enter your 4-digit PIN."}</p>
-        ${passwordFieldHtml("credential", u.passwordSet ? "Password" : "PIN", { autocomplete: u.passwordSet ? "current-password" : "one-time-code", inputmode: u.passwordSet ? "text" : "numeric", maxlength: u.passwordSet ? "99" : "4" })}
+        ${passwordFieldHtml("credential", u.passwordSet ? "Password" : "PIN", { autocomplete: u.passwordSet ? "new-password" : "one-time-code", inputmode: u.passwordSet ? "text" : "numeric", maxlength: u.passwordSet ? "99" : "4" })}
+        <label class="stay-login-toggle">
+          <input type="checkbox" name="stayLoggedIn" ${getStayLoggedInPreference() ? "checked" : ""} />
+          <span class="stay-switch" aria-hidden="true"></span>
+          <span class="stay-text">Stay logged in on this device</span>
+        </label>
         ${modalErrorHtml()}
         <div class="actions"><button>Login</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
       </form></div>`;
@@ -2203,10 +2378,15 @@ function renderModal() {
   if (state.modal.type === "adminPasswordLogin") {
     const u = state.modal.user;
     return `
-      <div class="modal-backdrop"><form class="modal card" id="adminPasswordLoginForm">
+      <div class="modal-backdrop"><form class="modal card" id="adminPasswordLoginForm" autocomplete="off">
         <h2>Admin / Leader Login</h2>
         <p class="helper">Logging in as <strong>${u.firstName} ${u.lastName}</strong>.</p>
-        ${passwordFieldHtml("password", "Password")}
+        ${passwordFieldHtml("password", "Password", { autocomplete: "new-password" })}
+        <label class="stay-login-toggle">
+          <input type="checkbox" name="stayLoggedIn" ${getStayLoggedInPreference() ? "checked" : ""} />
+          <span class="stay-switch" aria-hidden="true"></span>
+          <span class="stay-text">Stay logged in on this device</span>
+        </label>
         ${modalErrorHtml()}
         <div class="actions"><button>Log In</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
       </form></div>`;
@@ -2216,7 +2396,7 @@ function renderModal() {
     const count = state.modal.ids?.length || 0;
     const label = state.modal.stage === "pendingDoso" ? "DOSO approval" : "Owner approval";
     return `
-      <div class="modal-backdrop"><form class="modal card" id="approvalPasswordForm">
+      <div class="modal-backdrop"><form class="modal card" id="approvalPasswordForm" autocomplete="off">
         <h2>Confirm ${label}</h2>
         <p class="helper">Enter your password once to approve ${count} request${count === 1 ? "" : "s"}.</p>
         ${passwordFieldHtml("password", "Password")}
@@ -2225,9 +2405,38 @@ function renderModal() {
       </form></div>`;
   }
 
+  if (state.modal.type === "selfDosoApproval") {
+    const count = state.modal.ids?.length || 1;
+    return `
+      <div class="modal-backdrop"><form class="modal card" id="selfDosoApprovalForm" autocomplete="off">
+        <h2>Approve your request?</h2>
+        <p class="helper">As the DOSO of this school, you can automatically approve your own request. Please type in your password to approve this request.</p>
+        ${passwordFieldHtml("password", "Password", { autocomplete: "new-password" })}
+        ${modalErrorHtml()}
+        <div class="actions"><button>Approve ${count}</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+      </form></div>`;
+  }
+
+  if (state.modal.type === "editDeniedMoneyRequest") {
+    return renderEditDeniedMoneyRequestModal(state.modal.request);
+  }
+
+  if (state.modal.type === "denyMoneyRequest") {
+    return `
+      <div class="modal-backdrop"><form class="modal card" id="denyMoneyRequestForm">
+        <h2>Deny request</h2>
+        <p class="helper">Add a note so the leader knows what to change before resubmitting.</p>
+        <label>Reason
+          <textarea name="denialNote" required placeholder="What needs to be fixed?"></textarea>
+        </label>
+        ${modalErrorHtml()}
+        <div class="actions"><button class="danger">Deny Request</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+      </form></div>`;
+  }
+
   if (state.modal.type === "nukeMoneyRequests") {
     return `
-      <div class="modal-backdrop"><form class="modal card" id="nukeMoneyRequestsForm">
+      <div class="modal-backdrop"><form class="modal card" id="nukeMoneyRequestsForm" autocomplete="off">
         <h2>Nuke all money requests?</h2>
         <p class="helper">This will delete every money request. Enter your password to confirm.</p>
         ${passwordFieldHtml("password", "Password")}
@@ -2459,11 +2668,13 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
 }
 
 
-async function adminLeaderLogin(user, password) {
+async function adminLeaderLogin(user, password, stayLoggedIn = false) {
   if (!user?.fakeEmail) {
     throw new Error("This user does not have a fakeEmail saved in Firestore.");
   }
 
+  await applyLoginPersistence(stayLoggedIn);
+  setStayLoggedInPreference(stayLoggedIn);
   const cred = await signInWithEmailAndPassword(auth, user.fakeEmail, password);
   const snap = await getDoc(doc(db, "users", cred.user.uid));
 
@@ -2615,6 +2826,9 @@ $app.addEventListener("click", async (e) => {
   const dosoApproveMoneyRequestId = e.target.closest("[data-doso-approve-money-request]")?.dataset.dosoApproveMoneyRequest;
   const ownerApproveMoneyRequestId = e.target.closest("[data-owner-approve-money-request]")?.dataset.ownerApproveMoneyRequest;
   const bulkMoneyApprove = e.target.closest("[data-bulk-money-approve]")?.dataset.bulkMoneyApprove;
+  const denyMoneyRequestId = e.target.closest("[data-deny-money-request]")?.dataset.denyMoneyRequest;
+  const denyStage = e.target.closest("[data-deny-stage]")?.dataset.denyStage;
+  const editDeniedMoneyRequestId = e.target.closest("[data-edit-denied-money-request]")?.dataset.editDeniedMoneyRequest;
   const bookmarkToolId = e.target.closest("[data-bookmark-tool]")?.dataset.bookmarkTool;
   const hideToolId = e.target.closest("[data-hide-tool]")?.dataset.hideTool;
   const restoreToolId = e.target.closest("[data-restore-tool]")?.dataset.restoreTool;
@@ -2643,12 +2857,14 @@ $app.addEventListener("click", async (e) => {
   }
   if (e.target.closest("[data-toggle-theme]")) { await withAppLoading("Switching theme...", async () => { toggleThemePreference(); renderCurrentView(); }); return; }
   if (e.target.closest("[data-toggle-notifications]")) { await withAppLoading("Opening notifications...", async () => { state.notificationsOpen = !state.notificationsOpen; renderCurrentView(); }); return; }
+  if (e.target.closest("[data-clear-notifications]")) { await withAppLoading("Clearing notifications...", async () => { await Promise.all(state.notifications.map(n => updateDoc(doc(db, "notifications", n.id), { read: true, cleared: true }))); state.notificationsOpen = false; await loadNotifications(); renderCurrentView(); }); return; }
   const openNotificationId = e.target.closest("[data-open-notification]")?.dataset.openNotification;
   if (openNotificationId) {
     await updateDoc(doc(db, "notifications", openNotificationId), { read: true });
-    await loadNotifications();
     const n = state.notifications.find(x => x.id === openNotificationId);
-    if (n?.toolKey === "moneyRequests") renderMoneyRequestsTool(); else renderCurrentView();
+    state.notificationsOpen = false;
+    await loadNotifications();
+    if (n?.toolKey === "moneyRequests") { state.moneyRequestsTab = getNotificationTargetTab(n); renderMoneyRequestsTool(); } else renderCurrentView();
     return;
   }
   if (saveToolConfigKey) { await withAppLoading("Saving tool settings...", async () => { await saveToolConfig(saveToolConfigKey); renderSystemAdmin(); }); return; }
@@ -2755,6 +2971,19 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (denyMoneyRequestId) {
+    state.modal = { type: "denyMoneyRequest", requestId: denyMoneyRequestId, stage: denyStage || "pendingDoso", error: "" };
+    renderMoneyRequestsTool();
+    return;
+  }
+
+  if (editDeniedMoneyRequestId) {
+    const request = state.moneyRequests.find(r => r.id === editDeniedMoneyRequestId);
+    state.modal = { type: "editDeniedMoneyRequest", request, error: "" };
+    renderMoneyRequestsTool();
+    return;
+  }
+
   if (dosoApproveMoneyRequestId) { await withAppLoading("Opening approval...", async () => { await approveMoneyRequests([dosoApproveMoneyRequestId], "pendingDoso"); }); return; }
 
   if (ownerApproveMoneyRequestId) { await withAppLoading("Opening approval...", async () => { await approveMoneyRequests([ownerApproveMoneyRequestId], "pendingOwner"); }); return; }
@@ -2799,7 +3028,11 @@ $app.addEventListener("click", async (e) => {
   if (e.target.closest("[data-remove-money-line]")) {
     const line = e.target.closest(".money-request-line");
     const section = e.target.closest("[data-money-request-section]");
+    const previousLine = line?.previousElementSibling?.classList?.contains("money-request-line") ? line.previousElementSibling : null;
     line?.remove();
+    if (previousLine && !previousLine.nextElementSibling) {
+      previousLine.dataset.addLineUsed = "false";
+    }
     if (section && !section.querySelector(".money-request-line")) {
       const typeId = section.dataset.moneyRequestSection;
       section.remove();
@@ -3095,10 +3328,12 @@ $app.addEventListener("submit", async (e) => {
   showAppLoading(form.id === "loginForm" ? "Logging in..." : "Saving...");
   try {
     await new Promise(resolve => requestAnimationFrame(resolve));
-    if (form.id === "adminPasswordLoginForm") { await adminLeaderLogin(state.modal.user, form.password.value); hideAppLoading(); return; }
-    if (form.id === "approvalPasswordForm") { await completeApprovalPassword(form.password.value); hideAppLoading(); return; }
+    if (form.id === "adminPasswordLoginForm") { await adminLeaderLogin(state.modal.user, form.password.value, !!form.stayLoggedIn?.checked); hideAppLoading(); return; }
+    if (form.id === "approvalPasswordForm" || form.id === "selfDosoApprovalForm") { await completeApprovalPassword(form.password.value); hideAppLoading(); return; }
     if (form.id === "nukeMoneyRequestsForm") { await completeNukeMoneyRequests(form.password.value); hideAppLoading(); return; }
-    if (form.id === "loginForm") await loginUser(state.modal.user, form.credential.value.trim());
+    if (form.id === "denyMoneyRequestForm") { await denyMoneyRequest(state.modal.requestId, state.modal.stage, form.denialNote.value.trim()); hideAppLoading(); return; }
+    if (form.id === "editDeniedMoneyRequestForm") { await saveEditedDeniedMoneyRequest(form); hideAppLoading(); return; }
+    if (form.id === "loginForm") await loginUser(state.modal.user, form.credential.value.trim(), !!form.stayLoggedIn?.checked);
     if (form.id === "passwordSetupForm") await saveNewPassword(form.password.value);
     if (form.id === "pinChangeForm") await saveNewPin(form.pin.value.trim());
     if (form.id === "schoolForm") { await addSchool(form); await refreshAdminData(); renderSystemAdmin(); }
@@ -3120,7 +3355,7 @@ $app.addEventListener("submit", async (e) => {
   } catch (err) {
     hideAppLoading();
     console.error(err);
-    const isPasswordForm = ["loginForm", "adminPasswordLoginForm", "approvalPasswordForm", "nukeMoneyRequestsForm", "passwordSetupForm"].includes(form.id);
+    const isPasswordForm = ["loginForm", "adminPasswordLoginForm", "approvalPasswordForm", "selfDosoApprovalForm", "nukeMoneyRequestsForm", "passwordSetupForm"].includes(form.id);
     const code = err?.code || "";
     if (isPasswordForm && (code.includes("wrong-password") || code.includes("invalid-credential") || code.includes("invalid-login-credentials") || code.includes("too-many-requests"))) {
       state.modal = { ...state.modal, error: code.includes("too-many-requests") ? "Too many attempts. Please wait a minute and try again." : "Incorrect password." };
