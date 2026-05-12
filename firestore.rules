@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // TEMPORARY DEVELOPMENT RULES.
+    // Use only while building locally. Replace with locked-down rules before publishing.
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
