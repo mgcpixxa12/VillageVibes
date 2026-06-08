@@ -179,3 +179,6 @@ The bootstrap marker can only be created once by the Firestore rules.
 - Leadership access now works for `lead`, `leader`, `owner`, `admin`, and `systemAdmin`.
 - Password setup gate now also checks `passwordRequired` on the user document.
 - Console should show `v20-lead-role-fix`.
+
+
+Version v97: clean slot persistence fallback for Village Voice drag/drop layout.

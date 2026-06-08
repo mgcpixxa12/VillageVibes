@@ -25,7 +25,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-console.log("VILLAGE VIBES PHASE 1 VERSION: v54-login-stay-slider");
+console.log("VILLAGE VIBES PHASE 1 VERSION: v119-budget-code-delete-in-modal");
 const DEV_MODE = false;
 
 // Firebase config is already filled in for this project.
@@ -50,6 +50,11 @@ const RECENT_USERS_KEY = "villageVibesRecentLoginUsers";
 const TOOL_PREFS_KEY = "villageVibesToolPrefs";
 const THEME_PREF_KEY = "villageVibesTheme";
 const STAY_LOGGED_IN_KEY = "villageVibesStayLoggedIn";
+const VILLAGE_VOICE_SESSION_KEY = "villageVibesVillageVoiceUnsavedSession";
+const VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY = "villageVoiceExplicitSlotLayoutV97";
+const LETTERLAND_SPRITE_LOCAL_PREFIX = "local:letterlandSprite:";
+const LETTERLAND_SPRITE_LOCAL_INDEX_KEY = "villageVibesLetterlandSpriteIndex";
+const LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES = 900000;
 
 function readLocalJson(key, fallback) {
   try {
@@ -64,6 +69,56 @@ function writeLocalJson(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (err) {}
+}
+
+
+function makeTinyHash(text = "") {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function storeLetterlandSpriteLocally(dataUrl = "") {
+  if (!dataUrl) return "";
+  const id = `${Date.now().toString(36)}_${makeTinyHash(dataUrl).slice(0, 8)}`;
+  const key = `${LETTERLAND_SPRITE_LOCAL_PREFIX}${id}`;
+  window.__vvLetterlandSpriteSheet = dataUrl;
+  try {
+    localStorage.setItem(key, dataUrl);
+    const index = readLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, []);
+    index.unshift({ key, savedAt: new Date().toISOString(), bytes: dataUrl.length });
+    writeLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, index.slice(0, 8));
+    return key;
+  } catch (err) {
+    console.warn("Could not store Letterland sprite sheet locally.", err);
+    return "__LETTERLAND_RUNTIME_ONLY__";
+  }
+}
+
+function resolveLetterlandSpriteSheet(value = "") {
+  const raw = String(value || "");
+  if (!raw) return "";
+  if (raw === "__LETTERLAND_RUNTIME_ONLY__") return window.__vvLetterlandSpriteSheet || "";
+  if (raw.startsWith(LETTERLAND_SPRITE_LOCAL_PREFIX)) {
+    try { return localStorage.getItem(raw) || window.__vvLetterlandSpriteSheet || ""; } catch (err) { return window.__vvLetterlandSpriteSheet || ""; }
+  }
+  return raw;
+}
+
+function getLetterlandSpriteSheetRefFromForm(form) {
+  const realForm = form || getWeeklyThemesForm();
+  const field = realForm?.querySelector('[name="letterlandSpriteSheet"]');
+  const raw = field?.value || "";
+  if (raw && raw.length > LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES) {
+    storeLetterlandSpriteLocally(raw);
+    if (field) field.value = "__LETTERLAND_RUNTIME_ONLY__";
+    window.__vvLetterlandSpriteSheet = raw;
+    return "__LETTERLAND_RUNTIME_ONLY__";
+  }
+  return raw;
 }
 
 function getThemePreference() {
@@ -99,12 +154,15 @@ function getToolPrefs() {
   return readLocalJson(TOOL_PREFS_KEY, { order: [], bookmarks: [], hidden: [] });
 }
 function saveToolPrefs(prefs) { writeLocalJson(TOOL_PREFS_KEY, prefs); }
+function getCampusCaresOpenPreference() { return getToolPrefs().campusCaresOpenMode || "submitPopup"; }
+function setCampusCaresOpenPreference(mode) { const prefs=getToolPrefs(); prefs.campusCaresOpenMode=mode; saveToolPrefs(prefs); }
 function isToolBookmarked(toolId) { return (getToolPrefs().bookmarks || []).includes(toolId); }
 function isToolHidden(toolId) { return (getToolPrefs().hidden || []).includes(toolId); }
 function getToolConfig(toolKey) { return state.appTools.find(t => t.key === toolKey) || {}; }
 function getToolDisplay(tool) {
   const cfg = getToolConfig(tool.id);
-  return { ...tool, title: cfg.name || tool.title, desc: cfg.description || tool.desc, imageData: cfg.imageData || "" };
+  const safeName = tool.id === "villageVoice" && (!cfg.name || cfg.name === "Village Voice" || cfg.name === "The Village Voice") ? "Printables" : (cfg.name || tool.title);
+  return { ...tool, title: safeName, desc: cfg.description || tool.desc, imageData: cfg.imageData || "" };
 }
 function orderToolsForHome(tools) {
   const prefs = getToolPrefs();
@@ -120,8 +178,10 @@ function renderToolTile(tool, extraClass = "") {
       <h3>${t.title}</h3>
     </button>
     <div class="tool-tile-controls">
+      ${t.id === "campusCares" ? `<button class="mini-icon-button" type="button" title="Campus Cares open setting" data-campus-open-menu>⋯</button>` : ""}
       <button class="mini-icon-button" type="button" title="Bookmark" data-bookmark-tool="${t.id}">${bookmarked ? "★" : "☆"}</button>
       <button class="mini-icon-button" type="button" title="Hide" data-hide-tool="${t.id}">×</button>
+      ${t.id === "campusCares" ? `<div class="tool-tile-menu" data-campus-open-menu-panel><strong>Open Campus Cares to:</strong><button type="button" data-campus-open-mode="submitPopup">Submit Request popup</button><button type="button" data-campus-open-mode="tool">Open the tool</button><button type="button" data-campus-open-mode="submitted">View Your Submissions</button></div>` : ""}
     </div>
   </div>`;
 }
@@ -212,6 +272,43 @@ const PERMISSION_TOOLS = [
         description: "Can see owner-approved requests and add receipt photos and receipt line details."
       }
     ]
+  },
+  {
+    key: "campusCares",
+    name: "Campus Cares",
+    permissions: [
+      { key: "submit", label: "Submit Campus Care Requests", description: "Can submit campus care tasks and see their own submitted tasks." },
+      { key: "assigned", label: "Tasks Assigned To Me", description: "Can see tasks assigned directly to them." },
+      { key: "viewAll", label: "All Tasks Read Only", description: "Can see all active tasks for their assigned school location(s), but cannot manage them." },
+      { key: "manage", label: "Manage Campus Care Tasks", description: "Can see all tasks, update statuses, add leader notes, and assign tasks to leaders/owners." }
+    ]
+  },
+  {
+    key: "notifications",
+    name: "Notifications",
+    permissions: [
+      { key: "campusOwnStatus", label: "Campus Cares: My Request Status Updates", description: "Can turn on alerts when status updates are added to their own submitted tasks." },
+      { key: "campusAssigned", label: "Campus Cares: Tasks Assigned To Me", description: "Can turn on alerts when a Campus Cares task is assigned to them." },
+      { key: "campusNotes", label: "Campus Cares: Notes On Visible Tasks", description: "Can turn on alerts when leader notes are added to tasks they can see." },
+      { key: "campusSchoolSubmitted", label: "Campus Cares: New School Requests", description: "Can turn on alerts when any Campus Cares task is submitted for their assigned school location(s)." },
+      { key: "moneyRequests", label: "Money Requests Notifications", description: "Can turn on alerts for Money Request activity they are allowed to see." }
+    ]
+  },
+  {
+    key: "villageVoice",
+    name: "Printables",
+    permissions: [
+      {
+        key: "editFlyer",
+        label: "Edit Printables",
+        description: "Can open Printables and edit printable items like Village Voice, Teacher Bio, Door Reminders, and Illness Notice."
+      },
+      {
+        key: "arrangeFlyer",
+        label: "Arrange Printable Layouts",
+        description: "Can drag printable blocks into full-width or side-by-side layouts."
+      }
+    ]
   }
 ];
 
@@ -224,7 +321,7 @@ function collectRolePermissions(form) {
 
   PERMISSION_TOOLS.forEach(tool => {
     permissions[tool.key] = {};
-    tool.permissions.forEach(permission => {
+    (tool?.permissions || []).forEach(permission => {
       const enabledInput = form.querySelector(`[name="perm__${tool.key}__${permission.key}"]`);
       const positionInputs = Array.from(form.querySelectorAll(`[name="pos__${tool.key}__${permission.key}"]:checked`));
 
@@ -252,9 +349,26 @@ let state = {
   roles: [],
   moneyRequestTypes: [],
   moneyRequests: [],
+  campusCareLocations: [],
+  campusCareStatuses: [],
+  campusCareTasks: [],
+  campusCareDiscussions: [],
   budgetCodes: [],
+  importantDates: [],
+  weeklyThemes: [],
+  weeklyThemesDraftImages: {},
+  weeklyThemesDraftTiles: {},
+  certificates: [],
+  appSettings: {},
   appTools: [],
   notifications: [],
+  villageVoiceDraft: null,
+  printableDrafts: {},
+  illnessNoticeTemplates: [],
+  printableTab: "villageVoice",
+  villageVoiceSelectedMonth: String(new Date().getMonth() + 1).padStart(2, "0"),
+  expandedVillageVoiceEditorId: "",
+  editingImportantDateId: "",
   homeToolSearch: "",
   toolAdminTab: "moneyRequests",
   selectedMoneyApprovalIds: [],
@@ -263,6 +377,9 @@ let state = {
   leadershipTab: "users",
   ownerTab: "budgetCodes",
   moneyRequestsTab: "submit",
+  campusCaresTab: "submit",
+  expandedCampusCareId: "",
+  activeCampusDiscussionId: "",
   expandedMoneyRequestId: "",
   expandedPermissionToolKey: "moneyRequests",
   expandedHomeToolKey: "moneyRequests",
@@ -364,6 +481,14 @@ function getPermissionUser(user = state.session) {
   };
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[ch] || ch));
+}
+
+function getUserUsedName(user) {
+  return (user?.usedName || user?.displayName || `${user?.firstName || ""} ${user?.lastName || ""}`).trim();
+}
+
 function showToast(message) {
   state.toast = message;
   renderCurrentView();
@@ -406,6 +531,7 @@ async function loadRoster() {
 
 async function refreshLandingData() {
   await loadSchools();
+  await loadAppSettings();
   await loadRoster();
 }
 
@@ -415,6 +541,7 @@ async function loadAllUsers() {
   state.users = snap.docs
     .map(d => ({ uid: d.id, ...d.data() }))
     .filter(u => u.active !== false)
+    .filter(u => userSchoolMatchesScope(u.schoolIds || (u.schoolId ? [u.schoolId] : []), state.session))
     .sort(byName);
 }
 
@@ -425,9 +552,19 @@ async function refreshAdminData() {
   await loadRoles();
   await loadMoneyRequestTypes();
   await loadMoneyRequests();
+  await loadCampusCaresAdmin();
+  await loadCampusCareTasks();
+  await loadCampusCareDiscussions();
   await loadBudgetCodes();
+  await loadImportantDates();
+  await loadWeeklyThemes();
+  await loadCertificates();
+  await loadAppSettings();
   await loadAppTools();
   await loadNotifications();
+  await loadVillageVoiceDraft();
+  await loadPrintableDrafts();
+  await loadIllnessNoticeTemplates();
 }
 
 async function refreshMoneyRequestsData() {
@@ -436,6 +573,9 @@ async function refreshMoneyRequestsData() {
   await Promise.all([
     loadMoneyRequestTypes(),
     loadMoneyRequests(),
+    loadCampusCaresAdmin(),
+    loadCampusCareTasks(),
+    loadCampusCareDiscussions(),
     loadBudgetCodes(),
     loadNotifications()
   ]);
@@ -505,11 +645,396 @@ async function loadMoneyRequests() {
     });
 }
 
+async function loadCampusCaresAdmin() {
+  const [locSnap, statusSnap] = await Promise.all([
+    getDocs(collection(db, "campusCareLocations")),
+    getDocs(collection(db, "campusCareStatuses"))
+  ]);
+  state.campusCareLocations = locSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(x => x.active !== false).sort((a,b)=>String(a.building||"").localeCompare(String(b.building||"")));
+  state.campusCareStatuses = statusSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(x => x.active !== false).sort((a,b)=>(a.sortOrder||0)-(b.sortOrder||0) || String(a.name||"").localeCompare(String(b.name||"")));
+}
+
+async function loadCampusCareTasks() {
+  const snap = await getDocs(collection(db, "campusCareTasks"));
+  state.campusCareTasks = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b)=>{
+    const at = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (a.createdAt?.toMillis ? a.createdAt.toMillis() : 0);
+    const bt = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (b.createdAt?.toMillis ? b.createdAt.toMillis() : 0);
+    return bt-at;
+  });
+}
+
+async function loadCampusCareDiscussions() {
+  const snap = await getDocs(collection(db, "campusCareDiscussions"));
+  state.campusCareDiscussions = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b)=>{
+    const at = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (a.createdAt?.toMillis ? a.createdAt.toMillis() : 0);
+    const bt = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (b.createdAt?.toMillis ? b.createdAt.toMillis() : 0);
+    return bt-at;
+  });
+}
+
+function getDefaultCampusCareStatus() {
+  return { id: "", name: "", color: "" };
+}
+function getCampusStatus(id) { return state.campusCareStatuses.find(s => s.id === id) || getDefaultCampusCareStatus(); }
+function isCampusCompleted(task) { return !!task.statusId && /completed|complete|done/i.test(getCampusStatus(task.statusId).name || task.statusName || ""); }
+function campusTaskInUserScope(task, user = state.session) { return userSchoolMatchesScope(task.schoolIds || (task.schoolId ? [task.schoolId] : []), user); }
+function campusDate(value) { try { const d=value?.toDate?value.toDate():new Date(value||Date.now()); return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${String(d.getFullYear()).slice(-2)}`; } catch(err){ return ""; } }
+function campusTime(value) { try { const d=value?.toDate?value.toDate():new Date(value||Date.now()); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); } catch(err){ return ""; } }
+function campusShortStamp(value) { try { const d=value?.toDate?value.toDate():new Date(value||Date.now()); return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }).toLowerCase()}`; } catch(err){ return ""; } }
+function campusDiscussionInUserScope(d, user = state.session) { return userSchoolMatchesScope(d.schoolIds || (d.schoolId ? [d.schoolId] : []), user); }
+function activeCampusDiscussions() { return state.campusCareDiscussions.filter(d=>d.active!==false && !d.removedAt && campusDiscussionInUserScope(d)); }
+function campusNoteList(list=[]) { return [...list].sort((a,b)=>new Date(a.at||0)-new Date(b.at||0)); }
+function notificationSettingEnabled(user, key) { const settings=user?.notificationSettings||{}; return settings[key] === true; }
+function notificationAllowedForUser(user, key) { return hasToolPermission(user, "notifications", key) || hasFullDevAccess(user); }
+function usersAllowedForNotification(key, schoolIds=[]) { return state.users.filter(u => u.active !== false && notificationAllowedForUser(u, key) && notificationSettingEnabled(u, key) && userSchoolMatchesScope(schoolIds, u)); }
+function campusTaskSchoolIds(taskOrFormLoc) { return taskOrFormLoc?.schoolIds || (taskOrFormLoc?.schoolId ? [taskOrFormLoc.schoolId] : getUserSchoolIds(state.session)); }
+async function createNotificationsForUsers(users, payload) {
+  const unique = [...new Map(users.filter(Boolean).map(u => [u.uid, u])).values()];
+  await Promise.all(unique.map(u => createNotification({ ...payload, toUids: [u.uid] }).catch(()=>{})));
+}
+function campusLeaderUsers() { return state.users.filter(u => getRosterGroup(u) === "leaders" && u.active !== false && userSchoolMatchesScope(u.schoolIds || (u.schoolId ? [u.schoolId] : []), state.session)).sort(byName); }
+async function refreshCampusCaresData() { await Promise.all([loadAllUsers(), loadCampusCaresAdmin(), loadCampusCareTasks(), loadCampusCareDiscussions()]); }
+
+
+async function loadImportantDates() {
+  try {
+    const snap = await getDocs(collection(db, "importantDates"));
+    state.importantDates = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+  } catch (err) { state.importantDates = []; }
+}
+
+async function loadWeeklyThemes() {
+  try {
+    const snap = await getDocs(collection(db, "weeklyThemes"));
+    state.weeklyThemes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (err) { state.weeklyThemes = []; }
+}
+
+
+async function loadCertificates() {
+  try {
+    const snap = await getDocs(collection(db, "certificates"));
+    state.certificates = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(c => c.active !== false)
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  } catch (err) { state.certificates = []; }
+}
+
+function normalizeEducationList(value) {
+  if (Array.isArray(value)) return value.map(item => ({ level: item.level || "", field: item.field || "", certificate: item.certificate || "" })).filter(item => item.level || item.field || item.certificate);
+  if (typeof value === "string" && value.trim()) return [{ level: "", field: value.trim(), certificate: "" }];
+  return [];
+}
+
+function educationDisplayText(item) {
+  if (!item) return "";
+  if (item.level === "Certificate") return item.certificate || item.field || "Certificate";
+  const level = item.level || "Education";
+  const field = item.field || "";
+  return field ? `${level} in ${field}` : level;
+}
+
+function collectEducationEntries(form) {
+  return Array.from(form.querySelectorAll("[data-education-row]")).map(row => ({
+    level: row.querySelector('[name="educationLevel"]')?.value || "",
+    field: row.querySelector('[name="educationField"]')?.value?.trim() || "",
+    certificate: row.querySelector('[name="educationCertificate"]')?.value || ""
+  })).filter(item => item.level || item.field || item.certificate);
+}
+
+function renderEducationBuilder(user = {}) {
+  const items = normalizeEducationList(user.educationList || user.education);
+  const rows = items.length ? items : [{ level: "", field: "", certificate: "" }];
+  return `<div class="education-builder" data-education-builder>
+    <label class="field-label">Education / Certificates</label>
+    <div data-education-rows>${rows.map(renderEducationRow).join("")}</div>
+    <button type="button" class="secondary small" data-add-education-row>+ Add another education item</button>
+  </div>`;
+}
+
+function renderEducationRow(item = {}) {
+  const levels = ["", "High School Diploma", "Certificate", "Associate Degree", "Bachelor's Degree", "Master's Degree", "Doctorate", "Other"];
+  const certs = state.certificates || [];
+  const isCert = item.level === "Certificate";
+  return `<div class="education-row" data-education-row>
+    <select name="educationLevel" data-education-level title="${escapeHtml(item.level || "Select level...")}">
+      ${levels.map(l => `<option value="${escapeHtml(l)}" ${item.level === l ? "selected" : ""}>${l || "Select level..."}</option>`).join("")}
+    </select>
+    <span class="education-in ${isCert ? "hidden" : ""}">in</span>
+    <input name="educationField" class="${isCert ? "hidden" : ""}" value="${escapeHtml(item.field || "")}" placeholder="Early Childhood Education" />
+    <select name="educationCertificate" data-education-certificate class="${isCert ? "" : "hidden"}" title="${escapeHtml(item.certificate || "Select certificate...")}">
+      <option value="">Select certificate...</option>
+      ${certs.map(c => `<option value="${escapeHtml(c.name || "")}" ${item.certificate === c.name ? "selected" : ""}>${escapeHtml(c.name || "")}</option>`).join("")}
+    </select>
+    <button type="button" class="secondary small education-remove-btn" data-remove-education-row>Remove</button>
+  </div>`;
+}
+
+function refreshEducationCertificateOptions(scope = document) {
+  const builder = scope.closest?.("[data-education-builder]") || scope.querySelector?.("[data-education-builder]") || document.querySelector("[data-education-builder]");
+  if (!builder) return;
+  const selects = Array.from(builder.querySelectorAll('[name="educationCertificate"]'));
+  const selected = selects.map(sel => sel.value).filter(Boolean);
+  selects.forEach(sel => {
+    Array.from(sel.options).forEach(opt => {
+      if (!opt.value) return;
+      const usedElsewhere = selected.includes(opt.value) && sel.value !== opt.value;
+      opt.disabled = usedElsewhere;
+      opt.hidden = usedElsewhere;
+      opt.style.display = usedElsewhere ? "none" : "";
+    });
+    sel.title = sel.value || "Select certificate...";
+  });
+  builder.querySelectorAll('[name="educationLevel"]').forEach(sel => { sel.title = sel.value || "Select level..."; });
+}
+
+function getWeeklyThemeSettings() {
+  return state.weeklyThemes.find(t => t.id === "current") || { id: "current", startingDate: "", themes: {} };
+}
+
+function getWeeklyThemeField(settings, fieldName, week) {
+  return ((settings && settings[fieldName]) || {})[String(week)] || "";
+}
+
+function setWeeklyThemeField(bucket, week, value) {
+  bucket[String(week)] = String(value || "").trim();
+}
+
+function normalizeCurriculumImportPayload(payload) {
+  const rawWeeks = Array.isArray(payload?.weeks) ? payload.weeks : Array.isArray(payload) ? payload : [];
+  return rawWeeks.map((item, index) => {
+    const weekNumber = Number(item.weekNumber || item.week || item.globalWeek || index + 1);
+    return {
+      weekNumber: Number.isFinite(weekNumber) && weekNumber > 0 ? weekNumber : index + 1,
+      dateRange: item.dateRange || item.dates || "",
+      month: item.month || "",
+      monthNumber: item.monthNumber || "",
+      weekOfMonth: item.weekOfMonth || "",
+      label: item.label || item.monthWeek || "",
+      theme: item.theme || "",
+      letterland: item.letterland || item.letterlandConcentration || "",
+      seedlingsValue: item.seedlingsValue || item.seedlingsValues || "",
+      ideasEvents: item.ideasEvents || item.ideas || item.events || item.additionalEvents || ""
+    };
+  }).filter(item => item.weekNumber >= 1 && item.weekNumber <= 60);
+}
+
+function addDaysToIsoDate(dateText, days) {
+  if (!dateText) return "";
+  const d = new Date(`${dateText}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0,10);
+}
+
+function formatShortDate(dateText) {
+  if (!dateText) return "";
+  const d = new Date(`${dateText}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return dateText;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function dateIsInMonth(dateText, monthValue, endDateText = "") {
+  if (!dateText) return false;
+  const month = Number(monthValue || 1);
+  const start = new Date(`${dateText}T12:00:00`);
+  if (Number.isNaN(start.getTime())) return false;
+  const end = endDateText ? new Date(`${endDateText}T12:00:00`) : start;
+  const safeEnd = Number.isNaN(end.getTime()) ? start : end;
+  const monthStart = new Date(start.getFullYear(), month - 1, 1, 12, 0, 0);
+  const monthEnd = new Date(start.getFullYear(), month, 0, 12, 0, 0);
+  if (start.getFullYear() !== monthStart.getFullYear() && safeEnd.getFullYear() !== monthStart.getFullYear()) return false;
+  return start <= monthEnd && safeEnd >= monthStart;
+}
+
+function importantDateDisplayDate(item) {
+  return item?.dateLabel || (item?.endDate ? `${formatShortDate(item.date)}-${formatShortDate(item.endDate)}` : formatShortDate(item?.date));
+}
+
+function birthdayDateForDisplay(birthday) {
+  if (!birthday) return "";
+  const parts = String(birthday).split("-");
+  if (parts.length < 3) return "";
+  const y = new Date().getFullYear();
+  return `${y}-${parts[1]}-${parts[2]}`;
+}
+
+function getAutoBirthdayImportantDates() {
+  return (state.users || []).filter(u => u.birthday).map(u => ({
+    id: `birthday_${u.uid}`,
+    date: birthdayDateForDisplay(u.birthday),
+    description: `${getUserUsedName(u)} Birthday`,
+    autoBirthday: true
+  })).filter(item => item.date);
+}
+
+function getAllImportantDateItems() {
+  return [...(state.importantDates || []), ...getAutoBirthdayImportantDates()]
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+}
+
+function renderImportantDatesLines(monthValue) {
+  const items = getAllImportantDateItems().filter(item => dateIsInMonth(item.date, monthValue, item.endDate));
+  return items.map(item => `${importantDateDisplayDate(item)} — ${item.description || ""}`.trim()).filter(Boolean);
+}
+
+function getVillageVoiceMonthWeeks(monthValue) {
+  const settings = getWeeklyThemeSettings();
+  const start = settings.startingDate || "";
+  const weeks = [];
+  for (let i = 1; i <= 52; i++) {
+    const weekStart = addDaysToIsoDate(start, (i - 1) * 7);
+    if (!weekStart || !dateIsInMonth(weekStart, monthValue)) continue;
+    weeks.push({ week: i, date: weekStart });
+  }
+  return weeks;
+}
+
+function renderWeeklyThemeLines(monthValue) {
+  const settings = getWeeklyThemeSettings();
+  return getVillageVoiceMonthWeeks(monthValue).map(({ week, date }) => {
+    const theme = getWeeklyThemeField(settings, "themes", week);
+    const ideas = getWeeklyThemeField(settings, "ideasEvents", week);
+    const label = getWeeklyThemeField(settings, "labels", week) || `Week ${week}`;
+    return theme ? `${label} (${formatShortDate(date)}) — ${theme}${ideas ? `\n${ideas}` : ""}` : "";
+  }).filter(Boolean);
+}
+
+function renderVillageVoiceMonthlyThemeLines(monthValue) {
+  const settings = getWeeklyThemeSettings();
+  return getVillageVoiceMonthWeeks(monthValue).map(({ week }) => {
+    const theme = getWeeklyThemeField(settings, "themes", week);
+    const weekOfMonth = getWeeklyThemeField(settings, "weekOfMonths", week);
+    const displayWeek = weekOfMonth || week;
+    return theme ? `Week ${displayWeek} – ${theme}` : "";
+  }).filter(Boolean);
+}
+
+function getVillageVoiceLetterLandItems(monthValue) {
+  const settings = getWeeklyThemeSettings();
+  const images = settings.letterImages || {};
+  const tiles = settings.letterlandSpriteTiles || {};
+  const sheet = resolveLetterlandSpriteSheet(settings.letterlandSpriteSheet || "");
+  const rows = settings.letterlandSpriteRows || 1;
+  const cols = settings.letterlandSpriteCols || 1;
+  return getVillageVoiceMonthWeeks(monthValue).slice(0, 5).map(({ week, date }) => ({
+    week,
+    date,
+    weekOfMonth: getWeeklyThemeField(settings, "weekOfMonths", week) || "",
+    letterland: getWeeklyThemeField(settings, "letterlands", week),
+    image: images[String(week)] || "",
+    spriteTile: tiles[String(week)] || "",
+    spriteSheet: sheet,
+    spriteRows: rows,
+    spriteCols: cols,
+    spriteWidth: settings.letterlandSpriteWidth || 0,
+    spriteHeight: settings.letterlandSpriteHeight || 0,
+    spriteMarginX: settings.letterlandSpriteMarginX || 0,
+    spriteMarginY: settings.letterlandSpriteMarginY || 0,
+    spriteGapX: settings.letterlandSpriteGapX || 0,
+    spriteGapY: settings.letterlandSpriteGapY || 0,
+    spriteCellW: settings.letterlandSpriteCellW || 0,
+    spriteCellH: settings.letterlandSpriteCellH || 0
+  })).filter(item => item.image || item.spriteTile || item.letterland);
+}
+
+function nextVillageVoiceMonthValue(monthValue) {
+  const n = Math.max(1, Math.min(12, Number(monthValue || 1)));
+  return String(n === 12 ? 1 : n + 1).padStart(2, "0");
+}
+
+function villageVoiceMonthName(monthValue) {
+  return new Date(2026, Number(monthValue || 1) - 1, 1).toLocaleString("en-US", { month: "long" });
+}
+
+function renderVillageVoiceSaveDateLines(monthValue, includeNextMonth = false) {
+  const lineForMonth = (m) => getAllImportantDateItems()
+    .filter(item => item.includeInVillageVoice === true)
+    .filter(item => dateIsInMonth(item.date, m))
+    .map(item => `${importantDateDisplayDate(item)} — ${item.description || ""}`.trim())
+    .filter(Boolean);
+  const currentLines = lineForMonth(monthValue);
+  if (!includeNextMonth) return currentLines;
+  const nextMonth = nextVillageVoiceMonthValue(monthValue);
+  const nextLines = lineForMonth(nextMonth);
+  if (!nextLines.length) return currentLines;
+  return [...currentLines, `${villageVoiceMonthName(nextMonth)} Dates`, ...nextLines];
+}
+
+async function loadAppSettings() {
+  try {
+    const snap = await getDoc(doc(db, "appSettings", "branding"));
+    state.appSettings = snap.exists() ? { id: snap.id, ...snap.data() } : {};
+  } catch (err) { state.appSettings = {}; }
+}
+
+async function saveBrandingSettings(form) {
+  await setDoc(doc(db, "appSettings", "branding"), {
+    ovaLogoData: form.ovaLogoData?.value || state.appSettings?.ovaLogoData || "",
+    updatedAt: serverTimestamp(),
+    updatedBy: state.session?.uid || ""
+  }, { merge: true });
+  showToast("Branding saved.");
+}
+
 async function loadAppTools() {
   try {
     const snap = await getDocs(collection(db, "appTools"));
     state.appTools = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (err) { state.appTools = []; }
+}
+
+async function loadVillageVoiceDraft() {
+  try {
+    const snap = await getDoc(doc(db, "villageVoice", "current"));
+    state.villageVoiceDraft = snap.exists() ? { id: snap.id, ...snap.data() } : null;
+    const sessionDraft = readLocalJson(VILLAGE_VOICE_SESSION_KEY, null);
+    if (sessionDraft && sessionDraft.blocks && sessionDraft.layout) {
+      state.villageVoiceDraft = { ...(state.villageVoiceDraft || {}), ...sessionDraft, restoredFromSession: true };
+    }
+    const explicitLayout = readLocalJson(VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY, null);
+    if (Array.isArray(explicitLayout) && explicitLayout.length) {
+      state.villageVoiceDraft = { ...(state.villageVoiceDraft || {}), layout: explicitLayout, restoredExplicitLayout: true };
+    }
+  } catch (err) {
+    console.warn("Village Voice draft load failed", err);
+    state.villageVoiceDraft = readLocalJson(VILLAGE_VOICE_SESSION_KEY, null);
+  }
+}
+
+function saveVillageVoiceSessionDraft(draft = state.villageVoiceDraft) {
+  if (!draft) return;
+  writeLocalJson(VILLAGE_VOICE_SESSION_KEY, { ...draft, sessionSavedAt: new Date().toISOString() });
+}
+
+function clearVillageVoiceSessionDraft() {
+  try { localStorage.removeItem(VILLAGE_VOICE_SESSION_KEY); } catch (err) {}
+}
+
+async function loadPrintableDrafts() {
+  try {
+    const ids = ["teacherBio", "doorReminders", "illnessNotice"];
+    const entries = await Promise.all(ids.map(async id => {
+      const snap = await getDoc(doc(db, "printables", id));
+      return [id, snap.exists() ? { id: snap.id, ...snap.data() } : null];
+    }));
+    state.printableDrafts = Object.fromEntries(entries);
+  } catch (err) {
+    console.warn("Printable drafts load failed", err);
+    state.printableDrafts = {};
+  }
+}
+
+async function loadIllnessNoticeTemplates() {
+  try {
+    const snap = await getDocs(collection(db, "illnessNoticeTemplates"));
+    state.illnessNoticeTemplates = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b)=>String(a.title||"").localeCompare(String(b.title||"")));
+  } catch (err) {
+    state.illnessNoticeTemplates = [];
+  }
 }
 
 function userSchoolMatchesScope(schoolIds = [], user = state.session) {
@@ -704,6 +1229,8 @@ async function updateAppUser(form) {
   const uid = state.modal.user.uid;
   const firstName = form.firstName.value.trim();
   const lastName = form.lastName.value.trim();
+  const usedName = form.usedName?.value?.trim() || `${firstName} ${lastName}`;
+  const profileImageData = form.profileImageData?.value || state.modal.user.profileImageData || "";
   const role = getFormRole(form);
   const roles = [role];
   const teamPosition = form.teamPosition.value.trim();
@@ -714,11 +1241,21 @@ async function updateAppUser(form) {
     firstName,
     lastName,
     displayName: `${firstName} ${lastName.slice(0, 1)}.`,
+    usedName,
+    profileImageData,
+    educationList: collectEducationEntries(form),
+    education: collectEducationEntries(form).map(educationDisplayText).join("; "),
+    earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
+    whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
+    birthday: form.birthday?.value || "",
+    leaderSummary: form.leaderSummary?.value?.trim() || "",
     pin: form.pin.value.trim(),
     teamPosition,
     role,
     roles,
     schoolIds,
+    defaultCampusCareBuildingId: form.defaultCampusCareBuildingId?.value || "",
+    defaultCampusCareSublocation: form.defaultCampusCareSublocation?.value?.trim() || "",
     passwordRequired: roleRequiresPassword(role),
     updatedAt: serverTimestamp()
   });
@@ -811,13 +1348,25 @@ async function updateRole(form) {
 }
 
 async function savePermissionsMatrix(form) {
+  // Only save the tool sections that are currently present in the form.
+  // The permissions UI renders one tool accordion at a time, so rebuilding every
+  // tool from the visible form would accidentally turn all hidden tools off.
+  const touchedToolKeys = new Set();
+  Array.from(form.querySelectorAll('[name^="roleperm__"], [name^="rolepos__"]')).forEach(input => {
+    const parts = String(input.name || "").split("__");
+    if (parts.length >= 4) touchedToolKeys.add(parts[2]);
+  });
+  if (state.expandedPermissionToolKey) touchedToolKeys.add(state.expandedPermissionToolKey);
+
+  const toolsToSave = PERMISSION_TOOLS.filter(tool => touchedToolKeys.has(tool.key));
+
   const updates = state.roles.map(role => {
     const nextPermissions = { ...(role.permissions || {}) };
 
-    PERMISSION_TOOLS.forEach(tool => {
+    toolsToSave.forEach(tool => {
       nextPermissions[tool.key] = { ...(nextPermissions[tool.key] || {}) };
 
-      tool.permissions.forEach(permission => {
+      (tool?.permissions || []).forEach(permission => {
         const enabled = !!form.querySelector(`[name="roleperm__${role.id}__${tool.key}__${permission.key}"]`)?.checked;
         const positions = Array.from(form.querySelectorAll(`[name="rolepos__${role.id}__${tool.key}__${permission.key}"]:checked`)).map(input => input.value);
 
@@ -897,6 +1446,8 @@ function getAvailableTools(user) {
   const canSubmitMoney = hasToolPermission(user, "moneyRequests", "submit");
   const canApproveMoney = hasToolPermission(user, "moneyRequests", "approvePending");
   const canProcessMoney = hasToolPermission(user, "moneyRequests", "processApproved");
+  const canEditVillageVoice = hasToolPermission(user, "villageVoice", "editFlyer");
+  const canUseCampusCares = hasToolPermission(user, "campusCares", "submit") || hasToolPermission(user, "campusCares", "assigned") || hasToolPermission(user, "campusCares", "viewAll") || hasToolPermission(user, "campusCares", "manage");
 
   if (canSubmitMoney || canApproveMoney || canProcessMoney || hasFullDevAccess(user)) {
     tools.push({
@@ -904,6 +1455,19 @@ function getAvailableTools(user) {
       title: "Money Requests",
       icon: "$",
       desc: "Submit, review, or process money requests based on your role permissions."
+    });
+  }
+
+  if (canUseCampusCares || hasFullDevAccess(user)) {
+    tools.push({ id: "campusCares", title: "Campus Cares", icon: "C", desc: "Submit, track, assign, and complete campus care tasks." });
+  }
+
+  if (canEditVillageVoice || hasFullDevAccess(user)) {
+    tools.push({
+      id: "villageVoice",
+      title: "Printables",
+      icon: "P",
+      desc: "Create and export school printables like Village Voice, teacher bios, door reminders, and illness notices."
     });
   }
 
@@ -945,6 +1509,98 @@ async function hideBudgetCode(id) {
   });
 
   showToast("Budget code hidden.");
+}
+
+async function deleteBudgetCode(id) {
+  await deleteDoc(doc(db, "budgetCodes", id));
+  showToast("Budget code deleted.");
+}
+
+function parseCsvLine(line) {
+  const out = [];
+  let value = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1];
+    if (ch === '"' && inQuotes && next === '"') { value += '"'; i += 1; continue; }
+    if (ch === '"') { inQuotes = !inQuotes; continue; }
+    if (ch === "," && !inQuotes) { out.push(value.trim()); value = ""; continue; }
+    value += ch;
+  }
+  out.push(value.trim());
+  return out;
+}
+
+function parseBudgetCodeUploadText(text) {
+  const rows = String(text || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  if (!rows.length) return [];
+
+  let startIndex = 0;
+  const firstCells = parseCsvLine(rows[0]).map(x => x.toLowerCase());
+  const hasHeader = firstCells.some(x => ["code", "budget code", "category", "budget category", "name", "description"].includes(x));
+  if (hasHeader) startIndex = 1;
+
+  return rows.slice(startIndex).map(line => {
+    const cells = parseCsvLine(line);
+    let code = "";
+    let category = "";
+
+    if (cells.length >= 2) {
+      code = cells[0];
+      category = cells.slice(1).join(" ").trim();
+    } else {
+      const match = line.match(/^(\d{3,})\s+(.+)$/);
+      if (match) {
+        code = match[1];
+        category = match[2].trim();
+      }
+    }
+
+    return { code: String(code || "").trim(), category: String(category || "").trim() };
+  }).filter(item => item.code && item.category);
+}
+
+async function importBudgetCodesFromFile(file) {
+  const text = await file.text();
+  const items = parseBudgetCodeUploadText(text);
+  if (!items.length) throw new Error("No budget codes were found. Use a CSV with Code and Category columns.");
+
+  const existingByCode = new Map(state.budgetCodes.map(c => [String(c.code || "").trim().toLowerCase(), c]));
+  let added = 0;
+  let updated = 0;
+
+  await Promise.all(items.map(async item => {
+    const key = item.code.toLowerCase();
+    const existing = existingByCode.get(key);
+    const payload = {
+      code: item.code,
+      category: item.category,
+      allSchools: true,
+      schoolIds: [],
+      active: true,
+      updatedAt: serverTimestamp()
+    };
+
+    if (existing?.id) {
+      updated += 1;
+      await updateDoc(doc(db, "budgetCodes", existing.id), payload);
+    } else {
+      added += 1;
+      await setDoc(doc(collection(db, "budgetCodes")), {
+        ...payload,
+        createdAt: serverTimestamp()
+      });
+    }
+  }));
+
+  await loadBudgetCodes();
+  showToast(`Budget codes imported. ${added} added, ${updated} updated.`);
 }
 
 async function addMoneyRequestType(form) {
@@ -1008,6 +1664,8 @@ async function addUser(form) {
   const firstName = form.firstName.value.trim();
   const lastName = form.lastName.value.trim();
   const pin = form.pin.value.trim();
+  const usedName = form.usedName?.value?.trim() || `${firstName} ${lastName}`;
+  const profileImageData = form.profileImageData?.value || "";
   const selectedSchoolIds = getFormSchoolIds(form);
   const role = getFormRole(form);
   const roles = [role];
@@ -1025,6 +1683,14 @@ async function addUser(form) {
     firstName,
     lastName,
     displayName: `${firstName} ${lastName.slice(0, 1)}.`,
+    usedName,
+    profileImageData,
+    educationList: collectEducationEntries(form),
+    education: collectEducationEntries(form).map(educationDisplayText).join("; "),
+    earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
+    whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
+    birthday: form.birthday?.value || "",
+    leaderSummary: form.leaderSummary?.value?.trim() || "",
     fakeEmail,
     pin,
     teamPosition,
@@ -1032,6 +1698,8 @@ async function addUser(form) {
     pinResetRequired: false,
     roles: roles.length ? roles : ["teacher"],
     schoolIds: selectedSchoolIds,
+    defaultCampusCareBuildingId: form.defaultCampusCareBuildingId?.value || "",
+    defaultCampusCareSublocation: form.defaultCampusCareSublocation?.value?.trim() || "",
     active: true,
     passwordRequired: false,
     passwordSet: false,
@@ -1105,18 +1773,25 @@ function renderDevPreviewControls() {
   </div>`;
 }
 
+
+function getOvaLogoHtml(className = "logo", fallbackText = "VV") {
+  const logo = state.appSettings?.ovaLogoData || "";
+  return logo ? `<img class="${className} image-logo" src="${logo}" alt="OVA logo" />` : `<div class="${className}">${fallbackText}</div>`;
+}
+
 function pageShell(content) {
   return `
     <div class="topbar">
       <div class="topbar-inner">
         <div class="actions">
-          <div class="logo">VV</div>
+          ${getOvaLogoHtml("logo", "VV")}
           <strong>Village Vibes</strong>
         </div>
         <div class="actions">
           <button class="theme-toggle-button secondary small" type="button" data-toggle-theme>${getThemePreference() === "dark" ? "☀️ Light" : "🌙 Dark"}</button>
           <button class="notification-button" type="button" data-toggle-notifications>🔔${getUnreadNotificationCount() ? `<span>${getUnreadNotificationCount()}</span>` : ""}</button>
-          <div class="user-pill">${makeDisplayName(state.session)} · ${getPrimaryRole(state.session)}</div>
+          <button class="secondary small" type="button" data-action="notificationSettings">Notifications</button>
+          <button class="user-pill clickable-user-pill" type="button" data-open-self-profile>${makeDisplayName(state.session)} · ${getPrimaryRole(state.session)}</button>
           ${canUseLeadership(state.session) ? `<button class="secondary small" data-action="leadership">Leadership</button>` : ""}
           ${canUseOwnersPanel(state.session) ? `<button class="secondary small" data-action="ownersPanel">Owners</button>` : ""}
           ${canUseSystemAdmin(state.session) ? `<button class="secondary small" data-action="systemAdmin">System Admin</button>` : ""}
@@ -1504,8 +2179,10 @@ async function saveEditedDeniedMoneyRequest(form) {
     customFields: (item.customFields || []).map((f, j) => ({ ...f, value: form[`field_${i}_${j}`]?.value || "" }))
   }));
   const requestSchoolId = form.requestSchoolId.value;
+  const permissionUser = getPermissionUser(state.session);
+  const canAutoApproveDoso = hasToolPermission(permissionUser, "moneyRequests", "approvePending") && userSchoolMatchesScope([requestSchoolId], state.session);
   await updateDoc(doc(db, "moneyRequests", requestId), {
-    status: "pendingDoso",
+    status: canAutoApproveDoso ? "selfDosoPasswordNeeded" : "pendingDoso",
     requestSchoolId,
     requestSchoolName: getSchoolNameById(requestSchoolId),
     todayDate: form.todayDate.value,
@@ -1515,14 +2192,20 @@ async function saveEditedDeniedMoneyRequest(form) {
     deniedByUid: "",
     deniedByName: "",
     deniedAt: null,
+    returnedToUid: "",
+    returnedToRole: "",
     updatedAt: serverTimestamp()
   });
-  await createNotification({ title: "Money request resubmitted", body: `${state.session?.firstName || "Someone"} resubmitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests", targetTab: "pendingDoso" });
-  state.modal = null;
+  if (canAutoApproveDoso) {
+    state.modal = { type: "selfDosoApproval", ids: [requestId], stage: "pendingDoso", error: "" };
+  } else {
+    await createNotification({ title: "Money request resubmitted", body: `${state.session?.firstName || "Someone"} resubmitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests", targetTab: "pendingDoso" });
+    state.modal = null;
+  }
   await loadMoneyRequests();
   await loadNotifications();
-  state.moneyRequestsTab = "myRequests";
-  showToast("Request resubmitted.");
+  state.moneyRequestsTab = canAutoApproveDoso ? "myRequests" : "pendingDoso";
+  showToast(canAutoApproveDoso ? "Request updated. Approve it as DOSO to send back to owners." : "Request resubmitted.");
   renderMoneyRequestsTool();
 }
 
@@ -1530,15 +2213,25 @@ async function denyMoneyRequest(requestId, stage, note) {
   const request = state.moneyRequests.find(r => r.id === requestId);
   if (!request) throw new Error("Request not found.");
   const isDoso = stage === "pendingDoso";
+  const returnToUid = isDoso ? request.submittedByUid : (request.dosoApprovedByUid || request.submittedByUid);
   await updateDoc(doc(db, "moneyRequests", requestId), {
     status: isDoso ? "deniedByDoso" : "deniedByOwner",
     denialNote: note,
     deniedByUid: state.session?.uid || null,
     deniedByName: `${state.session?.firstName || ""} ${state.session?.lastName || ""}`.trim(),
     deniedAt: serverTimestamp(),
+    returnedToUid: returnToUid || null,
+    returnedToRole: isDoso ? "submitter" : "doso",
     updatedAt: serverTimestamp()
   });
-  await createNotification({ title: "Money request denied", body: note || "A money request needs changes before resubmitting.", toUids: [request.submittedByUid], schoolIds: [request.requestSchoolId].filter(Boolean), toolKey: "moneyRequests", targetTab: "myRequests" });
+  await createNotification({
+    title: isDoso ? "Money request denied" : "PO returned by owner",
+    body: note || (isDoso ? "A money request needs changes before resubmitting." : "An owner returned a PO for DOSO changes."),
+    toUids: [returnToUid].filter(Boolean),
+    schoolIds: [request.requestSchoolId].filter(Boolean),
+    toolKey: "moneyRequests",
+    targetTab: "myRequests"
+  });
   state.modal = null;
   await loadMoneyRequests();
   await loadNotifications();
@@ -1698,8 +2391,8 @@ function renderMoneyRequestQueue(status, canApproveDoso, canApproveOwner) {
           <b>${formatMoneyAmount(total)}</b>
         </button>
         <div class="money-summary-actions">
-          ${!canBulk && status === "pendingDoso" && canApproveDoso ? `<button class="small" type="button" data-doso-approve-money-request="${request.id}">DOSO Approve</button><button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingDoso">Deny</button>` : ""}
-          ${!canBulk && status === "pendingOwner" && canApproveOwner ? `<button class="small" type="button" data-owner-approve-money-request="${request.id}">Owner Approve</button><button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingOwner">Deny</button>` : ""}
+          ${status === "pendingDoso" && canApproveDoso ? `${!canBulk ? `<button class="small" type="button" data-doso-approve-money-request="${request.id}">DOSO Approve</button>` : ""}<button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingDoso">Deny</button>` : ""}
+          ${status === "pendingOwner" && canApproveOwner ? `${!canBulk ? `<button class="small" type="button" data-owner-approve-money-request="${request.id}">Owner Approve</button>` : ""}<button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingOwner">Deny</button>` : ""}
           ${status === "finalApproved" && canApproveOwner ? `<button class="secondary small" type="button" disabled>Final Approved</button>` : ""}
         </div>
       </div>
@@ -1926,15 +2619,20 @@ function renderBudgetCodeSchoolSummary(code) {
 
 function renderBudgetCodesManager() {
   return `
-    <div class="actions" style="justify-content:flex-start;">
+    <div class="actions" style="justify-content:flex-start; align-items:center; gap:10px; flex-wrap:wrap;">
       <button data-modal="addBudgetCode">Add Budget Code</button>
+      <button type="button" class="secondary" data-trigger-budget-code-upload>Upload Budget Codes</button>
+      <input type="file" accept=".csv,.txt" data-budget-code-upload hidden />
     </div>
-    <div class="name-grid admin-name-grid">
+    <p class="helper">Upload a CSV or text file with Code and Category columns.</p>
+    <div class="name-grid admin-name-grid budget-code-grid">
       ${state.budgetCodes.length ? state.budgetCodes.map(c => `
-        <button class="name-button" data-edit-budget-code="${c.id}" type="button">
-          ${c.category}
-          <span>${c.code} · ${renderBudgetCodeSchoolSummary(c)}</span>
-        </button>
+        <div class="budget-code-card">
+          <button class="name-button budget-code-edit" data-edit-budget-code="${c.id}" type="button">
+            ${c.category}
+            <span>${c.code} · ${renderBudgetCodeSchoolSummary(c)}</span>
+          </button>
+        </div>
       `).join("") : `<div class="empty grid-empty">No budget codes yet.</div>`}
     </div>
   `;
@@ -2019,6 +2717,9 @@ function renderLeadership() {
 
       <div class="nav-tabs">
         <button class="${state.leadershipTab === "users" ? "active" : ""}" data-leadership-tab="users">Users</button>
+        <button class="${state.leadershipTab === "importantDates" ? "active" : ""}" data-leadership-tab="importantDates">Important Dates</button>
+        <button class="${state.leadershipTab === "weeklyThemes" ? "active" : ""}" data-leadership-tab="weeklyThemes">Weekly Themes</button>
+        <button class="${state.leadershipTab === "certificates" ? "active" : ""}" data-leadership-tab="certificates">Certificates</button>
       </div>
 
       ${state.leadershipTab === "users" ? `
@@ -2027,19 +2728,408 @@ function renderLeadership() {
         </div>
         <div class="name-grid admin-name-grid">
           ${state.users.length ? state.users.map(u => `
-            <button class="name-button" data-edit-user="${u.uid}" type="button">
-              ${u.firstName} ${u.lastName}
-              <span>${u.teamPosition || "No position"} · ${getPrimaryRole(u)}</span>
+            <button class="name-button user-admin-button" data-edit-user="${u.uid}" type="button">
+              ${u.profileImageData ? `<img src="${u.profileImageData}" alt="" />` : `<b>${(u.firstName || "?").slice(0,1)}</b>`}
+              <span><strong>${u.firstName} ${u.lastName}</strong><small>${getUserUsedName(u)} · ${u.teamPosition || "No position"} · ${getPrimaryRole(u)}</small></span>
             </button>
           `).join("") : `<div class="empty grid-empty">No users yet.</div>`}
         </div>
       ` : ""}
+
+      ${state.leadershipTab === "importantDates" ? renderImportantDatesLeadershipTab() : ""}
+      ${state.leadershipTab === "weeklyThemes" ? renderWeeklyThemesLeadershipTab() : ""}
+      ${state.leadershipTab === "certificates" ? renderCertificatesLeadershipTab() : ""}
     </section>
     ${state.modal ? renderModal() : ""}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
 }
 
+function importantDateMonthKey(item) {
+  const d = new Date(`${item?.date || ""}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return "undated";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function importantDateMonthLabel(key) {
+  if (key === "undated") return "No Date";
+  const [year, month] = key.split("-");
+  const d = new Date(Number(year), Number(month) - 1, 1, 12, 0, 0);
+  return d.toLocaleString("en-US", { month: "long", year: "numeric" });
+}
+
+function renderImportantDateEditForm(item) {
+  const locked = !!item.autoBirthday;
+  if (locked) return `<span class="helper">From profile</span>`;
+  if (state.editingImportantDateId !== item.id) {
+    return `<div class="row-actions"><button type="button" class="secondary small" data-edit-important-date="${item.id}">Edit</button><button type="button" class="secondary small" data-delete-important-date="${item.id}">Delete</button></div>`;
+  }
+  return `
+    <form id="importantDateEditForm" class="important-date-edit-form" data-important-date-id="${item.id}">
+      <label>Date<input type="date" name="date" value="${escapeHtml(item.date || "")}" required /></label>
+      <label>End Date <small>(optional)</small><input type="date" name="endDate" value="${escapeHtml(item.endDate || "")}" /></label>
+      <label>Display Date <small>(optional)</small><input name="dateLabel" value="${escapeHtml(item.dateLabel || "")}" placeholder="June 18th or Nov. 26–27" /></label>
+      <label>Description<input name="description" value="${escapeHtml(item.description || "")}" required /></label>
+      <label>Extra Info<textarea name="details" placeholder="Times, school-only notes, etc.">${escapeHtml(item.details || "")}</textarea></label>
+      <label class="check-row"><input type="checkbox" name="includeInVillageVoice" ${item.includeInVillageVoice ? "checked" : ""} /> Include in Village Voice</label>
+      <div class="row-actions"><button type="submit">Save</button><button type="button" class="secondary" data-cancel-important-date-edit>Cancel</button></div>
+    </form>`;
+}
+
+function renderImportantDatesLeadershipTab() {
+  const items = getAllImportantDateItems();
+  const groups = items.reduce((acc, item) => {
+    const key = importantDateMonthKey(item);
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(item);
+    return acc;
+  }, {});
+  const sortedKeys = Object.keys(groups).sort();
+  const currentKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+  return `
+    <div class="leadership-data-grid important-dates-layout">
+      <form id="importantDateForm" class="mini-form card subtle-card important-date-add-card">
+        <h3>Add Important Date</h3>
+        <label>Date<input type="date" name="date" required /></label>
+        <label>Description<input name="description" placeholder="Pajama Day, Closed for Holiday, Family Night..." required /></label>
+        <label class="check-row"><input type="checkbox" name="includeInVillageVoice" /> Include in Village Voice</label>
+        <button type="submit">Add Date</button>
+        <div class="import-inside-card">
+          <h4>Import Important Dates</h4>
+          <p class="helper">Upload the converted family calendar JSON to import and save all dates automatically.</p>
+          <label>Upload Family Calendar Import File<input type="file" accept="application/json,.json" data-important-dates-import /></label>
+        </div>
+      </form>
+      <div class="card subtle-card important-date-groups-card">
+        <h3>Saved Dates</h3>
+        <p class="helper">Imported calendar dates can be edited here. Dates pulled from other parts of the tool, like profile birthdays, stay locked.</p>
+        <div class="important-date-month-groups">
+          ${sortedKeys.length ? sortedKeys.map(key => `
+            <details class="important-date-month" ${key === currentKey ? "open" : ""}>
+              <summary><strong>${escapeHtml(importantDateMonthLabel(key))}</strong><span>${groups[key].length} date${groups[key].length === 1 ? "" : "s"}</span></summary>
+              <div class="simple-list">
+                ${groups[key].map(item => `
+                  <div class="simple-list-row important-date-row ${state.editingImportantDateId === item.id ? "editing" : ""}">
+                    <span><strong>${escapeHtml(importantDateDisplayDate(item))}</strong><small>${escapeHtml(item.description || "")}${item.details ? ` · ${escapeHtml(item.details)}` : ""}${item.autoBirthday ? " · Auto birthday" : ""}${item.includeInVillageVoice ? " · Village Voice" : ""}${item.importedFrom ? ` · Imported` : ""}</small></span>
+                    ${renderImportantDateEditForm(item)}
+                  </div>
+                `).join("")}
+              </div>
+            </details>
+          `).join("") : `<div class="empty">No important dates added yet.</div>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+
+
+function renderLetterlandSpritePreview(sheet, rows, cols, tile, meta = getLetterlandSpriteMetaFromSettings()) {
+  if (!sheet || !tile) return "";
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  const crop = getLetterlandTileCrop(meta, r, c, tile);
+  const ratio = Math.max(.2, Math.min(5, crop.sw / crop.sh));
+  if (meta?.width && meta?.height) {
+    return `<svg class="letterland-sprite-thumb" viewBox="${crop.sx} ${crop.sy} ${crop.sw} ${crop.sh}" style="aspect-ratio:${ratio};" aria-hidden="true"><image href="${escapeHtml(sheet)}" x="0" y="0" width="${crop.sheetW}" height="${crop.sheetH}" preserveAspectRatio="none"></image></svg>`;
+  }
+  const index = Math.max(0, Number(tile) - 1);
+  const x = index % c;
+  const y = Math.floor(index / c);
+  return `<span class="letterland-sprite-thumb" style="background-image:url('${sheet}');background-size:${c * 100}% ${r * 100}%;background-position:${c === 1 ? 0 : (x * 100 / (c - 1))}% ${r === 1 ? 0 : (y * 100 / (r - 1))}%;"></span>`;
+}
+
+function renderLetterlandSpriteOptions(sheet, rows, cols, pickerWeek = "", meta = getLetterlandSpriteMetaFromSettings()) {
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  const total = Math.min(160, r * c);
+  if (!sheet) return `<p class="helper">Upload a sprite sheet first. Once loaded, click “Choose Letterland Image” on any week to pick a character visually.</p>`;
+  return `<div class="letterland-sprite-palette ${pickerWeek ? "picker-mode" : ""}">${Array.from({length: total}, (_, idx) => {
+    const tile = idx + 1;
+    return `<button type="button" class="letterland-sprite-option" data-pick-letterland-tile="${tile}" ${pickerWeek ? `data-picker-week="${pickerWeek}"` : ""} title="Tile ${tile}">${renderLetterlandSpritePreview(sheet, r, c, tile, meta)}<small>${tile}</small></button>`;
+  }).join("")}</div>`;
+}
+
+function renderLetterlandSpriteLoadedPanel(sheet, rows, cols) {
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  if (!sheet) {
+    return `<div class="letterland-sheet-status empty" data-letterland-sheet-status><strong>No sprite sheet loaded yet.</strong><span>Upload one sheet, then choose characters by clicking each week.</span></div>`;
+  }
+  return `<div class="letterland-sheet-status" data-letterland-sheet-status>
+    <button type="button" class="letterland-sheet-thumb-button" data-open-letterland-sheet-preview title="Preview sprite sheet and cells"><img src="${sheet}" alt="Loaded Letterland sprite sheet" /></button>
+    <div><strong>Sprite sheet loaded</strong><span>${c} columns × ${r} rows</span><small>${String(getLetterlandSpriteSheetRefFromForm()).startsWith(LETTERLAND_SPRITE_LOCAL_PREFIX) ? "Full-res sheet stored locally to avoid Firebase size limit." : ""}</small><button type="button" class="secondary small" data-open-letterland-sheet-preview>Preview / adjust cells</button> <button type="button" class="secondary small danger" data-remove-letterland-sheet>Remove sprite sheet</button></div>
+  </div>`;
+}
+
+function getWeeklyThemesForm() {
+  return document.querySelector("#weeklyThemesForm");
+}
+
+function getLetterlandSpriteSheetFromForm(form) {
+  const ref = getLetterlandSpriteSheetRefFromForm(form);
+  return resolveLetterlandSpriteSheet(ref) || window.__vvLetterlandSpriteSheet || "";
+}
+
+function setLetterlandSpriteSheetOnForm(form, value) {
+  const realForm = form || getWeeklyThemesForm();
+  const field = realForm?.querySelector('[name="letterlandSpriteSheet"]');
+  const resolved = resolveLetterlandSpriteSheet(value) || value || "";
+  const storedValue = resolved && resolved.length > LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES ? storeLetterlandSpriteLocally(resolved) : (value || "");
+  if (field) field.value = storedValue || "";
+  window.__vvLetterlandSpriteSheet = resolved || "";
+}
+
+
+function syncLetterlandSpriteSheetToState(form, clearWeekImages = false) {
+  const realForm = form || getWeeklyThemesForm();
+  const current = state.weeklyThemes.find(t => t.id === "current");
+  if (!current || !realForm) return;
+  current.letterlandSpriteSheet = getLetterlandSpriteSheetRefFromForm(realForm);
+  current.letterlandSpriteRows = realForm.querySelector('[name="letterlandSpriteRows"]')?.value || current.letterlandSpriteRows || "5";
+  current.letterlandSpriteCols = realForm.querySelector('[name="letterlandSpriteCols"]')?.value || current.letterlandSpriteCols || "6";
+  current.letterlandSpriteWidth = realForm.querySelector('[name="letterlandSpriteWidth"]')?.value || current.letterlandSpriteWidth || "";
+  current.letterlandSpriteHeight = realForm.querySelector('[name="letterlandSpriteHeight"]')?.value || current.letterlandSpriteHeight || "";
+  current.letterlandSpriteMarginX = realForm.querySelector('[name="letterlandSpriteMarginX"]')?.value || current.letterlandSpriteMarginX || "0";
+  current.letterlandSpriteMarginY = realForm.querySelector('[name="letterlandSpriteMarginY"]')?.value || current.letterlandSpriteMarginY || "0";
+  current.letterlandSpriteGapX = realForm.querySelector('[name="letterlandSpriteGapX"]')?.value || current.letterlandSpriteGapX || "0";
+  current.letterlandSpriteGapY = realForm.querySelector('[name="letterlandSpriteGapY"]')?.value || current.letterlandSpriteGapY || "0";
+  current.letterlandSpriteCellW = realForm.querySelector('[name="letterlandSpriteCellW"]')?.value || current.letterlandSpriteCellW || "";
+  current.letterlandSpriteCellH = realForm.querySelector('[name="letterlandSpriteCellH"]')?.value || current.letterlandSpriteCellH || "";
+  if (clearWeekImages) {
+    current.letterImages = {};
+    current.letterlandSpriteTiles = {};
+    state.weeklyThemesDraftImages = {};
+    state.weeklyThemesDraftTiles = {};
+    realForm.querySelectorAll('[name^="letterImage_"]').forEach(input => { input.value = ""; });
+    realForm.querySelectorAll('[name^="letterlandSpriteTile_"]').forEach(input => { input.value = ""; });
+  }
+}
+
+function clearLetterlandWeekImage(form, week) {
+  const realForm = form || getWeeklyThemesForm();
+  const weekKey = String(week || "");
+  if (!weekKey) return;
+  state.weeklyThemesDraftImages = state.weeklyThemesDraftImages || {};
+  state.weeklyThemesDraftTiles = state.weeklyThemesDraftTiles || {};
+  delete state.weeklyThemesDraftImages[weekKey];
+  delete state.weeklyThemesDraftTiles[weekKey];
+  const current = state.weeklyThemes.find(t => t.id === "current");
+  if (current) {
+    current.letterImages = { ...(current.letterImages || {}) };
+    current.letterlandSpriteTiles = { ...(current.letterlandSpriteTiles || {}) };
+    delete current.letterImages[weekKey];
+    delete current.letterlandSpriteTiles[weekKey];
+  }
+  realForm?.querySelectorAll(`[name="letterImage_${weekKey}"]`).forEach(input => { input.value = ""; });
+  realForm?.querySelectorAll(`[name="letterlandSpriteTile_${weekKey}"]`).forEach(input => { input.value = ""; });
+}
+
+function getLetterlandGridFromForm(form) {
+  const realForm = form || getWeeklyThemesForm();
+  const rows = realForm?.querySelector('[name="letterlandSpriteRows"]')?.value || 1;
+  const cols = realForm?.querySelector('[name="letterlandSpriteCols"]')?.value || 1;
+  return { rows, cols };
+}
+
+function refreshLetterlandSpriteSheetStatus(form) {
+  const realForm = form || getWeeklyThemesForm();
+  if (!realForm) return;
+  const sheet = getLetterlandSpriteSheetFromForm(realForm);
+  const { rows, cols } = getLetterlandGridFromForm(realForm);
+  const status = realForm.querySelector("[data-letterland-sheet-status]");
+  if (status) status.outerHTML = renderLetterlandSpriteLoadedPanel(sheet, rows, cols);
+}
+
+async function applyLetterlandSpriteTileToWeek(form, week, tile) {
+  const realForm = form || getWeeklyThemesForm();
+  const sheet = getLetterlandSpriteSheetFromForm(realForm);
+  const { rows, cols } = getLetterlandGridFromForm(realForm);
+  if (!week) return;
+  if (!sheet) throw new Error("Upload a Letterland sprite sheet first.");
+  const weekKey = String(week);
+  const tileValue = String(tile || "");
+
+  // v109: Do NOT crop/compress the tile into a tiny saved image.
+  // Save the selected tile number only, then render the crop from the original sprite sheet.
+  state.weeklyThemesDraftImages = state.weeklyThemesDraftImages || {};
+  state.weeklyThemesDraftTiles = state.weeklyThemesDraftTiles || {};
+  delete state.weeklyThemesDraftImages[weekKey];
+  state.weeklyThemesDraftTiles[weekKey] = tileValue;
+
+  const current = state.weeklyThemes.find(t => t.id === "current");
+  if (current) {
+    current.letterImages = { ...(current.letterImages || {}) };
+    current.letterlandSpriteTiles = { ...(current.letterlandSpriteTiles || {}), [weekKey]: tileValue };
+    delete current.letterImages[weekKey];
+  }
+
+  document.querySelectorAll(`#weeklyThemesForm [name="letterImage_${weekKey}"]`).forEach(input => { input.value = ""; });
+  document.querySelectorAll(`#weeklyThemesForm [name="letterlandSpriteTile_${weekKey}"]`).forEach(input => { input.value = tileValue; });
+
+  const card = document.querySelector(`#weeklyThemesForm [data-open-letterland-picker="${weekKey}"]`)?.closest(".weekly-theme-card");
+  if (card) {
+    const row = card.querySelector(".letterland-sprite-week-row");
+    if (row) {
+      row.querySelectorAll(".weekly-letter-preview,.letterland-sprite-thumb,.helper,[data-clear-letterland-image]").forEach(el => el.remove());
+      const button = row.querySelector(`[data-open-letterland-picker="${weekKey}"]`);
+      button?.insertAdjacentHTML("afterend", `${renderLetterlandSpritePreview(sheet, rows, cols, tileValue, getLetterlandSpriteMetaFromForm(realForm))}<button type="button" class="secondary small" data-clear-letterland-image="${weekKey}">Remove image</button>`);
+    }
+  }
+}
+
+
+function renderLetterlandSpriteForVoice(sheet, rows, cols, tile, altText = "Letterland image", meta = getLetterlandSpriteMetaFromSettings()) {
+  if (!sheet || !tile) return "";
+  const crop = getLetterlandTileCrop(meta, rows, cols, tile);
+  const ratio = Math.max(.2, Math.min(5, crop.sw / crop.sh));
+  if (meta?.width && meta?.height) {
+    return `<svg class="voice-letterland-sprite" role="img" aria-label="${escapeHtml(altText)}" viewBox="${crop.sx} ${crop.sy} ${crop.sw} ${crop.sh}" style="aspect-ratio:${ratio};"><image href="${escapeHtml(sheet)}" x="0" y="0" width="${crop.sheetW}" height="${crop.sheetH}" preserveAspectRatio="none"></image></svg>`;
+  }
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  const index = Math.max(0, Number(tile) - 1);
+  const x = index % c;
+  const y = Math.floor(index / c);
+  const posX = c === 1 ? 0 : (x * 100 / (c - 1));
+  const posY = r === 1 ? 0 : (y * 100 / (r - 1));
+  return `<span class="voice-letterland-sprite" role="img" aria-label="${escapeHtml(altText)}" style="background-image:url('${sheet}');background-size:${c * 100}% ${r * 100}%;background-position:${posX}% ${posY}%;"></span>`;
+}
+
+function cropLetterlandSpriteTile(sheetData, rows, cols, tile) {
+  return new Promise((resolve, reject) => {
+    if (!sheetData) return reject(new Error("Upload a Letterland sprite sheet first."));
+    const img = new Image();
+    img.onload = () => {
+      const r = Math.max(1, Number(rows) || 1);
+      const c = Math.max(1, Number(cols) || 1);
+      const index = Math.max(0, Math.min((r * c) - 1, (Number(tile) || 1) - 1));
+      const sx = Math.floor((index % c) * img.width / c);
+      const sy = Math.floor(Math.floor(index / c) * img.height / r);
+      const sw = Math.floor(img.width / c);
+      const sh = Math.floor(img.height / r);
+      const size = 360;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, size, size);
+      const scale = Math.min(size / sw, size / sh);
+      const dw = sw * scale;
+      const dh = sh * scale;
+      ctx.drawImage(img, sx, sy, sw, sh, (size - dw) / 2, (size - dh) / 2, dw, dh);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("That sprite sheet could not be read."));
+    img.src = sheetData;
+  });
+}
+
+function renderWeeklyThemesLeadershipTab() {
+  const settings = getWeeklyThemeSettings();
+  const themes = settings.themes || {};
+  const dateRanges = settings.dateRanges || {};
+  const labels = settings.labels || {};
+  const weekOfMonths = settings.weekOfMonths || {};
+  const letterlands = settings.letterlands || {};
+  const seedlingsValues = settings.seedlingsValues || {};
+  const ideasEvents = settings.ideasEvents || {};
+  const spriteSheetRef = settings.letterlandSpriteSheet || "";
+  const spriteSheet = resolveLetterlandSpriteSheet(spriteSheetRef);
+  const spriteRows = settings.letterlandSpriteRows || 5;
+  const spriteCols = settings.letterlandSpriteCols || 6;
+  const spriteTiles = settings.letterlandSpriteTiles || {};
+  const spriteWidth = settings.letterlandSpriteWidth || "";
+  const spriteHeight = settings.letterlandSpriteHeight || "";
+  const spriteMarginX = settings.letterlandSpriteMarginX || "0";
+  const spriteMarginY = settings.letterlandSpriteMarginY || "0";
+  const spriteGapX = settings.letterlandSpriteGapX || "0";
+  const spriteGapY = settings.letterlandSpriteGapY || "0";
+  return `
+    <form id="weeklyThemesForm" class="card subtle-card weekly-themes-form">
+      <div class="section-head compact">
+        <div><h3>Weekly Themes</h3><p class="helper">Upload the converted curriculum JSON to import and save the full year automatically, then add Letterland images as needed.</p></div>
+        <button type="submit">Save Weekly Themes</button>
+      </div>
+      <div class="weekly-import-row">
+        <label>Starting Date for Week 1<input type="date" name="startingDate" value="${escapeHtml(settings.startingDate || "")}" /></label>
+        <label>Upload Curriculum Import File<input type="file" accept="application/json,.json" data-weekly-theme-import /></label>
+      </div>
+      <div class="letterland-sprite-card">
+        <div>
+          <h4>Letterland Sprite Sheet</h4>
+          <p class="helper">Upload one sheet, confirm the row/column grid, then click “Choose Letterland Image” on each week.</p>
+        </div>
+        <input type="hidden" name="letterlandSpriteSheet" value="${escapeHtml(spriteSheetRef)}" />
+        <div class="weekly-import-row compact">
+          <label>Upload / Replace Sprite Sheet<input type="file" accept="image/*" data-letterland-sprite-sheet /></label>
+          <label>Rows<input type="number" min="1" max="20" name="letterlandSpriteRows" value="${escapeHtml(spriteRows)}" data-letterland-grid-control /></label>
+          <label>Columns<input type="number" min="1" max="20" name="letterlandSpriteCols" value="${escapeHtml(spriteCols)}" data-letterland-grid-control /></label>
+          <input type="hidden" name="letterlandSpriteWidth" value="${escapeHtml(spriteWidth)}" />
+          <input type="hidden" name="letterlandSpriteHeight" value="${escapeHtml(spriteHeight)}" />
+          <input type="hidden" name="letterlandSpriteMarginX" value="${escapeHtml(spriteMarginX)}" />
+          <input type="hidden" name="letterlandSpriteMarginY" value="${escapeHtml(spriteMarginY)}" />
+          <input type="hidden" name="letterlandSpriteGapX" value="${escapeHtml(spriteGapX)}" />
+          <input type="hidden" name="letterlandSpriteGapY" value="${escapeHtml(spriteGapY)}" />
+          <input type="hidden" name="letterlandSpriteCellW" value="${escapeHtml(settings.letterlandSpriteCellW || "")}" />
+          <input type="hidden" name="letterlandSpriteCellH" value="${escapeHtml(settings.letterlandSpriteCellH || "")}" />
+        </div>
+        <div class="letterland-bg-tools">
+          <label>Remove background color<input type="color" value="#ffffff" data-letterland-bg-color /></label>
+          <label>Tolerance<input type="range" min="0" max="90" value="28" data-letterland-bg-tolerance /></label>
+          <button type="button" class="secondary small" data-letterland-remove-bg>Remove selected color</button>
+        </div>
+        ${renderLetterlandSpriteLoadedPanel(spriteSheet, spriteRows, spriteCols)}
+      </div>
+      <div class="weekly-theme-grid">
+        ${Array.from({length:52},(_,idx)=>idx+1).map(week => {
+          const date = addDaysToIsoDate(settings.startingDate || "", (week - 1) * 7);
+          const letterImage = (state.weeklyThemesDraftImages || {})[String(week)] || (settings.letterImages || {})[String(week)] || "";
+          const weekTitle = labels[String(week)] || `Week ${week}`;
+          return `<div class="weekly-theme-card">
+            <div class="weekly-theme-card-head"><strong>${escapeHtml(weekTitle)}</strong>${date ? `<small>${formatShortDate(date)}</small>` : ""}</div>
+            <input type="hidden" name="label_${week}" value="${escapeHtml(labels[String(week)] || "")}" />
+            <input type="hidden" name="weekOfMonth_${week}" value="${escapeHtml(weekOfMonths[String(week)] || "")}" />
+            <label>Date range<input name="dateRange_${week}" value="${escapeHtml(dateRanges[String(week)] || "")}" placeholder="June 1st – June 5th" /></label>
+            <label>Theme<input name="week_${week}" value="${escapeHtml(themes[String(week)] || "")}" placeholder="Theme for week ${week}" /></label>
+            <label>Letterland<input name="letterland_${week}" value="${escapeHtml(letterlands[String(week)] || "")}" placeholder="Ww – Walter Walrus" /></label>
+            <div class="letterland-sprite-week-row">
+              <input type="hidden" name="letterlandSpriteTile_${week}" value="${escapeHtml((state.weeklyThemesDraftTiles || {})[String(week)] || spriteTiles[String(week)] || "")}" />
+              <input type="hidden" name="letterImage_${week}" value="${letterImage}" />
+              <button type="button" class="secondary small" data-open-letterland-picker="${week}">Choose Letterland Image</button>
+              ${((state.weeklyThemesDraftTiles || {})[String(week)] || spriteTiles[String(week)]) ? renderLetterlandSpritePreview(spriteSheet, spriteRows, spriteCols, (state.weeklyThemesDraftTiles || {})[String(week)] || spriteTiles[String(week)] || "", { width: spriteWidth, height: spriteHeight, marginX: spriteMarginX, marginY: spriteMarginY, gapX: spriteGapX, gapY: spriteGapY }) : ""}
+              ${letterImage ? `<img class="weekly-letter-preview" src="${letterImage}" alt="Letterland week ${week}" />` : (((state.weeklyThemesDraftTiles || {})[String(week)] || spriteTiles[String(week)]) ? "" : `<span class="helper">No image chosen yet.</span>`)}
+              ${(letterImage || ((state.weeklyThemesDraftTiles || {})[String(week)] || spriteTiles[String(week)])) ? `<button type="button" class="secondary small" data-clear-letterland-image="${week}">Remove image</button>` : ""}
+            </div>
+            <label>Seedlings Value<input name="seedlingsValue_${week}" value="${escapeHtml(seedlingsValues[String(week)] || "")}" placeholder="Commitment" /></label>
+            <label>Ideas / Events<textarea name="ideasEvents_${week}" rows="4" placeholder="Ideas, vocabulary, events...">${escapeHtml(ideasEvents[String(week)] || "")}</textarea></label>
+          </div>`;
+        }).join("")}
+      </div>
+    </form>`;
+}
+
+function renderCertificatesLeadershipTab() {
+  return `
+    <div class="leadership-data-grid">
+      <form id="certificateForm" class="mini-form card subtle-card">
+        <h3>Add Certificate</h3>
+        <label>Certificate / Milestone Name<input name="name" placeholder="EDU 119, BSAC, SIDs, CPR..." required /></label>
+        <button type="submit">Add Certificate</button>
+      </form>
+      <div class="card subtle-card">
+        <h3>Saved Certificates</h3>
+        <div class="simple-list">
+          ${(state.certificates || []).length ? state.certificates.map(item => `
+            <div class="simple-list-row">
+              <span><strong>${escapeHtml(item.name || "")}</strong></span>
+              <button type="button" class="secondary small" data-delete-certificate="${item.id}">Delete</button>
+            </div>
+          `).join("") : `<div class="empty">No certificates added yet.</div>`}
+        </div>
+      </div>
+    </div>`;
+}
 
 function permissionToken(toolKey, permissionKey, roleId, kind, value = "") {
   return [toolKey, permissionKey, roleId, kind, encodeURIComponent(value)].join("||");
@@ -2216,7 +3306,7 @@ async function saveToolConfig(toolKey) {
 }
 
 
-function resizeToolImage(file) {
+function resizeToolImage(file, requestedMaxSize = 520, requestedQuality = 0.82, options = {}) {
   return new Promise((resolve, reject) => {
     if (!file.type || !file.type.startsWith("image/")) {
       reject(new Error("Please choose an image file."));
@@ -2226,30 +3316,33 @@ function resizeToolImage(file) {
     const objectUrl = URL.createObjectURL(file);
     img.onload = () => {
       try {
-        const maxSize = 520;
+        const maxSize = Math.max(64, Number(requestedMaxSize) || 520);
+        const outputQuality = Math.max(0.35, Math.min(0.98, Number(requestedQuality) || 0.82));
+        const maxBytes = Math.max(250000, Number(options.maxBytes) || 950000);
+        const padToSquare = options.padToSquare !== false;
         const canvas = document.createElement("canvas");
-        canvas.width = maxSize;
-        canvas.height = maxSize;
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const drawW = Math.max(1, Math.round(img.width * scale));
+        const drawH = Math.max(1, Math.round(img.height * scale));
+        canvas.width = padToSquare ? maxSize : drawW;
+        canvas.height = padToSquare ? maxSize : drawH;
         const ctx = canvas.getContext("2d");
         ctx.fillStyle = "#f7f2e8";
-        ctx.fillRect(0, 0, maxSize, maxSize);
-        const scale = Math.min(maxSize / img.width, maxSize / img.height);
-        const drawW = Math.round(img.width * scale);
-        const drawH = Math.round(img.height * scale);
-        const drawX = Math.round((maxSize - drawW) / 2);
-        const drawY = Math.round((maxSize - drawH) / 2);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const drawX = padToSquare ? Math.round((maxSize - drawW) / 2) : 0;
+        const drawY = padToSquare ? Math.round((maxSize - drawH) / 2) : 0;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
         ctx.drawImage(img, drawX, drawY, drawW, drawH);
         URL.revokeObjectURL(objectUrl);
 
-        let quality = 0.82;
+        let quality = outputQuality;
         let dataUrl = canvas.toDataURL("image/jpeg", quality);
-        while (dataUrl.length > 850000 && quality > 0.45) {
-          quality -= 0.08;
+        while (dataUrl.length > maxBytes * 0.9 && quality > 0.45) {
+          quality -= 0.06;
           dataUrl = canvas.toDataURL("image/jpeg", quality);
         }
-        if (dataUrl.length > 950000) {
+        if (dataUrl.length > maxBytes) {
           reject(new Error("That image is still too large after compression. Please try a smaller/simpler image."));
           return;
         }
@@ -2265,6 +3358,2159 @@ function resizeToolImage(file) {
     };
     img.src = objectUrl;
   });
+}
+
+
+function readRawImageData(file) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith("image/")) {
+      reject(new Error("Please choose an image file."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("That image could not be read. Please try another image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+
+function getImageDimensionsFromDataUrl(src) {
+  return new Promise((resolve, reject) => {
+    if (!src) return resolve({ width: 0, height: 0 });
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth || img.width || 0, height: img.naturalHeight || img.height || 0 });
+    img.onerror = () => reject(new Error("That image could not be measured."));
+    img.src = src;
+  });
+}
+
+function hexToRgb(hex) {
+  const clean = String(hex || "").replace("#", "").trim();
+  if (clean.length !== 6) return null;
+  const num = parseInt(clean, 16);
+  if (Number.isNaN(num)) return null;
+  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+}
+
+function removeColorFromImageDataUrl(src, colorHex, tolerance = 28) {
+  return new Promise((resolve, reject) => {
+    const rgb = hexToRgb(colorHex);
+    if (!src || !rgb) return reject(new Error("Choose a background color first."));
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const t = Math.max(0, Math.min(255, Number(tolerance) || 0));
+        for (let i = 0; i < data.data.length; i += 4) {
+          const dr = Math.abs(data.data[i] - rgb.r);
+          const dg = Math.abs(data.data[i + 1] - rgb.g);
+          const db = Math.abs(data.data[i + 2] - rgb.b);
+          if (dr <= t && dg <= t && db <= t) data.data[i + 3] = 0;
+        }
+        ctx.putImageData(data, 0, 0);
+        resolve(canvas.toDataURL("image/png"));
+      } catch (err) { reject(err); }
+    };
+    img.onerror = () => reject(new Error("That sprite sheet could not be processed."));
+    img.src = src;
+  });
+}
+
+function getLetterlandSpriteMetaFromSettings(settings = getWeeklyThemeSettings()) {
+  return {
+    width: Number(settings.letterlandSpriteWidth || 0) || 0,
+    height: Number(settings.letterlandSpriteHeight || 0) || 0,
+    marginX: Number(settings.letterlandSpriteMarginX || 0) || 0,
+    marginY: Number(settings.letterlandSpriteMarginY || 0) || 0,
+    gapX: Number(settings.letterlandSpriteGapX || 0) || 0,
+    gapY: Number(settings.letterlandSpriteGapY || 0) || 0,
+    cellW: Number(settings.letterlandSpriteCellW || 0) || 0,
+    cellH: Number(settings.letterlandSpriteCellH || 0) || 0
+  };
+}
+
+function getLetterlandSpriteMetaFromForm(form) {
+  const realForm = form || getWeeklyThemesForm();
+  const settings = getWeeklyThemeSettings();
+  return {
+    width: Number(realForm?.querySelector('[name="letterlandSpriteWidth"]')?.value || settings.letterlandSpriteWidth || 0) || 0,
+    height: Number(realForm?.querySelector('[name="letterlandSpriteHeight"]')?.value || settings.letterlandSpriteHeight || 0) || 0,
+    marginX: Number(realForm?.querySelector('[name="letterlandSpriteMarginX"]')?.value || settings.letterlandSpriteMarginX || 0) || 0,
+    marginY: Number(realForm?.querySelector('[name="letterlandSpriteMarginY"]')?.value || settings.letterlandSpriteMarginY || 0) || 0,
+    gapX: Number(realForm?.querySelector('[name="letterlandSpriteGapX"]')?.value || settings.letterlandSpriteGapX || 0) || 0,
+    gapY: Number(realForm?.querySelector('[name="letterlandSpriteGapY"]')?.value || settings.letterlandSpriteGapY || 0) || 0,
+    cellW: Number(realForm?.querySelector('[name="letterlandSpriteCellW"]')?.value || settings.letterlandSpriteCellW || 0) || 0,
+    cellH: Number(realForm?.querySelector('[name="letterlandSpriteCellH"]')?.value || settings.letterlandSpriteCellH || 0) || 0
+  };
+}
+
+function getLetterlandTileCrop(meta, rows, cols, tile) {
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  const w = Math.max(1, Number(meta?.width || 0) || 1);
+  const h = Math.max(1, Number(meta?.height || 0) || 1);
+  const mx = Math.max(0, Number(meta?.marginX || 0) || 0);
+  const my = Math.max(0, Number(meta?.marginY || 0) || 0);
+  const gx = Math.max(0, Number(meta?.gapX || 0) || 0);
+  const gy = Math.max(0, Number(meta?.gapY || 0) || 0);
+  const usableW = Math.max(1, w - (mx * 2) - (gx * (c - 1)));
+  const usableH = Math.max(1, h - (my * 2) - (gy * (r - 1)));
+  const cellW = Math.max(1, Number(meta?.cellW || 0) || (usableW / c));
+  const cellH = Math.max(1, Number(meta?.cellH || 0) || (usableH / r));
+  const index = Math.max(0, Math.min((r * c) - 1, (Number(tile) || 1) - 1));
+  const x = index % c;
+  const y = Math.floor(index / c);
+  return { sx: mx + x * (cellW + gx), sy: my + y * (cellH + gy), sw: cellW, sh: cellH, sheetW: w, sheetH: h };
+}
+
+function showWeeklyThemesFloatingSave(form) {
+  document.querySelectorAll('[data-weekly-theme-floating-save]').forEach(el => el.remove());
+  if (!form) return;
+  document.body.insertAdjacentHTML('beforeend', `<div class="weekly-theme-floating-save" data-weekly-theme-floating-save><span>Weekly Theme image changed</span><button type="button" data-save-weekly-themes-now>Save Weekly Themes</button></div>`);
+}
+
+function cropProfileImageToSquare(src, zoom = 1, x = 50, y = 50) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const size = 520;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#f7f2e8";
+        ctx.fillRect(0, 0, size, size);
+        const baseScale = Math.max(size / img.width, size / img.height);
+        const scale = baseScale * Math.max(1, Number(zoom) || 1);
+        const drawW = img.width * scale;
+        const drawH = img.height * scale;
+        const maxShiftX = Math.max(0, (drawW - size) / 2);
+        const maxShiftY = Math.max(0, (drawH - size) / 2);
+        const drawX = (size - drawW) / 2 - ((Number(x) || 50) - 50) / 50 * maxShiftX;
+        const drawY = (size - drawH) / 2 - ((Number(y) || 50) - 50) / 50 * maxShiftY;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, drawX, drawY, drawW, drawH);
+        let quality = 0.86;
+        let dataUrl = canvas.toDataURL("image/jpeg", quality);
+        while (dataUrl.length > 850000 && quality > 0.45) {
+          quality -= 0.08;
+          dataUrl = canvas.toDataURL("image/jpeg", quality);
+        }
+        resolve(dataUrl);
+      } catch (err) { reject(err); }
+    };
+    img.onerror = () => reject(new Error("That image could not be cropped. Please try another image."));
+    img.src = src;
+  });
+}
+
+function getSeasonTheme(monthValue = state.villageVoiceSelectedMonth) {
+  const month = Number(monthValue || 1);
+  if ([12,1,2].includes(month)) return "winter";
+  if ([3,4,5].includes(month)) return "spring";
+  if ([6,7,8].includes(month)) return "summer";
+  return "fall";
+}
+
+function villageVoiceBlockPresets() {
+  return [
+    { id: "message", label: "Opening Message", kind: "textarea", placeholder: "Write the opening family message here." },
+    { id: "directorNote", label: "Director's Note", kind: "textarea", placeholder: "Add the director note here." },
+    { id: "coreChampion", label: "CORE Counts Champion", kind: "champion", placeholder: "Add why this team member is being celebrated." },
+    { id: "classroomSpotlight", label: "Classroom Spotlight", kind: "textarea", placeholder: "Add classroom or curriculum highlights here." },
+    { id: "importantDates", label: "Important Dates", kind: "dates", placeholder: "Jan 8 - Pajama Day\nJan 15 - Closed for Holiday" }
+  ];
+}
+
+function makeVillageVoiceBlockId() {
+  return `custom_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function normalizeVillageVoiceBlocks(draft = {}) {
+  const legacy = {
+    message: draft.message || "We are excited for another month of learning, growing, and celebrating around the Village.",
+    directorNote: draft.directorNote || "Add the director note or monthly family message here.",
+    coreChampion: draft.coreQuote || "This champion showed kindness, teamwork, and commitment to our CORE values.",
+    classroomSpotlight: draft.classroomSpotlight || "Add classroom highlights, learning themes, or special moments here.",
+    importantDates: draft.importantDates || ""
+  };
+  const presets = villageVoiceBlockPresets();
+  const existing = Array.isArray(draft.blocks) ? draft.blocks : [];
+  const presetBlocks = presets.map(preset => {
+    const found = existing.find(b => b.id === preset.id) || {};
+    return {
+      ...preset,
+      id: preset.id,
+      kind: preset.kind || "textarea",
+      title: found.title || preset.label,
+      content: found.content ?? legacy[preset.id] ?? "",
+      backgroundImageData: found.backgroundImageData || "",
+      clipArtImageData: found.clipArtImageData || "",
+      clipArtSize: found.clipArtSize || "small",
+      clipArtPosition: found.clipArtPosition || "top-right",
+      backgroundColor: found.backgroundColor || "#ffffff",
+      textColor: found.textColor || "#1f2f2a",
+      borderStyle: found.borderStyle || "none",
+      borderColor: found.borderColor || "#2f6f63",
+      functionType: found.functionType || ({ coreChampion: "coreChampion", monthlyThemes: "monthlyThemes", letterLand: "letterLand", saveTheDate: "saveTheDate" }[preset.id] || "manual"),
+      textStyle: normalizeVillageVoiceTextStyle(found.textStyle)
+    };
+  });
+  const customBlocks = existing
+    .filter(b => b && b.id && !presets.some(p => p.id === b.id))
+    .map(b => ({
+      id: b.id,
+      label: b.label || b.title || "New Block",
+      kind: b.kind || "textarea",
+      placeholder: b.placeholder || "Add content here.",
+      title: b.title || b.label || "New Block",
+      content: b.content || "",
+      backgroundImageData: b.backgroundImageData || "",
+      clipArtImageData: b.clipArtImageData || "",
+      clipArtSize: b.clipArtSize || "small",
+      clipArtPosition: b.clipArtPosition || "top-right",
+      backgroundColor: b.backgroundColor || "#ffffff",
+      textColor: b.textColor || "#1f2f2a",
+      borderStyle: b.borderStyle || "none",
+      borderColor: b.borderColor || "#2f6f63",
+      functionType: b.functionType || "manual",
+      textStyle: normalizeVillageVoiceTextStyle(b.textStyle)
+    }));
+  return [...presetBlocks, ...customBlocks];
+}
+
+function normalizeVillageVoiceLayout(draft = {}) {
+  const blocks = normalizeVillageVoiceBlocks(draft);
+  const ids = new Set(blocks.map(b => b.id));
+  const defaultRows = [["coreChampion"], ["message"], ["directorNote"], ["classroomSpotlight"], ["importantDates"]];
+  const rawRows = Array.isArray(draft.layout) ? draft.layout : [];
+  const rawHasUsableBlock = rawRows.some(row => (Array.isArray(row) ? row : [row]).some(id => ids.has(id)));
+  // IMPORTANT: do not throw away a valid saved layout just because it does not contain
+  // older migration block ids. That was resetting every drag/drop back to one block per row.
+  const rows = rawHasUsableBlock ? rawRows : defaultRows;
+  const clean = [];
+  const used = new Set();
+  rows.forEach(row => {
+    const rowIds = (Array.isArray(row) ? row : [row]).filter(id => ids.has(id) && !used.has(id)).slice(0, 2);
+    if (rowIds.length) {
+      rowIds.forEach(id => used.add(id));
+      clean.push(rowIds);
+    }
+  });
+  blocks.forEach(block => { if (!used.has(block.id)) clean.push([block.id]); });
+  return clean;
+}
+
+function defaultVillageVoiceDraft() {
+  const champion = getVillageVoiceChampionUsers()[0] || null;
+  const base = {
+    title: "The Village Voice",
+    month: state.villageVoiceSelectedMonth,
+    theme: getSeasonTheme(state.villageVoiceSelectedMonth),
+    coreChampionUid: champion?.uid || "",
+    headline: "Welcome Back, OVA Families!",
+    editionLabel: `${new Date(2026, Number(state.villageVoiceSelectedMonth || 1)-1, 1).toLocaleString("en-US", { month: "long" })}, ${new Date().getFullYear()}`,
+    footer: "Oak Village Academy",
+    footerTagline: "Learning • Growing • Belonging",
+    headerFontFamily: "serif",
+    headerTitleSize: "large",
+    headlineSize: "medium",
+    footerFontFamily: "sans",
+    footerSize: "medium"
+  };
+  base.blocks = normalizeVillageVoiceBlocks(base);
+  base.layout = normalizeVillageVoiceLayout(base);
+  return base;
+}
+
+function currentVillageVoiceDraft() {
+  const draft = { ...defaultVillageVoiceDraft(), ...(state.villageVoiceDraft || {}) };
+  draft.blocks = normalizeVillageVoiceBlocks(draft);
+  const overrideRows = readLocalJson(VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY, null);
+  if (Array.isArray(overrideRows) && overrideRows.length) {
+    draft.layout = overrideRows;
+  }
+  draft.layout = normalizeVillageVoiceLayout(draft);
+  draft.theme = draft.theme || getSeasonTheme(draft.month);
+  draft.editionLabel = draft.editionLabel || `${new Date(2026, Number(draft.month || 1)-1, 1).toLocaleString("en-US", { month: "long" })}, ${new Date().getFullYear()}`;
+  draft.footerTagline = draft.footerTagline || "Learning • Growing • Belonging";
+  draft.headerFontFamily = draft.headerFontFamily || "serif";
+  draft.headerTitleSize = draft.headerTitleSize || "large";
+  draft.headlineSize = draft.headlineSize || "medium";
+  draft.footerFontFamily = draft.footerFontFamily || "sans";
+  draft.footerSize = draft.footerSize || "medium";
+  return draft;
+}
+
+function getVillageVoiceChampionUsers() {
+  const seen = new Set();
+  return [...(state.users || []), ...(state.roster || [])]
+    .filter(u => u && u.uid && u.active !== false)
+    .filter(u => {
+      if (seen.has(u.uid)) return false;
+      seen.add(u.uid);
+      return true;
+    })
+    .sort(byName);
+}
+
+function villageVoiceChampionOptions(selectedUid) {
+  const users = getVillageVoiceChampionUsers();
+  return users.map(u => {
+    const name = getUserUsedName(u) || `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email || "Team Member";
+    const details = [u.teamPosition || u.position || "", u.email || ""].filter(Boolean).join(" • ");
+    return `<option value="${escapeHtml(u.uid)}" ${selectedUid === u.uid ? "selected" : ""}>${escapeHtml(name)}${details ? ` — ${escapeHtml(details)}` : ""}</option>`;
+  }).join("");
+}
+
+function getVillageVoiceChampion(draft = currentVillageVoiceDraft()) {
+  const users = getVillageVoiceChampionUsers();
+  return users.find(u => u.uid === draft.coreChampionUid) || users[0] || null;
+}
+
+function splitVillageVoiceDates(text) {
+  return String(text || "").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+}
+
+function getVillageVoiceBlock(draft, blockId) {
+  return (draft.blocks || []).find(b => b.id === blockId) || normalizeVillageVoiceBlocks(draft).find(b => b.id === blockId);
+}
+
+function getVillageVoiceFunctionLines(functionType, draft) {
+  if (functionType === "importantDates") return renderImportantDatesLines(draft.month);
+  if (functionType === "weeklyThemes") return renderWeeklyThemeLines(draft.month);
+  if (functionType === "monthlyThemes") return renderVillageVoiceMonthlyThemeLines(draft.month);
+  if (functionType === "saveTheDate") return renderVillageVoiceSaveDateLines(draft.month, !!draft.__activeBlockShowNextMonth);
+  return [];
+}
+
+function defaultVillageVoiceTextStyle() {
+  return { fontFamily: "serif", titleSize: "medium", bodySize: "medium", titleStyle: "uppercase", bodyStyle: "normal" };
+}
+
+function normalizeVillageVoiceTextStyle(style = {}) {
+  return { ...defaultVillageVoiceTextStyle(), ...(style || {}) };
+}
+
+function villageVoiceFontCss(value) {
+  const fonts = {
+    serif: "Georgia, 'Times New Roman', serif",
+    sans: "Arial, Helvetica, sans-serif",
+    friendly: "'Trebuchet MS', Arial, sans-serif",
+    formal: "'Palatino Linotype', Palatino, Georgia, serif",
+    bold: "Impact, Arial Black, Arial, sans-serif"
+  };
+  return fonts[value] || fonts.serif;
+}
+
+function villageVoiceTitleSizeCss(value) {
+  return ({ small: ".98rem", medium: "1.35rem", large: "1.75rem", xlarge: "2.15rem" })[value] || "1.35rem";
+}
+
+function villageVoiceBodySizeCss(value) {
+  return ({ small: ".82rem", medium: ".96rem", large: "1.08rem", xlarge: "1.22rem" })[value] || ".96rem";
+}
+
+function villageVoiceStyleCss(value, target = "body") {
+  if (value === "bold") return "font-weight:900;font-style:normal;text-transform:none;";
+  if (value === "italic") return "font-weight:500;font-style:italic;text-transform:none;";
+  if (value === "uppercase") return "font-weight:900;font-style:normal;text-transform:uppercase;";
+  if (value === "soft") return "font-weight:500;font-style:normal;text-transform:none;letter-spacing:.01em;";
+  return target === "title" ? "font-weight:900;font-style:normal;text-transform:none;" : "font-weight:500;font-style:normal;text-transform:none;";
+}
+
+
+function villageVoiceInlineTextStyle(style = {}, target = "body") {
+  style = normalizeVillageVoiceTextStyle(style);
+  const declarations = [
+    `font-family:${villageVoiceFontCss(style.fontFamily)}`,
+    `font-size:${target === "title" ? villageVoiceTitleSizeCss(style.titleSize) : villageVoiceBodySizeCss(style.bodySize)}`
+  ];
+  const extra = villageVoiceStyleCss(target === "title" ? style.titleStyle : style.bodyStyle, target).replace(/;$/,'');
+  if (extra) declarations.push(extra);
+  return ` style="${declarations.join(';')}"`;
+}
+
+function villageVoiceBlockStyleAttr(block = {}) {
+  const style = normalizeVillageVoiceTextStyle(block.textStyle);
+  const bgColor = block.backgroundColor || "#ffffff";
+  const textColor = block.textColor || "#1f2f2a";
+  const bgImage = block.backgroundImageData
+    ? `linear-gradient(rgba(255,255,255,.76), rgba(255,255,255,.76)), url('${block.backgroundImageData}')`
+    : "none";
+  const borderStyle = block.borderStyle || "none";
+  const borderColor = block.borderColor || "#2f6f63";
+  const borderCss = ({ none: "0 solid transparent", solid: `3px solid ${borderColor}`, dashed: `3px dashed ${borderColor}`, dotted: `3px dotted ${borderColor}`, double: `5px double ${borderColor}`, leafy: `4px solid ${borderColor}` })[borderStyle] || "0 solid transparent";
+  const parts = [
+    `--voice-block-font:${villageVoiceFontCss(style.fontFamily)}`,
+    `--voice-block-title-size:${villageVoiceTitleSizeCss(style.titleSize)}`,
+    `--voice-block-body-size:${villageVoiceBodySizeCss(style.bodySize)}`,
+    `--voice-block-bg:${bgColor}`,
+    `--voice-block-bg-image:${bgImage}`,
+    `--voice-block-color:${textColor}`,
+    `--voice-block-border:${borderCss}`,
+    `--voice-block-border-color:${borderColor}`,
+    `background-color:${bgColor} !important`,
+    `background-image:${bgImage} !important`,
+    `color:${textColor} !important`,
+    `background-size:cover !important`,
+    `background-position:center !important`,
+    `border:${borderCss} !important`
+  ];
+  return ` style="${parts.join(';')}"`;
+}
+
+function villageVoicePreviewStyleAttr(draft = {}) {
+  const font = villageVoiceFontCss(draft.headerFontFamily || "serif");
+  const footerFont = villageVoiceFontCss(draft.footerFontFamily || draft.headerFontFamily || "sans");
+  const titleSize = ({ small: "3.2rem", medium: "4.2rem", large: "5.15rem", xlarge: "6rem" })[draft.headerTitleSize || "large"] || "5.15rem";
+  const headlineSize = ({ small: ".86rem", medium: "1rem", large: "1.22rem", xlarge: "1.42rem" })[draft.headlineSize || "medium"] || "1rem";
+  const footerSize = ({ small: ".78rem", medium: ".9rem", large: "1.05rem", xlarge: "1.2rem" })[draft.footerSize || "medium"] || ".9rem";
+  return ` style="--voice-header-font:${font};--voice-header-title-size:${titleSize};--voice-headline-size:${headlineSize};--voice-footer-font:${footerFont};--voice-footer-size:${footerSize};"`;
+}
+
+function renderVillageVoiceFontControls(prefix, style = defaultVillageVoiceTextStyle()) {
+  style = normalizeVillageVoiceTextStyle(style);
+  return `
+    <div class="voice-font-grid">
+      <label>Font Type
+        <select data-village-live data-${prefix}-font-family>
+          ${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${style.fontFamily === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+      <label>Title Size
+        <select data-village-live data-${prefix}-title-size>
+          ${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${style.titleSize === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+      <label>Content Size
+        <select data-village-live data-${prefix}-body-size>
+          ${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${style.bodySize === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+      <label>Title Style
+        <select data-village-live data-${prefix}-title-style>
+          ${[["uppercase","Uppercase"],["normal","Normal"],["bold","Bold"],["italic","Italic"]].map(([v,l]) => `<option value="${v}" ${style.titleStyle === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+      <label>Content Style
+        <select data-village-live data-${prefix}-body-style>
+          ${[["normal","Normal"],["bold","Bold"],["italic","Italic"],["soft","Soft"]].map(([v,l]) => `<option value="${v}" ${style.bodyStyle === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </label>
+    </div>`;
+}
+
+
+function villageVoiceOvaColorPalette() {
+  return [
+    {
+      group: "Leaf Greens",
+      colors: [
+        { name: "Deep Leaf", value: "#1f4d38" },
+        { name: "OVA Green", value: "#2f7d45" },
+        { name: "Watercolor Green", value: "#6dad5f" },
+        { name: "Soft Leaf", value: "#8fca77" },
+        { name: "Light Leaf", value: "#a8d88f" },
+        { name: "Pale Leaf", value: "#d8efc8" }
+      ]
+    },
+    {
+      group: "Yellow / Cream",
+      colors: [
+        { name: "Yellow Leaf", value: "#d8e86d" },
+        { name: "Soft Yellow", value: "#eef4a9" },
+        { name: "Warm Cream", value: "#f6efd4" },
+        { name: "Paper Cream", value: "#fbf7e8" }
+      ]
+    },
+    {
+      group: "Tree / Wood",
+      colors: [
+        { name: "Light Bark", value: "#f0c18e" },
+        { name: "Tree Tan", value: "#d49a63" },
+        { name: "Warm Brown", value: "#8b5b36" },
+        { name: "Deep Bark", value: "#56371f" }
+      ]
+    },
+    {
+      group: "Logo Neutrals",
+      colors: [
+        { name: "White", value: "#ffffff" },
+        { name: "Soft Gray", value: "#eef1ec" },
+        { name: "Logo Charcoal", value: "#111512" },
+        { name: "Almost Black", value: "#050706" }
+      ]
+    }
+  ];
+}
+
+function renderVillageVoiceOvaColorSwatches(blockId) {
+  return `<div class="ova-color-palette"><div class="ova-color-palette-title"><strong>OVA Background Colors</strong><small>Tap a swatch to set the block background.</small></div>${villageVoiceOvaColorPalette().map(group => `<div class="ova-color-group"><span>${escapeHtml(group.group)}</span><div class="ova-color-swatches">${group.colors.map(c => `<button type="button" class="ova-color-swatch" title="${escapeHtml(c.name)} ${c.value}" aria-label="Use ${escapeHtml(c.name)} as background" style="background:${c.value}" data-ova-block-color="${escapeHtml(blockId)}" data-ova-color="${c.value}"></button>`).join("")}</div></div>`).join("")}</div>`;
+}
+
+function renderVillageVoiceBackgroundPicker(block) {
+  const id = escapeHtml(block.id);
+  const color = escapeHtml(block.backgroundColor || "#ffffff");
+  return `<div class="voice-bg-picker-wrap">
+    <button type="button" class="secondary small voice-bg-open-btn" data-open-voice-bg-modal="${id}">Change Background</button>
+    <span class="voice-bg-current-chip" style="background:${color}" title="Current background"></span>
+    <input type="hidden" data-block-bg-color="${id}" value="${color}" />
+  </div>`;
+}
+
+function renderVillageVoiceBgModal(block) {
+  if (!block || state.villageVoiceBgPickerId !== block.id) return "";
+  const id = escapeHtml(block.id);
+  const color = escapeHtml(block.backgroundColor || "#ffffff");
+  return `<div class="voice-bg-modal-backdrop" data-close-voice-bg-modal>
+    <div class="voice-bg-modal" role="dialog" aria-modal="true" aria-label="Choose block background" data-stop-voice-bg-close>
+      <div class="voice-bg-modal-head"><h3>Block Background</h3><button type="button" class="secondary small" data-close-voice-bg-modal>×</button></div>
+      <p class="helper">Hover a color to preview it. Click to apply it.</p>
+      ${renderVillageVoiceOvaColorSwatches(block.id)}
+      <label class="voice-custom-color-row">Any Color<input type="color" data-voice-bg-modal-color="${id}" value="${color}" /></label>
+      <div class="actions"><button type="button" class="secondary" data-close-voice-bg-modal>Cancel</button><button type="button" data-apply-voice-bg-color="${id}">Use This Color</button></div>
+    </div>
+  </div>`;
+}
+
+
+function renderVillageVoiceClipArt(block = {}) {
+  if (!block.clipArtImageData) return "";
+  const size = ["small", "medium", "large"].includes(block.clipArtSize) ? block.clipArtSize : "small";
+  const pos = ["top-left", "top-right", "bottom-left", "bottom-right", "center"].includes(block.clipArtPosition) ? block.clipArtPosition : "top-right";
+  return `<img class="voice-block-clip-art clip-${size} clip-${pos}" src="${block.clipArtImageData}" alt="Block clip art" />`;
+}
+
+function renderVillageVoiceBlockPreview(block, draft, rowIndex = 0, colIndex = 0) {
+  if (!block) return "";
+  const title = escapeHtml(block.title || block.label || "New Block");
+  const blockStyle = villageVoiceBlockStyleAttr(block);
+  const titleTextStyle = villageVoiceInlineTextStyle(block.textStyle, "title");
+  const bodyTextStyle = villageVoiceInlineTextStyle(block.textStyle, "body");
+  const functionType = block.functionType || (block.kind === "champion" ? "coreChampion" : "manual");
+  const isSelected = state.expandedVillageVoiceEditorId === block.id;
+  const normalizedStyle = normalizeVillageVoiceTextStyle(block.textStyle);
+  const commonClass = `voice-block voice-kind-${escapeHtml(block.kind || "textarea")} voice-title-size-${escapeHtml(normalizedStyle.titleSize)} voice-body-size-${escapeHtml(normalizedStyle.bodySize)} ${functionType === "coreChampion" ? "voice-champion-block" : ""} ${isSelected ? "voice-preview-selected" : ""}`;
+  const clipArt = renderVillageVoiceClipArt(block);
+  if (functionType === "coreChampion") {
+    const champion = getVillageVoiceChampion(draft);
+    return `
+      <section class="${commonClass}" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}>
+        <div class="voice-ribbon">${title}</div>
+        <div class="voice-champion-inner">
+          <div class="voice-photo-ring"><div class="voice-photo">${champion?.profileImageData ? `<img src="${champion.profileImageData}" alt="${escapeHtml(getUserUsedName(champion))}" />` : `<span>No Photo</span>`}</div></div>
+          <div class="voice-champion-copy">
+            <h2${titleTextStyle}>${champion ? escapeHtml(getUserUsedName(champion)) : "Choose a staff member"}</h2>
+            <p${bodyTextStyle}>${escapeHtml(block.content || block.placeholder || "").replace(/\n/g,"<br>")}</p>
+          </div>
+        </div>
+        ${clipArt}
+      ${clipArt}</section>`;
+  }
+  const functionLines = functionType === "saveTheDate"
+    ? renderVillageVoiceSaveDateLines(draft.month, !!block.showNextMonthDates)
+    : getVillageVoiceFunctionLines(functionType, draft);
+  if (functionType === "letterLand") {
+    const items = getVillageVoiceLetterLandItems(draft.month);
+    return `<section class="${commonClass} voice-letterland-block" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2>${items.length ? `<div class="voice-letterland-grid">${items.map(item => {
+      const visual = item.spriteTile && item.spriteSheet
+        ? renderLetterlandSpriteForVoice(item.spriteSheet, item.spriteRows, item.spriteCols, item.spriteTile, `Letterland week ${item.week}`, { width: item.spriteWidth, height: item.spriteHeight, marginX: item.spriteMarginX, marginY: item.spriteMarginY, gapX: item.spriteGapX, gapY: item.spriteGapY, cellW: item.spriteCellW, cellH: item.spriteCellH })
+        : item.image
+          ? `<img src="${item.image}" alt="Letterland week ${item.week}" />`
+          : `<div class="letterland-placeholder">${escapeHtml(item.letterland || "Letterland")}</div>`;
+      return `<figure>${visual}<figcaption>Week ${escapeHtml(item.weekOfMonth || item.week)}${item.letterland ? `<br><small>${escapeHtml(item.letterland)}</small>` : ""}</figcaption></figure>`;
+    }).join("")}</div>` : `<p>Add Letterland details in Leadership → Weekly Themes.</p>`}</section>`;
+  }
+  if (["importantDates", "weeklyThemes", "monthlyThemes", "saveTheDate"].includes(functionType)) {
+    const emptyText = functionType === "saveTheDate" ? "No Village Voice dates marked for this month yet." : functionType === "monthlyThemes" ? "No monthly themes found for this month yet." : functionType === "importantDates" ? "No important dates found for this month yet." : "No weekly themes found for this month yet.";
+    return `<section class="${commonClass} voice-dates-block ${functionType === "saveTheDate" ? "voice-save-date-block" : ""} ${functionType === "monthlyThemes" ? "voice-monthly-themes-block" : ""}" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2>${functionLines.length ? `<ul${bodyTextStyle}>${functionLines.map(d => `<li${bodyTextStyle}>${escapeHtml(d)}</li>`).join("")}</ul>` : `<p${bodyTextStyle}>${emptyText}</p>`}${clipArt}</section>`;
+  }
+  if (block.kind === "dates") {
+    const dates = splitVillageVoiceDates(block.content);
+    return `<section class="${commonClass} voice-dates-block" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2>${dates.length ? `<ul${bodyTextStyle}>${dates.map(d => `<li${bodyTextStyle}>${escapeHtml(d)}</li>`).join("")}</ul>` : `<p${bodyTextStyle}>Add dates and reminders here.</p>`}${clipArt}</section>`;
+  }
+  return `<section class="${commonClass}" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2><p${bodyTextStyle}>${escapeHtml(block.content || block.placeholder || "").replace(/\n/g,"<br>")}</p>${clipArt}</section>`;
+}
+
+
+function renderVillageVoicePreviewRow(row, draft, rowIndex) {
+  const ids = (Array.isArray(row) ? row : [row]).filter(Boolean).slice(0, 2);
+  const hasTwo = ids.length > 1;
+  const blockHtml = ids.map((id, colIndex) => `
+    <div class="voice-layout-slot ${hasTwo ? "" : "slot-full"}" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="${colIndex}">
+      ${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, id), draft, rowIndex, colIndex)}
+    </div>`).join("");
+  const emptySlot = !hasTwo ? `<div class="voice-layout-slot voice-empty-side-slot" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="1" data-empty-side-for="${escapeHtml(ids[0] || "")}"><span>Drop here to make 2 columns</span></div>` : "";
+  return `<div class="voice-preview-row ${hasTwo ? "two-col" : "full-col"}" data-voice-preview-row="${rowIndex}">${blockHtml}${emptySlot}</div>`;
+}
+
+function renderVillageVoicePreviewRowsMasonry(rows, draft) {
+  let html = "";
+  for (let i = 0; i < rows.length; i++) {
+    const row = (Array.isArray(rows[i]) ? rows[i] : [rows[i]]).filter(Boolean).slice(0, 2);
+    if (row.length > 1) {
+      const left = [];
+      const right = [];
+      const start = i;
+      while (i < rows.length) {
+        const two = (Array.isArray(rows[i]) ? rows[i] : [rows[i]]).filter(Boolean).slice(0, 2);
+        if (two.length <= 1) break;
+        left.push({ id: two[0], rowIndex: i });
+        right.push({ id: two[1], rowIndex: i });
+        i++;
+      }
+      i--;
+      html += `<div class="voice-preview-row two-col voice-masonry-row" data-voice-preview-row="${start}">
+        <div class="voice-masonry-col" data-voice-masonry-col="0">${left.map(item => `<div class="voice-layout-slot" data-voice-drop-slot data-voice-row="${item.rowIndex}" data-voice-col="0">${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, item.id), draft, item.rowIndex, 0)}</div>`).join("")}</div>
+        <div class="voice-masonry-col" data-voice-masonry-col="1">${right.map(item => `<div class="voice-layout-slot" data-voice-drop-slot data-voice-row="${item.rowIndex}" data-voice-col="1">${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, item.id), draft, item.rowIndex, 1)}</div>`).join("")}</div>
+      </div>`;
+    } else {
+      html += renderVillageVoicePreviewRow(row, draft, i);
+    }
+  }
+  return html;
+}
+
+
+function renderVillageVoicePreviewHtml(draft = currentVillageVoiceDraft()) {
+  const theme = draft.theme || getSeasonTheme(draft.month);
+  const monthName = new Date(2026, Number(draft.month || 1)-1, 1).toLocaleString("en-US", { month: "long" });
+  const rows = normalizeVillageVoiceLayout(draft);
+  return `
+    <div class="voice-flyer-preview theme-${theme}"${villageVoicePreviewStyleAttr(draft)}>
+      <div class="voice-snow voice-snow-a">✦</div><div class="voice-snow voice-snow-b">❄</div><div class="voice-snow voice-snow-c">✦</div>
+      <header class="voice-cover-header ${state.expandedVillageVoiceEditorId === "flyerHeader" ? "voice-preview-selected" : ""}" data-preview-special="flyerHeader">
+        ${state.appSettings?.ovaLogoData ? `<img class="voice-logo-mark voice-logo-img" src="${state.appSettings.ovaLogoData}" alt="OVA logo" />` : `<div class="voice-logo-mark">OVA</div>`}
+        <div class="voice-title-stack"><span>${escapeHtml(`${monthName}, ${draft.year || new Date().getFullYear()}`)}</span><h1>${escapeHtml(draft.title || "The Village Voice")}</h1></div>
+      </header>
+      <main class="voice-dynamic-grid">
+        ${renderVillageVoicePreviewRowsMasonry(rows, draft)}
+      </main>
+      <footer class="voice-footer ${state.expandedVillageVoiceEditorId === "flyerFooter" ? "voice-preview-selected" : ""}" data-preview-special="flyerFooter"><span>${escapeHtml(getVillageVoiceFooterLocations())}</span></footer>
+    </div>`;
+}
+
+
+function getVillageVoiceFooterLocations() {
+  const activeSchools = (state.schools || []).filter(s => s && s.active !== false);
+  const lines = activeSchools.map(s => {
+    const name = (s.name || s.code || "School").trim();
+    const address = (s.address || "").trim();
+    return address ? `${name}: ${address}` : name;
+  }).filter(Boolean);
+  return lines.length ? lines.join("  •  ") : "Oak Village Academy";
+}
+
+function renderVillageVoiceTopBar(draft) {
+  return `
+    <div class="voice-top-settings-bar">
+      <label>Month
+        <select name="month" data-village-live data-village-month>
+          ${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${draft.month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}
+        </select>
+      </label>
+      <label>Year<input name="year" data-village-live value="${escapeHtml(draft.year || new Date().getFullYear())}" /></label>
+      <label>Season Background
+        <select name="theme" data-village-live>
+          ${["winter","spring","summer","fall"].map(t => `<option value="${t}" ${draft.theme === t ? "selected" : ""}>${t[0].toUpperCase()+t.slice(1)}</option>`).join("")}
+        </select>
+      </label>
+      <div class="voice-top-title-lock"><strong>The Village Voice</strong><span>Footer uses System Admin school locations</span></div>
+      <input type="hidden" name="title" value="${escapeHtml(draft.title || "The Village Voice")}" />
+      <input type="hidden" name="headline" value="" />
+      <input type="hidden" name="footer" value="${escapeHtml(getVillageVoiceFooterLocations())}" />
+      <input type="hidden" name="footerTagline" value="" />
+    </div>`;
+}
+
+function renderVillageVoiceSelectedStyleToolbar(draft) {
+  return "";
+}
+
+function renderVillageVoiceSelectedBlockEditor(draft) {
+  const id = state.expandedVillageVoiceEditorId;
+  if (id === "flyerHeader") {
+    return `<div class="voice-left-block-editor" data-left-block-editor="flyerHeader">
+      <div class="voice-left-block-editor-head"><div><h3>Edit Header Banner</h3><p class="helper">Top banner text and sizing.</p></div><button type="button" class="secondary small" data-close-voice-inline>×</button></div>
+      <div class="voice-tab-panel">
+        <label>Month<select name="month" data-village-live data-village-month>${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${draft.month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}</select></label>
+        <label>Year<input name="year" data-village-live value="${escapeHtml(draft.year || new Date().getFullYear())}" /></label>
+        <label>Banner Title<input name="title" data-village-live value="${escapeHtml(draft.title || "The Village Voice")}" /></label>
+        <label>Header Font<select name="headerFontFamily" data-village-live>${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${draft.headerFontFamily === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label>Title Size<select name="headerTitleSize" data-village-live>${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.headerTitleSize === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      </div>
+    </div>`;
+  }
+  if (id === "flyerFooter") {
+    return `<div class="voice-left-block-editor" data-left-block-editor="flyerFooter"><div class="voice-left-block-editor-head"><div><h3>Edit Footer Banner</h3><p class="helper">Footer uses System Admin school locations.</p></div><button type="button" class="secondary small" data-close-voice-inline>×</button></div><label>Footer Font<select name="footerFontFamily" data-village-live>${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${draft.footerFontFamily === v ? "selected" : ""}>${l}</option>`).join("")}</select></label><label>Footer Size<select name="footerSize" data-village-live>${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.footerSize === v ? "selected" : ""}>${l}</option>`).join("")}</select></label></div>`;
+  }
+  const block = getVillageVoiceBlock(draft, id);
+  if (!block) return "";
+  const activeTab = state.villageVoiceSelectedBlockTab === "style" ? "style" : "content";
+  const isChampion = (block.functionType || (block.kind === "champion" ? "coreChampion" : "manual")) === "coreChampion";
+  const hiddenStyleFields = `
+    <input type="hidden" data-block-bg-color="${block.id}" value="${escapeHtml(block.backgroundColor || "#ffffff")}" />
+    <input type="hidden" data-block-text-color="${block.id}" value="${escapeHtml(block.textColor || "#1f2f2a")}" />
+    <input type="hidden" data-block-bg-data="${block.id}" value="${block.backgroundImageData || ""}" />
+    <input type="hidden" data-block-border-style="${block.id}" value="${escapeHtml(block.borderStyle || "none")}" />
+    <input type="hidden" data-block-border-color="${block.id}" value="${escapeHtml(block.borderColor || "#2f6f63")}" />
+    <input type="hidden" data-block-clip-data="${block.id}" value="${block.clipArtImageData || ""}" />
+    <input type="hidden" data-block-clip-size="${block.id}" value="${escapeHtml(block.clipArtSize || "small")}" />
+    <input type="hidden" data-block-clip-position="${block.id}" value="${escapeHtml(block.clipArtPosition || "top-right")}" />`;
+  const hiddenContentFields = `
+    <input type="hidden" data-block-title="${block.id}" value="${escapeHtml(block.title || block.label || "New Block")}" />
+    <input type="hidden" data-block-content="${block.id}" value="${escapeHtml(block.content || "")}" />
+    <input type="hidden" data-block-function="${block.id}" value="${escapeHtml(block.functionType || "manual")}" />
+    <input type="hidden" data-block-show-next-month="${block.id}" value="${block.showNextMonthDates ? "1" : ""}" />`;
+  return `
+    <div class="voice-left-block-editor" data-left-block-editor="${block.id}">
+      <div class="voice-left-block-editor-head">
+        <div><h3>Edit Block</h3><p class="helper">Editing: ${escapeHtml(block.title || block.label || "Block")}</p></div>
+        <button type="button" class="secondary small" data-close-voice-inline title="Close editor">×</button>
+      </div>
+      <div class="voice-editor-tabs" role="tablist" aria-label="Selected block options">
+        <button type="button" class="${activeTab === "content" ? "active" : ""}" data-voice-block-tab="content">Content Options</button>
+        <button type="button" class="${activeTab === "style" ? "active" : ""}" data-voice-block-tab="style">Background / Text</button>
+      </div>
+      ${activeTab === "content" ? `
+        <div class="voice-tab-panel">
+          <label>Block Title<input class="voice-block-title-input" data-village-live data-block-title="${block.id}" value="${escapeHtml(block.title || block.label || "New Block")}" /></label>
+          <label>Function
+            <select data-village-live data-block-function="${block.id}">
+              <option value="manual" ${(block.functionType || "manual") === "manual" ? "selected" : ""}>Manual content</option>
+              <option value="coreChampion" ${(block.functionType || "") === "coreChampion" ? "selected" : ""}>CORE Counts person picker</option>
+              <option value="saveTheDate" ${(block.functionType || "") === "saveTheDate" ? "selected" : ""}>Save the Date</option>
+              <option value="monthlyThemes" ${(block.functionType || "") === "monthlyThemes" ? "selected" : ""}>Monthly Themes</option>
+              <option value="letterLand" ${(block.functionType || "") === "letterLand" ? "selected" : ""}>Letter Land images</option>
+              <option value="importantDates" ${(block.functionType || "") === "importantDates" ? "selected" : ""}>Pull Important Dates for selected month</option>
+              <option value="weeklyThemes" ${(block.functionType || "") === "weeklyThemes" ? "selected" : ""}>Pull Weekly Themes for selected month</option>
+            </select>
+          </label>
+          ${(block.functionType || "manual") === "saveTheDate" ? `<label class="voice-check-row"><input type="checkbox" data-village-live data-block-show-next-month="${block.id}" ${block.showNextMonthDates ? "checked" : ""} /> Show next month&apos;s dates also</label>` : `<input type="hidden" data-block-show-next-month="${block.id}" value="${block.showNextMonthDates ? "1" : ""}" />`}
+          ${isChampion ? `<label>CORE Counts Champion
+            <select name="coreChampionUid" data-village-live data-village-champion>
+              <option value="">Choose a team member...</option>
+              ${villageVoiceChampionOptions(currentVillageVoiceDraft().coreChampionUid)}
+            </select>
+          </label>` : ""}
+          <label>${block.kind === "dates" ? "Dates / Lines" : "Content"}
+            <textarea data-village-live data-block-content="${block.id}" rows="${block.kind === "dates" ? 6 : 5}" placeholder="${escapeHtml(block.placeholder || "")}">${escapeHtml(block.content || "")}</textarea>
+          </label>
+          <div class="voice-inline-style-grid voice-clipart-grid">
+            <label>Clip Art / Small Image<input type="file" accept="image/*" data-village-block-clip="${block.id}" /></label>
+            <label>Clip Art Size
+              <select data-village-live data-block-clip-size="${block.id}">
+                ${[["small","Small"],["medium","Medium"],["large","Large"]].map(([v,l]) => `<option value="${v}" ${(block.clipArtSize || "small") === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+            <label>Clip Art Position
+              <select data-village-live data-block-clip-position="${block.id}">
+                ${[["top-right","Top Right"],["top-left","Top Left"],["bottom-right","Bottom Right"],["bottom-left","Bottom Left"],["center","Center"]].map(([v,l]) => `<option value="${v}" ${(block.clipArtPosition || "top-right") === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+            ${block.clipArtImageData ? `<img class="voice-clipart-preview" src="${block.clipArtImageData}" alt="Clip art preview" /><button type="button" class="secondary small" data-clear-voice-clip="${block.id}">Remove Clip Art</button>` : ""}
+          </div>
+          ${hiddenStyleFields}
+        </div>` : `
+        <div class="voice-tab-panel">
+          ${renderVillageVoiceFontControls(`block-${block.id}`, block.textStyle)}
+          <div class="voice-inline-style-grid">
+            ${renderVillageVoiceBackgroundPicker(block)}
+            <label>Border Style<select data-village-live data-block-border-style="${block.id}">${[["none","No Border"],["solid","Solid"],["dashed","Dashed"],["dotted","Dotted"],["double","Double"],["leafy","Thick OVA"]].map(([v,l]) => `<option value="${v}" ${(block.borderStyle || "none") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+            <label>Border Color<input type="color" data-village-live data-block-border-color="${block.id}" value="${escapeHtml(block.borderColor || "#2f6f63")}" /></label>
+            <label>Text Color<input type="color" data-village-live data-block-text-color="${block.id}" value="${escapeHtml(block.textColor || "#1f2f2a")}" /></label>
+            <label>Background Image<input type="file" accept="image/*" data-village-block-bg="${block.id}" /></label>
+            ${block.backgroundImageData ? `<button type="button" class="secondary small" data-clear-voice-bg="${block.id}">Remove Image</button>` : ""}
+          </div>
+          <input type="hidden" data-block-bg-data="${block.id}" value="${block.backgroundImageData || ""}" />
+          ${renderVillageVoiceBgModal(block)}
+          ${hiddenContentFields}
+        </div>`}
+      <p class="helper">Click × to return to the content block list.</p>
+    </div>`;
+}
+
+function renderVillageVoiceControlsPanel(draft, canArrange) {
+  const selectedStyleEditor = renderVillageVoiceSelectedBlockEditor(draft);
+  if (selectedStyleEditor) return `
+    <div class="card subtle-card voice-controls voice-controls-style-mode">
+      ${selectedStyleEditor}
+      <div class="voice-hidden-draft-fields" aria-hidden="true">
+        ${normalizeVillageVoiceBlocks(draft).map(block => `
+          <input type="hidden" data-block-title="${block.id}" value="${escapeHtml(block.title || block.label || "New Block")}" />
+          <input type="hidden" data-block-content="${block.id}" value="${escapeHtml(block.content || "")}" />
+          <input type="hidden" data-block-function="${block.id}" value="${escapeHtml(block.functionType || "manual")}" />
+        `).join("")}
+      </div>
+      <div class="actions"><button type="button" class="secondary" data-reset-village-voice>Reset to Default</button><button type="button" class="secondary" data-export-village-pdf>Export PDF</button><button type="submit">Save Village Voice</button></div>
+    </div>`;
+  return `
+    <div class="card subtle-card voice-controls">
+      <h3>Content Blocks</h3>
+      ${!canArrange ? `<div class="voice-layout-hint muted">You can edit content, but layout arranging requires the Arrange Printable Layouts permission.</div>` : ""}
+      <div class="voice-block-list" data-voice-block-list>
+        ${renderVillageVoiceEditorRows(draft, canArrange)}
+      </div>
+      <div class="actions"><button type="button" class="secondary" data-add-village-block>Add Content Block</button><button type="button" class="secondary" data-reset-village-voice>Reset to Default</button><button type="button" class="secondary" data-export-village-pdf>Export PDF</button><button type="submit">Save Village Voice</button></div>
+    </div>`;
+}
+
+function renderVillageVoiceEditorBlock(block, canArrange) {
+  const expanded = state.expandedVillageVoiceEditorId === block.id;
+  return `
+    <div class="voice-edit-block ${expanded ? "" : "collapsed"}" draggable="${canArrange ? "true" : "false"}" data-voice-block="${block.id}">
+      <div class="voice-edit-block-head" data-voice-toggle="${block.id}">
+        <span class="drag-handle" title="Drag to rearrange">${canArrange ? "☰" : "•"}</span>
+        <input class="voice-block-title-input" data-village-live data-block-title="${block.id}" value="${escapeHtml(block.title || block.label)}" />
+        <button type="button" class="secondary small" data-voice-collapse="${block.id}">${expanded ? "Collapse" : "Edit"}</button>
+      </div>
+      <div class="voice-edit-block-body">
+        <label>Function
+          <select data-village-live data-block-function="${block.id}">
+            <option value="manual" ${(block.functionType || "manual") === "manual" ? "selected" : ""}>Manual content</option>
+            <option value="coreChampion" ${(block.functionType || "") === "coreChampion" ? "selected" : ""}>CORE Counts person picker</option>
+            <option value="saveTheDate" ${(block.functionType || "") === "saveTheDate" ? "selected" : ""}>Save the Date</option>
+            <option value="monthlyThemes" ${(block.functionType || "") === "monthlyThemes" ? "selected" : ""}>Monthly Themes</option>
+            <option value="letterLand" ${(block.functionType || "") === "letterLand" ? "selected" : ""}>Letter Land images</option>
+            <option value="importantDates" ${(block.functionType || "") === "importantDates" ? "selected" : ""}>Pull Important Dates for selected month</option>
+            <option value="weeklyThemes" ${(block.functionType || "") === "weeklyThemes" ? "selected" : ""}>Pull Weekly Themes for selected month</option>
+          </select>
+        </label>
+        ${(block.functionType || (block.kind === "champion" ? "coreChampion" : "manual")) === "coreChampion" ? `
+          <label>CORE Counts Champion
+            <select name="coreChampionUid" data-village-live data-village-champion>
+              <option value="">Choose a staff member...</option>
+              ${villageVoiceChampionOptions(currentVillageVoiceDraft().coreChampionUid)}
+            </select>
+          </label>` : ""}
+        <label>${block.kind === "dates" ? "Dates / Lines" : "Content"}
+          <textarea data-village-live data-block-content="${block.id}" rows="${block.kind === "dates" ? 5 : 4}" placeholder="${escapeHtml(block.placeholder || "")}">${escapeHtml(block.content || "")}</textarea>
+        </label>
+        <input type="hidden" data-block-bg-color="${block.id}" value="${escapeHtml(block.backgroundColor || "#ffffff")}" />
+        <input type="hidden" data-block-text-color="${block.id}" value="${escapeHtml(block.textColor || "#1f2f2a")}" />
+        <input type="hidden" data-block-bg-data="${block.id}" value="${block.backgroundImageData || ""}" />
+        <input type="hidden" data-block-clip-data="${block.id}" value="${block.clipArtImageData || ""}" />
+        <input type="hidden" data-block-clip-size="${block.id}" value="${escapeHtml(block.clipArtSize || "small")}" />
+        <input type="hidden" data-block-clip-position="${block.id}" value="${escapeHtml(block.clipArtPosition || "top-right")}" />
+        <p class="helper">Block font, colors, background image, and clip art are in the floating toolbar after you click this block in the preview.</p>
+      </div>
+    </div>`;
+}
+
+function renderVillageVoiceSettingsBlock(draft) {
+  const expanded = state.expandedVillageVoiceEditorId === "flyerSettings";
+  return `
+    <div class="voice-edit-block voice-settings-block ${expanded ? "expanded" : "collapsed"}" data-voice-settings-block>
+      <div class="voice-edit-block-head" data-voice-toggle="flyerSettings">
+        <span class="drag-handle">⚙</span>
+        <strong>Flyer Header + Footer</strong>
+        <button type="button" class="secondary small" data-voice-collapse="flyerSettings">${expanded ? "Collapse" : "Edit"}</button>
+      </div>
+      <div class="voice-edit-block-body voice-settings-compact">
+        <label>Month
+          <select name="month" data-village-live data-village-month>
+            ${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${draft.month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}
+          </select>
+        </label>
+        <label>Season Background
+          <select name="theme" data-village-live>
+            ${["winter","spring","summer","fall"].map(t => `<option value="${t}" ${draft.theme === t ? "selected" : ""}>${t[0].toUpperCase()+t.slice(1)}</option>`).join("")}
+          </select>
+        </label>
+        <label>Year<input name="year" data-village-live value="${escapeHtml(draft.year || new Date().getFullYear())}" /></label>
+        <label>Flyer Title<input name="title" data-village-live value="${escapeHtml(draft.title)}" /></label>
+        <label>Main Headline<input name="headline" data-village-live value="${escapeHtml(draft.headline)}" /></label>
+        <label>Footer<input name="footer" data-village-live value="${escapeHtml(draft.footer)}" /></label>
+        <label>Footer Tagline<input name="footerTagline" data-village-live value="${escapeHtml(draft.footerTagline || "")}" /></label>
+        <div class="voice-style-panel">
+          <strong>Header Style</strong>
+          <div class="voice-font-grid">
+            <label>Header Font
+              <select name="headerFontFamily" data-village-live>
+                ${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${draft.headerFontFamily === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+            <label>Title Size
+              <select name="headerTitleSize" data-village-live>
+                ${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.headerTitleSize === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+            <label>Headline Size
+              <select name="headlineSize" data-village-live>
+                ${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.headlineSize === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+            <label>Footer Font
+              <select name="footerFontFamily" data-village-live>
+                ${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${draft.footerFontFamily === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+            <label>Footer Size
+              <select name="footerSize" data-village-live>
+                ${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.footerSize === v ? "selected" : ""}>${l}</option>`).join("")}
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderVillageVoiceEditorRows(draft, canArrange) {
+  const rows = normalizeVillageVoiceLayout(draft);
+  const expandedId = state.expandedVillageVoiceEditorId;
+  return rows.map((row, rowIndex) => {
+    const ids = (Array.isArray(row) ? row : [row]).filter(Boolean).slice(0, 2);
+    const isEditingInRow = expandedId && ids.includes(expandedId) && ids.length > 1;
+    const visibleRow = isEditingInRow ? [expandedId] : ids;
+    const hasTwo = visibleRow.length > 1;
+    return `
+    <div class="voice-editor-row ${isEditingInRow ? "editing-single" : (hasTwo ? "two-col" : "full-col")}" data-voice-editor-row="${rowIndex}">
+      ${visibleRow.map((id, colIndex) => `<div class="voice-layout-slot ${hasTwo ? "" : "slot-full"}" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="${colIndex}">${renderVillageVoiceEditorBlock(getVillageVoiceBlock(draft, id), canArrange)}</div>`).join("")}
+      ${(!hasTwo && !isEditingInRow && canArrange) ? `<div class="voice-layout-slot voice-empty-side-slot" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="1" data-empty-side-for="${escapeHtml(visibleRow[0] || "")}"><span>Drop here to make 2 columns</span></div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+
+function renderPrintablesTabs() {
+  const tabs = [
+    ["villageVoice", "Village Voice"],
+    ["teacherBio", "Teacher Bio"],
+    ["doorReminders", "Door Reminders"],
+    ["illnessNotice", "Illness Notice"]
+  ];
+  return `<div class="nav-tabs printables-tabs">${tabs.map(([id, label]) => `<button type="button" class="${state.printableTab === id ? "active" : ""}" data-printable-tab="${id}">${label}</button>`).join("")}</div>`;
+}
+
+function printableKindLabel(kind) {
+  return ({ teacherBio: "Teacher Bio", doorReminders: "Door Reminders", illnessNotice: "Illness Notice" })[kind] || "Printable";
+}
+
+function printableDocSize(kind) {
+  return kind === "teacherBio" ? "4 × 6 in" : "Letter / copy paper";
+}
+
+function printablePageClass(kind) {
+  return kind === "teacherBio" ? "printable-preview-card teacher-bio-size printable-content-page" : "printable-preview-card letter-size printable-content-page";
+}
+
+function makePrintableBlockId() {
+  return `printable_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function defaultPrintableBlocks(kind) {
+  if (kind === "teacherBio") return [
+    { id: "teacher", label: "Teacher", title: "Meet The Teacher", kind: "champion", content: "Add a short welcome or teacher introduction here.", functionType: "coreChampion", textStyle: defaultVillageVoiceTextStyle() },
+    { id: "about", label: "About Me", title: "About Me", kind: "textarea", content: "Add teacher bio details here.", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() },
+    { id: "favorites", label: "Favorite Things", title: "Favorite Things", kind: "textarea", content: "Favorite color, snack, book, or classroom activity.", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() }
+  ];
+  if (kind === "illnessNotice") return [
+    { id: "headline", label: "Notice", title: "Illness Notice", kind: "textarea", content: "We wanted to let families know that there has been a reported illness in the classroom.", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() },
+    { id: "details", label: "Details", title: "What To Watch For", kind: "textarea", content: "Please monitor your child for symptoms and contact the office with any questions.", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() },
+    { id: "return", label: "Return Reminder", title: "Return Reminder", kind: "textarea", content: "Children may return according to OVA health policies and licensing guidance.", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() }
+  ];
+  return [];
+}
+
+function normalizePrintableBlocks(draft = {}, kind = "teacherBio") {
+  const presets = defaultPrintableBlocks(kind);
+  const existing = Array.isArray(draft.blocks) ? draft.blocks : [];
+  const presetBlocks = presets.map(preset => {
+    const found = existing.find(b => b.id === preset.id) || {};
+    return {
+      ...preset,
+      title: found.title || preset.title || preset.label,
+      content: found.content ?? preset.content ?? "",
+      backgroundImageData: found.backgroundImageData || "",
+      clipArtImageData: found.clipArtImageData || "",
+      clipArtSize: found.clipArtSize || "small",
+      clipArtPosition: found.clipArtPosition || "top-right",
+      backgroundColor: found.backgroundColor || "#ffffff",
+      textColor: found.textColor || "#1f2f2a",
+      borderStyle: found.borderStyle || "none",
+      borderColor: found.borderColor || "#2f6f63",
+      functionType: found.functionType || preset.functionType || "manual",
+      textStyle: normalizeVillageVoiceTextStyle(found.textStyle || preset.textStyle)
+    };
+  });
+  const customBlocks = existing.filter(b => b && b.id && !presets.some(p => p.id === b.id)).map(b => ({
+    id: b.id,
+    label: b.label || b.title || "New Block",
+    kind: b.kind || "textarea",
+    placeholder: b.placeholder || "Add content here.",
+    title: b.title || b.label || "New Block",
+    content: b.content || "",
+    backgroundImageData: b.backgroundImageData || "",
+    functionType: b.functionType || "manual",
+    textStyle: normalizeVillageVoiceTextStyle(b.textStyle)
+  }));
+  return [...presetBlocks, ...customBlocks];
+}
+
+function normalizePrintableLayout(draft = {}, kind = "teacherBio") {
+  const blocks = normalizePrintableBlocks(draft, kind);
+  const ids = new Set(blocks.map(b => b.id));
+  const defaultRows = kind === "teacherBio" ? [["teacher"], ["about", "favorites"]] : [["headline"], ["details"], ["return"]];
+  const rows = Array.isArray(draft.layout) ? draft.layout : defaultRows;
+  const clean = [];
+  const used = new Set();
+  rows.forEach(row => {
+    const rowIds = (Array.isArray(row) ? row : [row]).filter(id => ids.has(id) && !used.has(id)).slice(0, 2);
+    if (rowIds.length) { rowIds.forEach(id => used.add(id)); clean.push(rowIds); }
+  });
+  blocks.forEach(block => { if (!used.has(block.id)) clean.push([block.id]); });
+  return clean;
+}
+
+function defaultPrintableDraft(kind) {
+  const champion = getVillageVoiceChampionUsers()[0] || null;
+  const base = {
+    kind,
+    title: printableKindLabel(kind),
+    subtitle: kind === "teacherBio" ? "Oak Village Academy" : "Oak Village Academy",
+    classroom: "",
+    noticeDate: todayIso(),
+    month: state.villageVoiceSelectedMonth,
+    theme: "spring",
+    coreChampionUid: champion?.uid || "",
+    footer: "Oak Village Academy",
+    headerFontFamily: "serif",
+    headerTitleSize: kind === "teacherBio" ? "medium" : "large",
+    headlineSize: "medium",
+    footerFontFamily: "sans",
+    footerSize: "medium"
+  };
+  base.blocks = normalizePrintableBlocks(base, kind);
+  base.layout = normalizePrintableLayout(base, kind);
+  return base;
+}
+
+function currentPrintableDraft(kind) {
+  const saved = state.printableDrafts?.[kind] || {};
+  const draft = { ...defaultPrintableDraft(kind), ...saved, kind };
+  draft.blocks = normalizePrintableBlocks(draft, kind);
+  draft.layout = normalizePrintableLayout(draft, kind);
+  return draft;
+}
+
+function getPrintableBlock(draft, kind, blockId) {
+  return (draft.blocks || []).find(b => b.id === blockId) || normalizePrintableBlocks(draft, kind).find(b => b.id === blockId);
+}
+
+function renderPrintablePreviewHtml(kind, draft = currentPrintableDraft(kind)) {
+  const rows = normalizePrintableLayout(draft, kind);
+  return `<div class="${printablePageClass(kind)}"${villageVoicePreviewStyleAttr(draft)}>
+    <div class="printable-preview-mark">OVA</div>
+    <h1 style="font-family:${villageVoiceFontCss(draft.headerFontFamily || "serif")};font-size:${kind === "teacherBio" ? "30px" : "42px"};">${escapeHtml(draft.title || printableKindLabel(kind))}</h1>
+    ${kind === "illnessNotice" ? `<div class="printable-meta-line"><strong>Classroom:</strong> ${escapeHtml(draft.classroom || "____________")} &nbsp; <strong>Date:</strong> ${escapeHtml(draft.noticeDate || todayIso())}</div>` : ""}
+    ${draft.subtitle ? `<p class="printable-subtitle">${escapeHtml(draft.subtitle)}</p>` : ""}
+    <div class="voice-dynamic-grid printable-block-grid">
+      ${rows.map(row => `<div class="voice-preview-row ${row.length > 1 ? "two-col" : "full-col"}">${row.map(id => renderVillageVoiceBlockPreview(getPrintableBlock(draft, kind, id), draft)).join("")}</div>`).join("")}
+    </div>
+    <div class="printable-preview-footer">${escapeHtml(draft.footer || "Oak Village Academy")}</div>
+  </div>`;
+}
+
+function renderPrintableSettingsBlock(kind, draft) {
+  const expanded = state.expandedVillageVoiceEditorId === `${kind}Settings`;
+  return `<div class="voice-edit-block voice-settings-block ${expanded ? "expanded" : "collapsed"}" data-voice-settings-block>
+    <div class="voice-edit-block-head" data-voice-toggle="${kind}Settings"><span class="drag-handle">⚙</span><strong>${printableKindLabel(kind)} Settings</strong><button type="button" class="secondary small" data-voice-collapse="${kind}Settings">${expanded ? "Collapse" : "Edit"}</button></div>
+    <div class="voice-edit-block-body">
+      <label>Printable Title<input name="title" data-printable-live value="${escapeHtml(draft.title || printableKindLabel(kind))}" /></label>
+      <label>Subtitle<input name="subtitle" data-printable-live value="${escapeHtml(draft.subtitle || "")}" /></label>
+      ${kind === "illnessNotice" ? `<label>Classroom<input name="classroom" data-printable-live value="${escapeHtml(draft.classroom || "")}" placeholder="Infant 1, Toddler 2..." /></label><label>Date<input type="date" name="noticeDate" data-printable-live value="${escapeHtml(draft.noticeDate || todayIso())}" /></label>` : ""}
+      <label>Month
+        <select name="month" data-printable-live>${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${draft.month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}</select>
+      </label>
+      <label>Footer<input name="footer" data-printable-live value="${escapeHtml(draft.footer || "Oak Village Academy")}" /></label>
+      <div class="voice-style-panel"><strong>Header / Footer Style</strong><div class="voice-font-grid">
+        <label>Header Font<select name="headerFontFamily" data-printable-live>${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${draft.headerFontFamily === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label>Title Size<select name="headerTitleSize" data-printable-live>${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.headerTitleSize === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label>Footer Font<select name="footerFontFamily" data-printable-live>${[["serif","Classic Serif"],["sans","Clean Sans"],["friendly","Friendly"],["formal","Formal"],["bold","Bold Display"]].map(([v,l]) => `<option value="${v}" ${draft.footerFontFamily === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label>Footer Size<select name="footerSize" data-printable-live>${[["small","Small"],["medium","Medium"],["large","Large"],["xlarge","Extra Large"]].map(([v,l]) => `<option value="${v}" ${draft.footerSize === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      </div></div>
+    </div>
+  </div>`;
+}
+
+function renderPrintableEditorRows(kind, draft) {
+  return normalizePrintableLayout(draft, kind).map(row => `<div class="voice-editor-row ${row.length > 1 ? "two-col" : "full-col"}">${row.map(id => renderVillageVoiceEditorBlock(getPrintableBlock(draft, kind, id), false)).join("")}</div>`).join("");
+}
+
+function renderGenericPrintableTab(kind) {
+  const draft = currentPrintableDraft(kind);
+  return `<form id="${kind}Form" class="village-voice-layout printable-builder-form" data-printable-kind="${kind}">
+    <div class="card subtle-card voice-controls">
+      <h3>${printableKindLabel(kind)} Editor</h3>
+      <p class="helper">${printableDocSize(kind)}. Uses the same editable content block system as Village Voice.</p>
+      ${kind === "illnessNotice" ? renderIllnessNoticeTemplatePanel() : ""}
+      ${renderPrintableSettingsBlock(kind, draft)}
+      <div class="voice-block-list" data-printable-block-list>${renderPrintableEditorRows(kind, draft)}</div>
+      <div class="actions"><button type="button" class="secondary" data-add-printable-block="${kind}">Add Content Block</button>${kind === "illnessNotice" ? `<button type="button" class="secondary" data-save-illness-template>Save As Reusable Flyer</button>` : ""}<button type="button" class="secondary" data-export-printable-pdf="${kind}">Export PDF</button><button type="submit">Save ${printableKindLabel(kind)}</button></div>
+    </div>
+    <div class="voice-page-wrap" data-printable-preview>${renderPrintablePreviewHtml(kind, draft)}</div>
+  </form>`;
+}
+
+function renderIllnessNoticeTemplatePanel() {
+  return `<div class="card slim-card illness-template-panel"><strong>Saved Illness Flyers</strong><div class="helper">Reuse a saved notice, then change classroom and date.</div><div class="template-chip-row">${state.illnessNoticeTemplates.length ? state.illnessNoticeTemplates.map(t => `<button type="button" class="secondary small" data-load-illness-template="${t.id}">${escapeHtml(t.title || "Saved Flyer")}</button>`).join("") : `<span class="empty">No saved illness flyers yet.</span>`}</div></div>`;
+}
+
+function renderDoorRemindersPreview(draft = state.printableDrafts?.doorReminders || {}) {
+  const month = draft.month || state.villageVoiceSelectedMonth;
+  const dateLines = renderImportantDatesLines(month);
+  const customLines = splitVillageVoiceDates(draft.customReminders || "");
+  return `<div class="printable-preview-card letter-size printable-content-page"><div class="printable-preview-mark">OVA</div><h1>${escapeHtml(draft.title || "Door Reminders")}</h1><p class="printable-subtitle">${new Date(2026, Number(month)-1, 1).toLocaleString("en-US", { month: "long" })}</p><div class="door-reminder-list">${[...dateLines, ...customLines].length ? `<ul>${[...dateLines, ...customLines].map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : `<p>No important dates or custom reminders for this month yet.</p>`}</div><div class="printable-preview-footer">${escapeHtml(draft.footer || "Oak Village Academy")}</div></div>`;
+}
+
+
+function getSelectedTeacherBioUser(draft = currentPrintableDraft("teacherBio")) {
+  return state.users.find(u => u.uid === (draft.teacherUid || state.session?.uid)) || state.users[0] || state.session || {};
+}
+
+function renderTeacherBioPreview(draft = currentPrintableDraft("teacherBio")) {
+  const user = getSelectedTeacherBioUser(draft);
+  const name = `${user.firstName || ""} ${user.lastName || ""}`.trim() || "Employee Name";
+  const position = user.teamPosition || user.position || "";
+  return `<div class="printable-preview-card teacher-bio-size teacher-bio-printable">
+    <div class="teacher-bio-topline">
+      ${state.appSettings?.ovaLogoData ? `<img class="teacher-bio-logo teacher-bio-logo-img" src="${state.appSettings.ovaLogoData}" alt="OVA logo" />` : `<div class="teacher-bio-logo">OVA</div>`}
+      <div class="teacher-bio-photo">${user.profileImageData ? `<img src="${user.profileImageData}" alt="${escapeHtml(name)}" />` : `<span>No Photo</span>`}</div>
+    </div>
+    <h1>Teacher Bio</h1>
+    <div class="teacher-bio-lines">
+      <p><strong>Employee Name:</strong> ${escapeHtml(name)}</p>
+      <p><strong>Position:</strong> ${escapeHtml(position || "Not assigned")}</p>
+      <p><strong>Education:</strong> ${escapeHtml(normalizeEducationList(user.educationList || user.education).map(educationDisplayText).filter(Boolean).join(", "))}</p>
+      <p><strong>Started Working In Early Childhood Education:</strong> ${escapeHtml(user.earlyEducationStart || "")}</p>
+    </div>
+    <div class="teacher-bio-summary">
+      <p>${escapeHtml(user.leaderSummary || "Leader summary has not been added yet.")}</p>
+    </div>
+  </div>`;
+}
+
+function renderTeacherBioTab() {
+  const draft = currentPrintableDraft("teacherBio");
+  const selectedUid = draft.teacherUid || state.session?.uid || state.users[0]?.uid || "";
+  return `<form id="teacherBioForm" class="village-voice-layout printable-builder-form" data-printable-kind="teacherBio">
+    <div class="card subtle-card voice-controls">
+      <h3>Teacher Bio Printable</h3>
+      <p class="helper">This printable is automatic. Pick a user and it pulls their profile picture, name, position, education, early childhood start date, and leader summary.</p>
+      <label>Employee
+        <select name="teacherUid" data-teacher-bio-live>
+          ${state.users.map(u => `<option value="${u.uid}" ${selectedUid === u.uid ? "selected" : ""}>${escapeHtml(`${u.firstName || ""} ${u.lastName || ""}`.trim())}${u.usedName ? ` — ${escapeHtml(u.usedName)}` : ""}</option>`).join("")}
+        </select>
+      </label>
+      <div class="card slim-card">
+        <strong>Profile data used</strong>
+        <p class="helper">Teachers update their own education, early childhood start date, and reason by clicking their name at the top. Leaders can add the printable summary from the user editor.</p>
+      </div>
+      <div class="actions"><button type="button" class="secondary" data-export-printable-pdf="teacherBio">Export PDF</button><button type="submit">Save Teacher Bio Selection</button></div>
+    </div>
+    <div class="voice-page-wrap" data-teacher-bio-preview>${renderTeacherBioPreview({ ...draft, teacherUid: selectedUid })}</div>
+  </form>`;
+}
+
+function updateTeacherBioDraftFromForm(form) {
+  const draft = { ...currentPrintableDraft("teacherBio"), teacherUid: form.teacherUid?.value || "" };
+  state.printableDrafts = { ...(state.printableDrafts || {}), teacherBio: draft };
+  return draft;
+}
+
+function renderTeacherBioPreviewOnly() {
+  const form = document.getElementById("teacherBioForm");
+  const preview = form?.querySelector("[data-teacher-bio-preview]");
+  if (!form || !preview) return;
+  const draft = updateTeacherBioDraftFromForm(form);
+  preview.innerHTML = renderTeacherBioPreview(draft);
+}
+
+function renderDoorRemindersTab() {
+  const draft = state.printableDrafts?.doorReminders || { customReminders: "", title: "Door Reminders", footer: "Oak Village Academy", month: state.villageVoiceSelectedMonth };
+  const month = draft.month || state.villageVoiceSelectedMonth;
+  const dateLines = renderImportantDatesLines(month);
+  return `<form id="doorRemindersForm" class="village-voice-layout printable-builder-form">
+    <div class="card subtle-card voice-controls"><h3>Door Reminders Editor</h3><p class="helper">Automatically pulls Important Dates for the selected month. Add custom reminders underneath.</p>
+      <label>Title<input name="title" data-door-live value="${escapeHtml(draft.title || "Door Reminders")}" /></label>
+      <label>Month<select name="month" data-door-live>${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}</select></label>
+      <div class="card slim-card"><strong>Auto Important Dates</strong><div class="simple-list">${dateLines.length ? dateLines.map(l => `<div class="simple-list-row"><span>${escapeHtml(l)}</span></div>`).join("") : `<div class="empty">No important dates found for this month.</div>`}</div></div>
+      <label>Custom Reminders<textarea name="customReminders" data-door-live rows="8" placeholder="Add one reminder per line.">${escapeHtml(draft.customReminders || "")}</textarea></label>
+      <label>Footer<input name="footer" data-door-live value="${escapeHtml(draft.footer || "Oak Village Academy")}" /></label>
+      <div class="actions"><button type="button" class="secondary" data-export-door-pdf>Export PDF</button><button type="submit">Save Door Reminders</button></div>
+    </div>
+    <div class="voice-page-wrap" data-door-preview>${renderDoorRemindersPreview(draft)}</div>
+  </form>`;
+}
+function renderSimplePrintableTab(kind) {
+  if (kind === "doorReminders") return renderDoorRemindersTab();
+  if (kind === "teacherBio") return renderTeacherBioTab();
+  if (kind === "illnessNotice") return renderGenericPrintableTab(kind);
+  return `<div class="empty">Printable tab coming soon.</div>`;
+}
+
+function renderVillageVoiceTool() {
+  state.currentView = "villageVoice";
+  if (!hasToolPermission(state.session, "villageVoice", "editFlyer") && !hasFullDevAccess(state.session)) { renderHome(); return; }
+  const draft = currentVillageVoiceDraft();
+  const canArrange = hasToolPermission(state.session, "villageVoice", "arrangeFlyer") || hasFullDevAccess(state.session);
+  const active = state.printableTab || "villageVoice";
+  $app.innerHTML = pageShell(`
+    <section class="card village-voice-editor printables-editor">
+      <div class="section-head">
+        <div><h2>Printables</h2><p class="helper">Create printable items used throughout the year.</p></div>
+        <button type="button" class="secondary" data-action="home">Back Home</button>
+      </div>
+      ${renderPrintablesTabs()}
+      ${active === "villageVoice" ? `
+        <form id="villageVoiceForm" class="village-voice-layout">
+          ${renderVillageVoiceTopBar(draft)}
+          ${renderVillageVoiceControlsPanel(draft, canArrange)}
+          <div class="voice-preview-side">
+            <div class="voice-page-wrap" data-village-preview>${renderVillageVoicePreviewHtml(draft)}</div>
+          </div>
+        </form>` : renderSimplePrintableTab(active)}
+    </section>
+    ${state.modal ? renderModal() : ""}
+    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+  `);
+}
+
+
+function getLastFormFieldValue(form, selector, fallback = "") {
+  const matches = Array.from(form?.querySelectorAll(selector) || []);
+  if (!matches.length) return fallback;
+  const live = matches.findLast ? matches.findLast(el => el.matches("[data-village-live], [data-printable-live]")) : matches.slice().reverse().find(el => el.matches("[data-village-live], [data-printable-live]"));
+  const picked = live || matches[matches.length - 1];
+  return picked?.value ?? fallback;
+}
+
+function updateVillageVoiceDraftFromForm(form) {
+  if (!form) return currentVillageVoiceDraft();
+  const draft = currentVillageVoiceDraft();
+  draft.title = getLastFormFieldValue(form, `[name="title"]`, draft.title || "The Village Voice")?.trim() || "The Village Voice";
+  draft.month = getLastFormFieldValue(form, `[name="month"]`, state.villageVoiceSelectedMonth) || state.villageVoiceSelectedMonth;
+  draft.theme = getLastFormFieldValue(form, `[name="theme"]`, draft.theme || getSeasonTheme(draft.month)) || getSeasonTheme(draft.month);
+  draft.coreChampionUid = form.coreChampionUid?.value || draft.coreChampionUid || "";
+  draft.headline = getLastFormFieldValue(form, `[name="headline"]`, draft.headline || "")?.trim() || "";
+  draft.year = getLastFormFieldValue(form, `[name="year"]`, draft.year || new Date().getFullYear())?.trim() || draft.year || new Date().getFullYear();
+  draft.editionLabel = `${new Date(2026, Number(draft.month || 1)-1, 1).toLocaleString("en-US", { month: "long" })}, ${draft.year}`;
+  draft.footer = getLastFormFieldValue(form, `[name="footer"]`, draft.footer || "Oak Village Academy")?.trim() || "Oak Village Academy";
+  draft.footerTagline = getLastFormFieldValue(form, `[name="footerTagline"]`, draft.footerTagline || "Learning • Growing • Belonging")?.trim() || "Learning • Growing • Belonging";
+  draft.headerFontFamily = getLastFormFieldValue(form, `[name="headerFontFamily"]`, draft.headerFontFamily || "serif") || "serif";
+  draft.headerTitleSize = getLastFormFieldValue(form, `[name="headerTitleSize"]`, draft.headerTitleSize || "large") || "large";
+  draft.headlineSize = getLastFormFieldValue(form, `[name="headlineSize"]`, draft.headlineSize || "medium") || "medium";
+  draft.footerFontFamily = getLastFormFieldValue(form, `[name="footerFontFamily"]`, draft.footerFontFamily || "sans") || "sans";
+  draft.footerSize = getLastFormFieldValue(form, `[name="footerSize"]`, draft.footerSize || "medium") || "medium";
+  draft.blocks = normalizeVillageVoiceBlocks(draft).map(block => ({
+    ...block,
+    title: form.querySelector(`[data-block-title="${block.id}"]`)?.value?.trim() || block.title || block.label || "New Block",
+    content: form.querySelector(`[data-block-content="${block.id}"]`)?.value ?? block.content ?? "",
+    backgroundImageData: getLastFormFieldValue(form, `[data-block-bg-data="${block.id}"]`, block.backgroundImageData || ""),
+    clipArtImageData: getLastFormFieldValue(form, `[data-block-clip-data="${block.id}"]`, block.clipArtImageData || ""),
+    clipArtSize: getLastFormFieldValue(form, `[data-block-clip-size="${block.id}"]`, block.clipArtSize || "small"),
+    clipArtPosition: getLastFormFieldValue(form, `[data-block-clip-position="${block.id}"]`, block.clipArtPosition || "top-right"),
+    backgroundColor: getLastFormFieldValue(form, `[data-block-bg-color="${block.id}"]`, block.backgroundColor || "#ffffff"),
+    textColor: getLastFormFieldValue(form, `[data-block-text-color="${block.id}"]`, block.textColor || "#1f2f2a"),
+    borderStyle: getLastFormFieldValue(form, `[data-block-border-style="${block.id}"]`, block.borderStyle || "none"),
+    borderColor: getLastFormFieldValue(form, `[data-block-border-color="${block.id}"]`, block.borderColor || "#2f6f63"),
+    functionType: form.querySelector(`[data-block-function="${block.id}"]`)?.value || block.functionType || ({ coreChampion: "coreChampion", monthlyThemes: "monthlyThemes", letterLand: "letterLand", saveTheDate: "saveTheDate" }[block.id] || "manual"),
+    showNextMonthDates: (() => { const el = form.querySelector(`[data-block-show-next-month="${block.id}"]`); return el ? (el.type === "checkbox" ? el.checked : el.value === "1") : !!block.showNextMonthDates; })(),
+    textStyle: normalizeVillageVoiceTextStyle({
+      fontFamily: form.querySelector(`[data-block-${block.id}-font-family]`)?.value || block.textStyle?.fontFamily,
+      titleSize: form.querySelector(`[data-block-${block.id}-title-size]`)?.value || block.textStyle?.titleSize,
+      bodySize: form.querySelector(`[data-block-${block.id}-body-size]`)?.value || block.textStyle?.bodySize,
+      titleStyle: form.querySelector(`[data-block-${block.id}-title-style]`)?.value || block.textStyle?.titleStyle,
+      bodyStyle: form.querySelector(`[data-block-${block.id}-body-style]`)?.value || block.textStyle?.bodyStyle
+    })
+  }));
+  state.villageVoiceDraft = { ...(state.villageVoiceDraft || {}), ...draft };
+  saveVillageVoiceSessionDraft(state.villageVoiceDraft);
+  return draft;
+}
+
+function renderVillageVoicePreviewOnly() {
+  const form = document.getElementById("villageVoiceForm");
+  const preview = form?.querySelector("[data-village-preview]");
+  if (!form || !preview) return;
+  const draft = updateVillageVoiceDraftFromForm(form);
+  preview.innerHTML = renderVillageVoicePreviewHtml(draft);
+}
+
+
+const VILLAGE_VOICE_DND_DEBUG_KEY = "villageVoiceDragDropDebug";
+window.VillageVoiceDragDebug = window.VillageVoiceDragDebug || {
+  enable() { localStorage.setItem(VILLAGE_VOICE_DND_DEBUG_KEY, "1"); window.VV_DND_DEBUG = true; console.info("[Village Voice DND] Debug ON - now click and drag a Village Voice block. You should see pointerdown/dragstart/dragover/drop logs."); },
+  disable() { localStorage.removeItem(VILLAGE_VOICE_DND_DEBUG_KEY); window.VV_DND_DEBUG = false; console.info("[Village Voice DND] Debug OFF"); },
+  status() { const on = localStorage.getItem(VILLAGE_VOICE_DND_DEBUG_KEY) === "1" || window.VV_DND_DEBUG === true; console.info("[Village Voice DND] Debug status:", on ? "ON" : "OFF"); return on; },
+  test() { console.info("[Village Voice DND] Debug object is loaded. Current view:", state.currentView, "Village form exists:", !!document.getElementById("villageVoiceForm")); },
+  dump() { const draft = currentVillageVoiceDraft(); const out = { currentView: state.currentView, expandedEditor: state.expandedVillageVoiceEditorId || "", layout: normalizeVillageVoiceLayout(draft), blocks: normalizeVillageVoiceBlocks(draft).map(b => ({ id: b.id, title: b.title || b.label || "" })), savedSession: readLocalJson(VILLAGE_VOICE_SESSION_KEY, null)?.layout || null, explicitOverride: readLocalJson(VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY, null) || null }; console.table(out.layout.map((row, i) => ({ row: i, left: row[0] || "FULL WIDTH", right: row[1] || "", renders: row.length > 1 ? "2 columns" : "full width" }))); console.info("[Village Voice DND] dump", out); return out; }
+};
+console.info("[Village Voice DND] tracer loaded. Enable with VillageVoiceDragDebug.enable(); check with VillageVoiceDragDebug.test();");
+function villageVoiceDndDebugOn() {
+  return localStorage.getItem(VILLAGE_VOICE_DND_DEBUG_KEY) === "1" || window.VV_DND_DEBUG === true;
+}
+function villageVoiceDndLog(label, data = {}) {
+  if (!villageVoiceDndDebugOn()) return;
+  try {
+    console.groupCollapsed(`[Village Voice DND] ${label}`);
+    Object.entries(data).forEach(([k, v]) => console.log(k, v));
+    console.groupEnd();
+  } catch (_) {
+    console.log(`[Village Voice DND] ${label}`, data);
+  }
+}
+function villageVoiceLayoutSnapshot() {
+  try { return JSON.parse(JSON.stringify(normalizeVillageVoiceLayout(currentVillageVoiceDraft()))); } catch (_) { return null; }
+}
+
+function scrollElementInsideContainer(el, container) {
+  if (!el || !container) return;
+  const elRect = el.getBoundingClientRect();
+  const cRect = container.getBoundingClientRect();
+  const delta = (elRect.top - cRect.top) - ((cRect.height - elRect.height) / 2);
+  container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
+}
+
+function focusVillageVoiceEditingSection(id) {
+  if (!id) return;
+  requestAnimationFrame(() => {
+    const editEl = document.querySelector(`[data-voice-block="${id}"]`);
+    const previewEl = id === "flyerHeader" ? document.querySelector(".voice-cover-header") : (id === "flyerFooter" ? document.querySelector(".voice-footer") : document.querySelector(`[data-preview-block="${id}"]`));
+    const editScroller = editEl?.closest(".voice-controls");
+    const previewScroller = previewEl?.closest(".voice-page-wrap");
+    scrollElementInsideContainer(editEl, editScroller);
+    scrollElementInsideContainer(previewEl, previewScroller);
+  });
+}
+
+function removeVoiceBlockFromLayout(layout, id) {
+  return (layout || []).map(row => (Array.isArray(row) ? row : [row]).filter(x => x !== id)).filter(row => row.length);
+}
+
+function cleanVillageVoiceLayoutRows(rows) {
+  const clean = [];
+  const used = new Set();
+  (rows || []).forEach(row => {
+    const nextRow = (Array.isArray(row) ? row : [row]).filter(id => id && !used.has(id)).slice(0, 2);
+    if (nextRow.length) {
+      nextRow.forEach(id => used.add(id));
+      clean.push(nextRow);
+    }
+  });
+  return clean;
+}
+
+function persistVillageVoiceExplicitLayout(cleanRows) {
+  try { writeLocalJson(VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY, cleanRows); } catch (err) { console.warn("Village Voice layout override save failed", err); }
+  window.__villageVoiceLastExplicitLayout = cleanRows;
+}
+
+function setVillageVoiceLayoutAfterDrop(draft, rows) {
+  const clean = cleanVillageVoiceLayoutRows(rows);
+  persistVillageVoiceExplicitLayout(clean);
+  const nextDraft = { ...(state.villageVoiceDraft || {}), ...draft, layout: clean };
+  state.villageVoiceDraft = nextDraft;
+  state.villageVoiceDraft.layout = clean;
+  saveVillageVoiceSessionDraft(state.villageVoiceDraft);
+  const sessionRows = readLocalJson(VILLAGE_VOICE_SESSION_KEY, null)?.layout || null;
+  const overrideRows = readLocalJson(VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY, null) || null;
+  villageVoiceDndLog("save-layout", {
+    requestedRows: rows,
+    cleanedRows: clean,
+    normalizedAfterSave: normalizeVillageVoiceLayout(state.villageVoiceDraft),
+    savedSessionRows: sessionRows,
+    explicitOverrideRows: overrideRows
+  });
+  console.info("[Village Voice DND] APPLIED LAYOUT", clean.map((row, i) => ({ row: i, left: row[0] || "", right: row[1] || "", renders: row.length > 1 ? "2 columns" : "full width" })));
+  renderVillageVoiceTool();
+}
+
+function moveVillageVoiceBlock(dragId, targetId, placement) {
+  villageVoiceDndLog("move-request", { dragId, targetId, placement, beforeLayout: villageVoiceLayoutSnapshot() });
+  if (!dragId || !targetId || dragId === targetId) {
+    villageVoiceDndLog("move-rejected", { reason: "missing id or same block", dragId, targetId, placement });
+    return false;
+  }
+  const draft = currentVillageVoiceDraft();
+  const originalRows = normalizeVillageVoiceLayout(draft).map(row => [...row]);
+  const rows = removeVoiceBlockFromLayout(originalRows, dragId).map(row => row.filter(Boolean));
+  const targetRowIndex = rows.findIndex(row => row.includes(targetId));
+  if (targetRowIndex < 0) {
+    villageVoiceDndLog("move-rejected", { reason: "target not found after removing dragged block", dragId, targetId, rows });
+    return false;
+  }
+
+  const targetRow = rows[targetRowIndex];
+
+  if (placement === "left" || placement === "right") {
+    // Important: dropping left/right should ALWAYS pair the dragged block with the target.
+    // The earlier splice/slice method failed when the target row already had 2 blocks;
+    // the dragged block could become the overflow item and the visible row looked unchanged.
+    const pairedRow = placement === "left" ? [dragId, targetId] : [targetId, dragId];
+    const displaced = targetRow.filter(id => id !== targetId && id !== dragId);
+    rows[targetRowIndex] = pairedRow;
+    if (displaced.length) rows.splice(targetRowIndex + 1, 0, ...displaced.map(id => [id]));
+  } else if (placement === "above") {
+    rows.splice(targetRowIndex, 0, [dragId]);
+  } else {
+    rows.splice(targetRowIndex + 1, 0, [dragId]);
+  }
+
+  const changed = JSON.stringify(cleanVillageVoiceLayoutRows(originalRows)) !== JSON.stringify(cleanVillageVoiceLayoutRows(rows));
+  villageVoiceDndLog("move-result", { changed, afterRows: cleanVillageVoiceLayoutRows(rows) });
+  if (!changed) {
+    showToast("That block is already in that position.");
+    return false;
+  }
+  setVillageVoiceLayoutAfterDrop(draft, rows);
+  return true;
+}
+
+function getVillageVoiceTargetId(target) {
+  if (!target) return "";
+  return target.dataset?.voiceBlock || target.dataset?.previewBlock || target.querySelector?.(".voice-edit-block,[data-preview-block]")?.dataset?.voiceBlock || target.querySelector?.(".voice-edit-block,[data-preview-block]")?.dataset?.previewBlock || target.dataset?.emptySideFor || "";
+}
+
+function villageVoiceDropPlacement(e, target) {
+  const slot = target?.closest?.("[data-voice-drop-slot]") || (target?.matches?.("[data-voice-drop-slot]") ? target : null);
+  if (slot?.dataset?.emptySideFor) {
+    villageVoiceDndLog("placement", { xPercent: 1, yPercent: 0.5, placement: "right", explicitEmptySlot: true });
+    return "right";
+  }
+  const r = target.getBoundingClientRect();
+  const x = (e.clientX - r.left) / Math.max(r.width, 1);
+  const y = (e.clientY - r.top) / Math.max(r.height, 1);
+  let placement;
+
+  // Thin top/bottom bands are for vertical rearranging. The large middle area
+  // intentionally means left/right = make a column beside this block.
+  if (y < 0.16) placement = "above";
+  else if (y > 0.84) placement = "below";
+  else placement = x < 0.5 ? "left" : "right";
+  villageVoiceDndLog("placement", {
+    targetId: target?.dataset.voiceBlock || target?.dataset.previewBlock,
+    clientX: e.clientX, clientY: e.clientY,
+    targetRect: { left: r.left, top: r.top, width: r.width, height: r.height },
+    xPercent: Number(x.toFixed(3)), yPercent: Number(y.toFixed(3)), placement
+  });
+  return placement;
+}
+
+function getVillageVoiceDraggedId(e) {
+  return state.villageVoiceDraggedBlock || e.dataTransfer?.getData("application/x-village-voice-block") || e.dataTransfer?.getData("text/plain") || "";
+}
+
+function getVoiceDropTarget(e) {
+  const form = document.getElementById("villageVoiceForm");
+  if (!form) { villageVoiceDndLog("target-rejected", { reason: "villageVoiceForm not found" }); return null; }
+  if (!form.contains(e.target)) { villageVoiceDndLog("target-rejected", { reason: "event target outside villageVoiceForm", eventTarget: e.target }); return null; }
+  const draggedId = getVillageVoiceDraggedId(e);
+
+  const slot = e.target.closest("[data-voice-drop-slot]");
+  if (slot && form.contains(slot)) {
+    const emptyFor = slot.dataset.emptySideFor || "";
+    const directBlock = slot.querySelector(".voice-edit-block,[data-preview-block]");
+    const slotBlockId = directBlock?.dataset.voiceBlock || directBlock?.dataset.previewBlock || emptyFor;
+    if (slotBlockId && slotBlockId !== draggedId) {
+      villageVoiceDndLog("target-slot", { draggedId, targetId: slotBlockId, row: slot.dataset.voiceRow, col: slot.dataset.voiceCol, empty: !!emptyFor });
+      return directBlock || slot;
+    }
+  }
+
+  const direct = e.target.closest(".voice-edit-block,[data-preview-block]");
+  const directId = direct?.dataset.voiceBlock || direct?.dataset.previewBlock;
+  if (direct && directId && directId !== draggedId) {
+    villageVoiceDndLog("target-direct", { draggedId, targetId: directId, targetClass: direct.className });
+    return direct;
+  }
+  if (direct && directId === draggedId) {
+    villageVoiceDndLog("target-skip-self", { draggedId, directId });
+  }
+
+  const candidates = Array.from(form.querySelectorAll(".voice-edit-block,[data-preview-block]")).filter(el => {
+    const id = el.dataset.voiceBlock || el.dataset.previewBlock;
+    const r = el.getBoundingClientRect();
+    return id && id !== draggedId && r.width > 0 && r.height > 0;
+  });
+  let best = null;
+  let bestDistance = Infinity;
+  candidates.forEach(el => {
+    const r = el.getBoundingClientRect();
+    const cx = Math.max(r.left, Math.min(e.clientX, r.right));
+    const cy = Math.max(r.top, Math.min(e.clientY, r.bottom));
+    const d = Math.hypot(e.clientX - cx, e.clientY - cy);
+    if (d < bestDistance) { best = el; bestDistance = d; }
+  });
+  const bestId = best?.dataset.voiceBlock || best?.dataset.previewBlock;
+  if (bestDistance < 420) {
+    villageVoiceDndLog("target-nearest", { draggedId, targetId: bestId, distance: Math.round(bestDistance), candidateCount: candidates.length });
+    return best;
+  }
+  villageVoiceDndLog("target-rejected", { reason: "no target within 420px", draggedId, nearestTargetId: bestId, nearestDistance: Math.round(bestDistance), candidateCount: candidates.length });
+  return null;
+}
+
+function clearVillageVoiceDropMarkers() {
+  document.querySelectorAll(".voice-edit-block.drop-left,.voice-edit-block.drop-right,.voice-edit-block.drop-above,.voice-edit-block.drop-below,.voice-block.drop-left,.voice-block.drop-right,.voice-block.drop-above,.voice-block.drop-below,.voice-layout-slot.drop-left,.voice-layout-slot.drop-right,.voice-layout-slot.drop-above,.voice-layout-slot.drop-below").forEach(el => el.classList.remove("drop-left","drop-right","drop-above","drop-below"));
+}
+
+function getHomeDropCard(e) {
+  const direct = e.target.closest("[data-tool-card]");
+  if (direct) return direct;
+  const zone = e.target.closest("[data-tool-drop-zone]");
+  if (!zone) return null;
+  const cards = Array.from(zone.querySelectorAll("[data-tool-card]")).filter(el => !el.classList.contains("dragging"));
+  let best = null, bestDistance = Infinity;
+  cards.forEach(el => {
+    const r = el.getBoundingClientRect();
+    const cx = Math.max(r.left, Math.min(e.clientX, r.right));
+    const cy = Math.max(r.top, Math.min(e.clientY, r.bottom));
+    const d = Math.hypot(e.clientX - cx, e.clientY - cy);
+    if (d < bestDistance) { best = el; bestDistance = d; }
+  });
+  return bestDistance < 240 ? best : null;
+}
+
+async function saveVillageVoice(form) {
+  const draft = updateVillageVoiceDraftFromForm(form);
+  const byId = Object.fromEntries((draft.blocks || []).map(b => [b.id, b]));
+  const payload = {
+    title: draft.title,
+    month: draft.month,
+    theme: draft.theme || getSeasonTheme(draft.month),
+    coreChampionUid: draft.coreChampionUid,
+    headline: draft.headline,
+    year: draft.year || new Date().getFullYear(),
+    editionLabel: draft.editionLabel,
+    footer: draft.footer,
+    footerTagline: draft.footerTagline,
+    headerFontFamily: draft.headerFontFamily,
+    headerTitleSize: draft.headerTitleSize,
+    headlineSize: draft.headlineSize,
+    footerFontFamily: draft.footerFontFamily,
+    footerSize: draft.footerSize,
+    blocks: draft.blocks,
+    layout: normalizeVillageVoiceLayout(draft),
+    message: byId.message?.content || "",
+    directorNote: byId.directorNote?.content || "",
+    classroomSpotlight: byId.classroomSpotlight?.content || "",
+    coreQuote: byId.coreChampion?.content || "",
+    importantDates: byId.importantDates?.content || "",
+    updatedAt: serverTimestamp(),
+    updatedBy: state.session?.uid || ""
+  };
+  await setDoc(doc(db, "villageVoice", "current"), payload, { merge: true });
+  state.villageVoiceDraft = { id: "current", ...payload };
+  clearVillageVoiceSessionDraft();
+  showToast("Village Voice saved.");
+}
+
+function addVillageVoiceBlock() {
+  const form = document.getElementById("villageVoiceForm");
+  const draft = form ? updateVillageVoiceDraftFromForm(form) : currentVillageVoiceDraft();
+  const id = makeVillageVoiceBlockId();
+  const block = { id, label: "New Block", title: "New Block", kind: "textarea", placeholder: "Add content here.", content: "", backgroundImageData: "", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() };
+  draft.blocks = [...normalizeVillageVoiceBlocks(draft), block];
+  draft.layout = [...normalizeVillageVoiceLayout(draft), [id]];
+  state.expandedVillageVoiceEditorId = id;
+  state.villageVoiceDraft = { ...(state.villageVoiceDraft || {}), ...draft };
+  saveVillageVoiceSessionDraft(state.villageVoiceDraft);
+  renderVillageVoiceTool();
+}
+
+function resetVillageVoiceDraft() {
+  if (!confirm("Reset Village Voice back to the default layout? This clears your current unsaved flyer changes.")) return;
+  clearVillageVoiceSessionDraft();
+  try { localStorage.removeItem(VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY); } catch (err) {}
+  const fresh = defaultVillageVoiceDraft();
+  state.villageVoiceDraft = fresh;
+  state.expandedVillageVoiceEditorId = "";
+  saveVillageVoiceSessionDraft(fresh);
+  renderVillageVoiceTool();
+  showToast("Village Voice reset to the default layout.");
+}
+
+function exportVillageVoicePdf() {
+  const form = document.getElementById("villageVoiceForm");
+  const draft = form ? updateVillageVoiceDraftFromForm(form) : currentVillageVoiceDraft();
+  const html = renderVillageVoicePreviewHtml(draft);
+  const win = window.open("", "_blank");
+  if (!win) { alert("Please allow pop-ups so the PDF export window can open."); return; }
+  const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).map(node => node.outerHTML).join("\n");
+  win.document.write(`<!doctype html><html><head><title>${escapeHtml(draft.title || "Village Voice")}</title>${styles}<style>
+    @page { size: letter; margin: 0.25in; }
+    body { margin: 0; background: white; }
+    .voice-print-wrap { width: 100%; display: flex; justify-content: center; }
+    .voice-flyer-preview { width: 7.9in !important; min-height: 10.3in !important; box-shadow: none !important; border-radius: 0 !important; }
+    .voice-page-wrap { padding: 0 !important; overflow: visible !important; }
+  </style></head><body><div class="voice-print-wrap">${html}</div><script>setTimeout(()=>{ window.print(); }, 500);<\/script></body></html>`);
+  win.document.close();
+}
+
+
+function updatePrintableDraftFromForm(kind, form) {
+  if (kind === "teacherBio") return updateTeacherBioDraftFromForm(form);
+  const draft = currentPrintableDraft(kind);
+  draft.title = form.title?.value?.trim() || printableKindLabel(kind);
+  draft.subtitle = form.subtitle?.value?.trim() || "";
+  draft.classroom = form.classroom?.value?.trim() || "";
+  draft.noticeDate = form.noticeDate?.value || todayIso();
+  draft.month = form.month?.value || state.villageVoiceSelectedMonth;
+  draft.footer = form.footer?.value?.trim() || "Oak Village Academy";
+  draft.headerFontFamily = form.headerFontFamily?.value || draft.headerFontFamily || "serif";
+  draft.headerTitleSize = form.headerTitleSize?.value || draft.headerTitleSize || "large";
+  draft.footerFontFamily = form.footerFontFamily?.value || draft.footerFontFamily || "sans";
+  draft.footerSize = form.footerSize?.value || draft.footerSize || "medium";
+  draft.blocks = normalizePrintableBlocks(draft, kind).map(block => ({
+    ...block,
+    title: form.querySelector(`[data-block-title="${block.id}"]`)?.value?.trim() || block.title || block.label || "New Block",
+    content: form.querySelector(`[data-block-content="${block.id}"]`)?.value ?? block.content ?? "",
+    backgroundImageData: getLastFormFieldValue(form, `[data-block-bg-data="${block.id}"]`, block.backgroundImageData || ""),
+    clipArtImageData: getLastFormFieldValue(form, `[data-block-clip-data="${block.id}"]`, block.clipArtImageData || ""),
+    clipArtSize: getLastFormFieldValue(form, `[data-block-clip-size="${block.id}"]`, block.clipArtSize || "small"),
+    clipArtPosition: getLastFormFieldValue(form, `[data-block-clip-position="${block.id}"]`, block.clipArtPosition || "top-right"),
+    backgroundColor: getLastFormFieldValue(form, `[data-block-bg-color="${block.id}"]`, block.backgroundColor || "#ffffff"),
+    textColor: getLastFormFieldValue(form, `[data-block-text-color="${block.id}"]`, block.textColor || "#1f2f2a"),
+    borderStyle: getLastFormFieldValue(form, `[data-block-border-style="${block.id}"]`, block.borderStyle || "none"),
+    borderColor: getLastFormFieldValue(form, `[data-block-border-color="${block.id}"]`, block.borderColor || "#2f6f63"),
+    functionType: form.querySelector(`[data-block-function="${block.id}"]`)?.value || block.functionType || "manual",
+    textStyle: normalizeVillageVoiceTextStyle({
+      fontFamily: form.querySelector(`[data-block-${block.id}-font-family]`)?.value || block.textStyle?.fontFamily,
+      titleSize: form.querySelector(`[data-block-${block.id}-title-size]`)?.value || block.textStyle?.titleSize,
+      bodySize: form.querySelector(`[data-block-${block.id}-body-size]`)?.value || block.textStyle?.bodySize,
+      titleStyle: form.querySelector(`[data-block-${block.id}-title-style]`)?.value || block.textStyle?.titleStyle,
+      bodyStyle: form.querySelector(`[data-block-${block.id}-body-style]`)?.value || block.textStyle?.bodyStyle
+    })
+  }));
+  state.printableDrafts = { ...(state.printableDrafts || {}), [kind]: draft };
+  return draft;
+}
+
+function renderPrintablePreviewOnly(kind) {
+  if (kind === "teacherBio") return renderTeacherBioPreviewOnly();
+  const form = document.querySelector(`form[data-printable-kind="${kind}"]`);
+  const preview = form?.querySelector("[data-printable-preview]");
+  if (!form || !preview) return;
+  const draft = updatePrintableDraftFromForm(kind, form);
+  preview.innerHTML = renderPrintablePreviewHtml(kind, draft);
+}
+
+function updateDoorDraftFromForm(form) {
+  const draft = {
+    ...(state.printableDrafts?.doorReminders || {}),
+    title: form.title?.value?.trim() || "Door Reminders",
+    month: form.month?.value || state.villageVoiceSelectedMonth,
+    customReminders: form.customReminders?.value || "",
+    footer: form.footer?.value?.trim() || "Oak Village Academy"
+  };
+  state.printableDrafts = { ...(state.printableDrafts || {}), doorReminders: draft };
+  return draft;
+}
+
+function renderDoorPreviewOnly() {
+  const form = document.getElementById("doorRemindersForm");
+  const preview = form?.querySelector("[data-door-preview]");
+  if (!form || !preview) return;
+  const draft = updateDoorDraftFromForm(form);
+  preview.innerHTML = renderDoorRemindersPreview(draft);
+}
+
+async function saveGenericPrintable(kind, form) {
+  const draft = updatePrintableDraftFromForm(kind, form);
+  await setDoc(doc(db, "printables", kind), { ...draft, updatedAt: serverTimestamp(), updatedBy: state.session?.uid || "" }, { merge: true });
+  showToast(`${printableKindLabel(kind)} saved.`);
+}
+
+async function saveDoorReminders(form) {
+  const draft = updateDoorDraftFromForm(form);
+  await setDoc(doc(db, "printables", "doorReminders"), { ...draft, updatedAt: serverTimestamp(), updatedBy: state.session?.uid || "" }, { merge: true });
+  showToast("Door Reminders saved.");
+}
+
+
+function addPrintableBlock(kind) {
+  if (kind === "teacherBio") return;
+  const form = document.querySelector(`form[data-printable-kind="${kind}"]`);
+  const draft = form ? updatePrintableDraftFromForm(kind, form) : currentPrintableDraft(kind);
+  const id = makePrintableBlockId();
+  const block = { id, label: "New Block", title: "New Block", kind: "textarea", placeholder: "Add content here.", content: "", backgroundImageData: "", functionType: "manual", textStyle: defaultVillageVoiceTextStyle() };
+  draft.blocks = [...normalizePrintableBlocks(draft, kind), block];
+  draft.layout = [...normalizePrintableLayout(draft, kind), [id]];
+  state.expandedVillageVoiceEditorId = id;
+  state.printableDrafts = { ...(state.printableDrafts || {}), [kind]: draft };
+  renderVillageVoiceTool();
+}
+
+function printableExportHtml(kind) {
+  if (kind === "teacherBio") {
+    const form = document.getElementById("teacherBioForm");
+    const draft = form ? updateTeacherBioDraftFromForm(form) : currentPrintableDraft("teacherBio");
+    return renderTeacherBioPreview(draft);
+  }
+  const form = document.querySelector(`form[data-printable-kind="${kind}"]`);
+  const draft = form ? updatePrintableDraftFromForm(kind, form) : currentPrintableDraft(kind);
+  return renderPrintablePreviewHtml(kind, draft);
+}
+
+function exportPrintablePdf(kind) {
+  const html = printableExportHtml(kind);
+  const win = window.open("", "_blank");
+  if (!win) { alert("Please allow pop-ups so the PDF export window can open."); return; }
+  const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).map(node => node.outerHTML).join("\n");
+  const isBio = kind === "teacherBio";
+  win.document.write(`<!doctype html><html><head><title>${escapeHtml(printableKindLabel(kind))}</title>${styles}<style>
+    @page { size: ${isBio ? "4in 6in" : "letter"}; margin: 0.15in; }
+    body { margin: 0; background: white; }
+    .voice-print-wrap { width: 100%; display: flex; justify-content: center; }
+    .printable-preview-card { box-shadow: none !important; }
+  </style></head><body><div class="voice-print-wrap">${html}</div><script>setTimeout(()=>{ window.print(); }, 500);<\/script></body></html>`);
+  win.document.close();
+}
+
+function exportDoorPdf() {
+  const form = document.getElementById("doorRemindersForm");
+  const draft = form ? updateDoorDraftFromForm(form) : (state.printableDrafts?.doorReminders || {});
+  const html = renderDoorRemindersPreview(draft);
+  const win = window.open("", "_blank");
+  if (!win) { alert("Please allow pop-ups so the PDF export window can open."); return; }
+  const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).map(node => node.outerHTML).join("\n");
+  win.document.write(`<!doctype html><html><head><title>Door Reminders</title>${styles}<style>@page{size:letter;margin:.25in;}body{margin:0;background:white}.printable-preview-card{box-shadow:none!important;}</style></head><body><div class="voice-print-wrap">${html}</div><script>setTimeout(()=>{ window.print(); }, 500);<\/script></body></html>`);
+  win.document.close();
+}
+
+async function saveIllnessTemplate() {
+  const form = document.getElementById("illnessNoticeForm");
+  if (!form) return;
+  const draft = updatePrintableDraftFromForm("illnessNotice", form);
+  await setDoc(doc(collection(db, "illnessNoticeTemplates")), { ...draft, createdAt: serverTimestamp(), createdBy: state.session?.uid || "" });
+  await refreshAdminData();
+  showToast("Reusable illness flyer saved.");
+  renderVillageVoiceTool();
+}
+
+function loadIllnessTemplate(id) {
+  const template = state.illnessNoticeTemplates.find(t => t.id === id);
+  if (!template) return;
+  state.printableDrafts = { ...(state.printableDrafts || {}), illnessNotice: { ...template, id: "illnessNotice" } };
+  renderVillageVoiceTool();
+}
+
+async function addImportantDate(form) {
+  const payload = {
+    date: form.date.value,
+    description: form.description.value.trim(),
+    includeInVillageVoice: !!form.includeInVillageVoice?.checked,
+    createdAt: serverTimestamp(),
+    createdBy: state.session?.uid || ""
+  };
+  await setDoc(doc(collection(db, "importantDates")), payload);
+  showToast("Important date added.");
+}
+
+async function updateImportantDate(form) {
+  const id = form.dataset.importantDateId;
+  const existing = (state.importantDates || []).find(item => item.id === id);
+  if (!id || !existing || existing.autoBirthday) throw new Error("That date cannot be edited here.");
+  const payload = {
+    date: form.date.value,
+    endDate: form.endDate.value || "",
+    dateLabel: form.dateLabel.value.trim(),
+    description: form.description.value.trim(),
+    details: form.details.value.trim(),
+    includeInVillageVoice: !!form.includeInVillageVoice?.checked,
+    updatedAt: serverTimestamp(),
+    updatedBy: state.session?.uid || ""
+  };
+  await setDoc(doc(db, "importantDates", id), payload, { merge: true });
+  state.editingImportantDateId = "";
+  showToast("Important date updated.");
+}
+
+async function deleteImportantDate(id) {
+  if (!id) return;
+  if (!confirm("Delete this important date?")) return;
+  await deleteDoc(doc(db, "importantDates", id));
+  showToast("Important date deleted.");
+}
+
+function normalizeImportantDatesImportPayload(payload) {
+  const rawItems = Array.isArray(payload?.items) ? payload.items : Array.isArray(payload?.dates) ? payload.dates : Array.isArray(payload) ? payload : [];
+  return rawItems.map(item => ({
+    date: item.date || item.startDate || "",
+    endDate: item.endDate || "",
+    dateLabel: item.dateLabel || item.label || "",
+    description: item.description || [item.title, item.details || item.otherImportantInformation].filter(Boolean).join(" — "),
+    title: item.title || "",
+    details: item.details || item.otherImportantInformation || "",
+    includeInVillageVoice: item.includeInVillageVoice !== false
+  })).filter(item => item.date && item.description);
+}
+
+function importantDateImportId(item) {
+  const slug = String(item.title || item.description || "important-date").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "important-date";
+  return `calendar_${String(item.date).replace(/[^0-9]/g, "")}_${slug}`;
+}
+
+async function importImportantDatesFromPayload(payload) {
+  const items = normalizeImportantDatesImportPayload(payload);
+  if (!items.length) throw new Error("No important date rows were found in that file.");
+  for (const item of items) {
+    const id = importantDateImportId(item);
+    await setDoc(doc(db, "importantDates", id), {
+      date: item.date,
+      endDate: item.endDate || "",
+      dateLabel: item.dateLabel || "",
+      description: item.description || "",
+      title: item.title || "",
+      details: item.details || "",
+      includeInVillageVoice: item.includeInVillageVoice !== false,
+      importedFrom: payload?.source || "Important dates import",
+      updatedAt: serverTimestamp(),
+      updatedBy: state.session?.uid || ""
+    }, { merge: true });
+  }
+  showToast(`Imported ${items.length} important dates.`);
+}
+async function addCertificate(form) {
+  const name = form.name.value.trim();
+  if (!name) throw new Error("Certificate name is required.");
+  await setDoc(doc(collection(db, "certificates")), { name, active: true, createdAt: serverTimestamp(), createdBy: state.session?.uid || "" });
+  showToast("Certificate added.");
+}
+
+async function deleteCertificate(id) {
+  if (!id) return;
+  if (!confirm("Delete this certificate?")) return;
+  await updateDoc(doc(db, "certificates", id), { active: false, updatedAt: serverTimestamp() });
+  showToast("Certificate deleted.");
+}
+
+async function saveWeeklyThemes(form) {
+  const themes = {};
+  const letterImages = {};
+  const dateRanges = {};
+  const labels = {};
+  const weekOfMonths = {};
+  const letterlands = {};
+  const seedlingsValues = {};
+  const ideasEvents = {};
+  const letterlandSpriteTiles = {};
+  for (let i = 1; i <= 52; i++) {
+    setWeeklyThemeField(themes, i, form.querySelector(`[name="week_${i}"]`)?.value || "");
+    const selectedSpriteTile = (state.weeklyThemesDraftTiles || {})[String(i)] || form.querySelector(`[name="letterlandSpriteTile_${i}"]`)?.value || "";
+    letterImages[String(i)] = selectedSpriteTile ? "" : ((state.weeklyThemesDraftImages || {})[String(i)] || form.querySelector(`[name="letterImage_${i}"]`)?.value || "");
+    setWeeklyThemeField(dateRanges, i, form.querySelector(`[name="dateRange_${i}"]`)?.value || "");
+    setWeeklyThemeField(labels, i, form.querySelector(`[name="label_${i}"]`)?.value || "");
+    setWeeklyThemeField(weekOfMonths, i, form.querySelector(`[name="weekOfMonth_${i}"]`)?.value || "");
+    setWeeklyThemeField(letterlands, i, form.querySelector(`[name="letterland_${i}"]`)?.value || "");
+    setWeeklyThemeField(seedlingsValues, i, form.querySelector(`[name="seedlingsValue_${i}"]`)?.value || "");
+    setWeeklyThemeField(ideasEvents, i, form.querySelector(`[name="ideasEvents_${i}"]`)?.value || "");
+    setWeeklyThemeField(letterlandSpriteTiles, i, selectedSpriteTile);
+  }
+  await setDoc(doc(db, "weeklyThemes", "current"), {
+    startingDate: form.startingDate.value || "",
+    themes,
+    letterImages,
+    dateRanges,
+    labels,
+    weekOfMonths,
+    letterlands,
+    seedlingsValues,
+    ideasEvents,
+    letterlandSpriteSheet: getLetterlandSpriteSheetRefFromForm(form),
+    letterlandSpriteRows: form.letterlandSpriteRows?.value || "5",
+    letterlandSpriteCols: form.letterlandSpriteCols?.value || "6",
+    letterlandSpriteWidth: form.letterlandSpriteWidth?.value || "",
+    letterlandSpriteHeight: form.letterlandSpriteHeight?.value || "",
+    letterlandSpriteMarginX: form.letterlandSpriteMarginX?.value || "0",
+    letterlandSpriteMarginY: form.letterlandSpriteMarginY?.value || "0",
+    letterlandSpriteGapX: form.letterlandSpriteGapX?.value || "0",
+    letterlandSpriteGapY: form.letterlandSpriteGapY?.value || "0",
+    letterlandSpriteCellW: form.letterlandSpriteCellW?.value || "",
+    letterlandSpriteCellH: form.letterlandSpriteCellH?.value || "",
+    letterlandSpriteTiles,
+    updatedAt: serverTimestamp(),
+    updatedBy: state.session?.uid || ""
+  }, { merge: true });
+  state.weeklyThemesDraftImages = {};
+  state.weeklyThemesDraftTiles = {};
+  showToast("Weekly themes saved.");
+}
+
+function applyWeeklyThemeImportToForm(form, payload) {
+  const weeks = normalizeCurriculumImportPayload(payload);
+  if (!weeks.length) throw new Error("No weekly theme rows were found in that file.");
+  if (payload?.startingDate && form.startingDate) form.startingDate.value = payload.startingDate;
+  weeks.forEach(item => {
+    const i = item.weekNumber;
+    if (form[`week_${i}`]) form[`week_${i}`].value = item.theme || "";
+    if (form[`dateRange_${i}`]) form[`dateRange_${i}`].value = item.dateRange || "";
+    if (form[`label_${i}`]) form[`label_${i}`].value = item.label || "";
+    if (form[`weekOfMonth_${i}`]) form[`weekOfMonth_${i}`].value = item.weekOfMonth || "";
+    if (form[`letterland_${i}`]) form[`letterland_${i}`].value = item.letterland || "";
+    if (form[`seedlingsValue_${i}`]) form[`seedlingsValue_${i}`].value = item.seedlingsValue || "";
+    if (form[`ideasEvents_${i}`]) form[`ideasEvents_${i}`].value = item.ideasEvents || "";
+    const card = form[`week_${i}`]?.closest(".weekly-theme-card");
+    const title = card?.querySelector(".weekly-theme-card-head strong");
+    if (title && item.label) title.textContent = item.label;
+  });
+  showToast(`Imported ${weeks.length} weekly themes. Click Save Weekly Themes to publish.`);
+}
+
+
+
+
+async function updateSelfProfile(form) {
+  if (!state.session?.uid) throw new Error("No user is logged in.");
+  const payload = {
+    usedName: form.usedName?.value?.trim() || state.session.usedName || "",
+    profileImageData: form.profileImageData?.value || state.session.profileImageData || "",
+    educationList: collectEducationEntries(form),
+    education: collectEducationEntries(form).map(educationDisplayText).join("; "),
+    earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
+    whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
+    birthday: form.birthday?.value || "",
+    updatedAt: serverTimestamp()
+  };
+  await updateDoc(doc(db, "users", state.session.uid), payload);
+  state.session = { ...state.session, ...payload };
+  state.users = state.users.map(u => u.uid === state.session.uid ? { ...u, ...payload } : u);
+  state.modal = null;
+  showToast("Profile updated.");
+  renderCurrentView();
+}
+
+
+function renderBrandingSettingsTab() {
+  const logo = state.appSettings?.ovaLogoData || "";
+  return `
+    <form id="brandingSettingsForm" class="card subtle-card branding-settings-form">
+      <h3>OVA Logo</h3>
+      <p class="helper">This logo will replace the VV mark on the main page and printables like Village Voice and Teacher Bio.</p>
+      <div class="branding-logo-row">
+        ${logo ? `<img class="branding-logo-preview" src="${logo}" alt="OVA logo preview" />` : `<div class="branding-logo-preview empty">OVA</div>`}
+        <label>Upload OVA Logo
+          <input type="file" accept="image/*" data-branding-logo-input />
+          <input type="hidden" name="ovaLogoData" value="${logo}" />
+        </label>
+      </div>
+      <div class="actions"><button type="submit">Save Branding</button>${logo ? `<button type="button" class="secondary" data-clear-branding-logo>Remove Logo</button>` : ""}</div>
+    </form>`;
+}
+
+async function saveCampusCareLocation(form) {
+  const subs = String(form.sublocations.value || "").split(/\n|,/).map(x=>x.trim()).filter(Boolean);
+  const id = form.locationId?.value || doc(collection(db, "campusCareLocations")).id;
+  await setDoc(doc(db, "campusCareLocations", id), { building: form.building.value.trim(), sublocations: subs, active: true, updatedAt: serverTimestamp(), createdAt: serverTimestamp() }, { merge: true });
+  state.modal = null; await loadCampusCaresAdmin(); showToast("Campus Cares location saved.");
+}
+async function saveCampusCareStatus(form) {
+  const id = form.statusId?.value || doc(collection(db, "campusCareStatuses")).id;
+  await setDoc(doc(db, "campusCareStatuses", id), { name: form.name.value.trim(), color: form.color.value || "#fff7cc", sortOrder: Number(form.sortOrder?.value || 0), active: true, updatedAt: serverTimestamp(), createdAt: serverTimestamp() }, { merge: true });
+  state.modal = null; await loadCampusCaresAdmin(); showToast("Campus Cares status saved.");
+}
+async function hideCampusCareLocation(id){ await updateDoc(doc(db,"campusCareLocations",id), { active:false, updatedAt:serverTimestamp() }); await loadCampusCaresAdmin(); }
+async function hideCampusCareStatus(id){ await updateDoc(doc(db,"campusCareStatuses",id), { active:false, updatedAt:serverTimestamp() }); await loadCampusCaresAdmin(); }
+async function submitCampusCareRequest(form) {
+  const loc = state.campusCareLocations.find(l=>l.id===form.buildingId.value);
+  const schoolIds = getUserSchoolIds(state.session);
+  const taskRef = doc(collection(db,"campusCareTasks"));
+  const taskPayload = {
+    usedName: form.usedName.value.trim(), submittedByUid: state.session.uid, submittedByName: getUserUsedName(state.session),
+    schoolIds, buildingId: form.buildingId.value, buildingName: loc?.building || "", sublocation: form.sublocation.value,
+    taskNeeded: form.taskNeeded.value.trim(), additionalInfo: form.additionalInfo.value.trim(),
+    statusId: "", statusName: "", statusColor: "",
+    assignedToUids: [], assignedToNames: [], leaderNotes: [], statusUpdates: [], active:true, createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  };
+  await setDoc(taskRef, taskPayload);
+  await createNotificationsForUsers(usersAllowedForNotification("campusSchoolSubmitted", schoolIds).filter(u=>u.uid!==state.session.uid), {
+    title: "New Campus Cares request",
+    body: `${getUserUsedName(state.session)} submitted: ${taskPayload.taskNeeded}`,
+    tool: "campusCares", targetTab: "all", schoolIds, taskId: taskRef.id
+  });
+  await loadCampusCareTasks(); state.modal=null; state.campusCaresTab = "submitted"; renderCampusCaresTool(); showToast("Campus Cares request submitted.");
+}
+async function updateCampusTaskStatus(taskId, statusId) {
+  const task = state.campusCareTasks.find(t=>t.id===taskId);
+  const s = getCampusStatus(statusId);
+  await updateDoc(doc(db,"campusCareTasks",taskId), { statusId, statusName:s.name, statusColor:s.color, updatedAt: serverTimestamp() });
+  if (task?.submittedByUid && task.submittedByUid !== state.session.uid) {
+    const requester = state.users.find(u=>u.uid===task.submittedByUid);
+    if (requester && notificationAllowedForUser(requester,"campusOwnStatus") && notificationSettingEnabled(requester,"campusOwnStatus")) {
+      await createNotificationsForUsers([requester], { title:"Campus Cares status updated", body:`${task.taskNeeded || "Your request"}: ${s.name || "No status"}`, tool:"campusCares", targetTab:"submitted", schoolIds: campusTaskSchoolIds(task), taskId });
+    }
+  }
+  await loadCampusCareTasks(); renderCampusCaresTool();
+}
+async function assignCampusTask(taskId, form) {
+  const task = state.campusCareTasks.find(t=>t.id===taskId);
+  const assignedToUids = Array.from(form.querySelectorAll('input[name="assignedToUids"]:checked')).map(i=>i.value);
+  const names = assignedToUids.map(uid => getUserUsedName(state.users.find(u=>u.uid===uid))).filter(Boolean);
+  await updateDoc(doc(db,"campusCareTasks",taskId), { assignedToUids, assignedToNames:names, updatedAt: serverTimestamp() });
+  const previous = new Set(task?.assignedToUids || []);
+  const newlyAssigned = assignedToUids.filter(uid => !previous.has(uid)).map(uid => state.users.find(u=>u.uid===uid));
+  await createNotificationsForUsers(newlyAssigned.filter(u=>notificationAllowedForUser(u,"campusAssigned") && notificationSettingEnabled(u,"campusAssigned")), {
+    title:"Campus Cares task assigned",
+    body:`You were assigned: ${task?.taskNeeded || "Campus Cares task"}`,
+    tool:"campusCares", targetTab:"assigned", schoolIds: campusTaskSchoolIds(task), taskId
+  });
+  state.modal=null; await loadCampusCareTasks(); renderCampusCaresTool(); showToast("Assignment saved.");
+}
+async function saveCampusTaskNote(form) {
+  const task = state.campusCareTasks.find(t=>t.id===form.taskId.value); if (!task) return;
+  const now = new Date().toISOString();
+  const leaderNotes = [...(task.leaderNotes||[])];
+  const statusUpdates = [...(task.statusUpdates||[])];
+  const leaderText = form.leaderNote?.value?.trim() || "";
+  const statusText = form.statusUpdate?.value?.trim() || "";
+  if (leaderText) leaderNotes.push({ text: leaderText, byUid: state.session.uid, byName: getUserUsedName(state.session), at: now });
+  const nextStatusUpdates = statusText ? [{ text: statusText, byUid: state.session.uid, byName: getUserUsedName(state.session), at: now }] : statusUpdates;
+  await updateDoc(doc(db,"campusCareTasks",task.id), { leaderNotes, statusUpdates: nextStatusUpdates, updatedAt: serverTimestamp() });
+  const schoolIds = campusTaskSchoolIds(task);
+  if (statusText && task.submittedByUid !== state.session.uid) {
+    const requester = state.users.find(u=>u.uid===task.submittedByUid);
+    if (requester && notificationAllowedForUser(requester,"campusOwnStatus") && notificationSettingEnabled(requester,"campusOwnStatus")) {
+      await createNotificationsForUsers([requester], { title:"Campus Cares status update", body:statusText.slice(0,120), tool:"campusCares", targetTab:"submitted", schoolIds, taskId:task.id });
+    }
+  }
+  if (leaderText) {
+    const watchers = usersAllowedForNotification("campusNotes", schoolIds).filter(u=>u.uid!==state.session.uid);
+    await createNotificationsForUsers(watchers, { title:"Campus Cares note added", body:leaderText.slice(0,120), tool:"campusCares", targetTab:"all", schoolIds, taskId:task.id });
+  }
+  await loadCampusCareTasks();
+  const updatedTask = state.campusCareTasks.find(t=>t.id===task.id);
+  state.modal = { type:"campusCareNotes", task: updatedTask };
+  renderCampusCaresTool();
+  showToast(statusText ? "Status update saved." : "Leader note added.");
+}
+
+async function completeNukeCampusCareRequests(password) {
+  if (!password) { state.modal = { ...state.modal, error: "Enter your password to delete Campus Cares requests." }; renderCurrentView(); return; }
+  await signInWithEmailAndPassword(auth, state.session.fakeEmail, password);
+  const snap = await getDocs(collection(db, "campusCareTasks"));
+  await Promise.all(snap.docs.map(d => deleteDoc(doc(db, "campusCareTasks", d.id))));
+  state.campusCareTasks = [];
+  state.modal = null;
+  await loadCampusCareTasks();
+  showToast(`Deleted ${snap.docs.length} Campus Cares request${snap.docs.length === 1 ? "" : "s"}.`);
+  renderSystemAdmin();
+}
+
+async function saveCampusDiscussion(form) {
+  const schoolIds = getUserSchoolIds(state.session);
+  const discussionRef = doc(collection(db,"campusCareDiscussions"));
+  await setDoc(discussionRef, {
+    title: form.title.value.trim(),
+    description: form.description.value.trim(),
+    schoolIds,
+    createdByUid: state.session.uid,
+    createdByName: getUserUsedName(state.session),
+    notes: [], proposedSolution: "", approved:false, approvedByUid:"", approvedByName:"", approvedAt:"",
+    active:true, createdAt:serverTimestamp(), updatedAt:serverTimestamp()
+  });
+  await loadCampusCareDiscussions();
+  state.activeCampusDiscussionId = discussionRef.id;
+  state.modal = null;
+  state.campusCaresTab = "discussions";
+  renderCampusCaresTool();
+  showToast("Discussion added.");
+}
+
+async function saveCampusDiscussionNote(form) {
+  const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
+  const text = form.note.value.trim(); if(!text) return;
+  const notes = [...(discussion.notes||[]), { text, byUid:state.session.uid, byName:getUserUsedName(state.session), at:new Date().toISOString() }];
+  await updateDoc(doc(db,"campusCareDiscussions",discussion.id), { notes, updatedAt:serverTimestamp() });
+  await loadCampusCareDiscussions();
+  state.activeCampusDiscussionId = discussion.id;
+  renderCampusCaresTool();
+}
+
+async function saveCampusDiscussionSolution(form) {
+  const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
+  await updateDoc(doc(db,"campusCareDiscussions",discussion.id), { proposedSolution: form.proposedSolution.value.trim(), updatedAt:serverTimestamp() });
+  await loadCampusCareDiscussions();
+  state.activeCampusDiscussionId = discussion.id;
+  renderCampusCaresTool();
+  showToast("Proposed solution saved.");
+}
+
+async function approveCampusDiscussion(id) {
+  await updateDoc(doc(db,"campusCareDiscussions",id), { approved:true, approvedByUid:state.session.uid, approvedByName:getUserUsedName(state.session), approvedAt:new Date().toISOString(), updatedAt:serverTimestamp() });
+  await loadCampusCareDiscussions(); state.activeCampusDiscussionId=id; renderCampusCaresTool(); showToast("Solution approved.");
+}
+
+async function removeCampusDiscussion(form) {
+  const id = form.discussionId.value;
+  await updateDoc(doc(db,"campusCareDiscussions",id), { active:false, removedAt:new Date().toISOString(), removedByUid:state.session.uid, removedByName:getUserUsedName(state.session), removalReason:form.reason.value.trim(), updatedAt:serverTimestamp() });
+  state.modal=null; state.activeCampusDiscussionId=""; await loadCampusCareDiscussions(); renderCampusCaresTool(); showToast("Discussion removed.");
+}
+
+async function createCampusTaskFromDiscussion(form) {
+  const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
+  const loc = state.campusCareLocations.find(l=>l.id===form.buildingId.value);
+  const taskRef = doc(collection(db,"campusCareTasks"));
+  const leaderNotes = (discussion.notes||[]).map(n=>({ ...n, text:`Discussion note: ${n.text||""}` }));
+  if (discussion.proposedSolution) leaderNotes.push({ text:`Proposed solution: ${discussion.proposedSolution}`, byUid:discussion.approvedByUid||state.session.uid, byName:discussion.approvedByName||getUserUsedName(state.session), at:new Date().toISOString() });
+  await setDoc(taskRef, {
+    usedName: discussion.createdByName || getUserUsedName(state.session), submittedByUid: discussion.createdByUid || state.session.uid, submittedByName: discussion.createdByName || getUserUsedName(state.session),
+    schoolIds: discussion.schoolIds || getUserSchoolIds(state.session), buildingId: form.buildingId.value, buildingName: loc?.building || "", sublocation: form.sublocation.value,
+    taskNeeded: form.taskNeeded.value.trim(), additionalInfo: form.additionalInfo.value.trim(), statusId:"", statusName:"", statusColor:"",
+    assignedToUids: [], assignedToNames: [], leaderNotes, statusUpdates: [], sourceDiscussionId: discussion.id, active:true, createdAt:serverTimestamp(), updatedAt:serverTimestamp()
+  });
+  await updateDoc(doc(db,"campusCareDiscussions",discussion.id), { convertedToTaskId:taskRef.id, convertedAt:new Date().toISOString(), updatedAt:serverTimestamp() });
+  state.modal=null; state.campusCaresTab="all"; await Promise.all([loadCampusCareTasks(), loadCampusCareDiscussions()]); renderCampusCaresTool(); showToast("Discussion converted to a Campus Cares task.");
+}
+function renderCampusCaresAdminTab(){
+  return `<div class="grid two"><div class="card subtle-card"><h3>Locations</h3><button type="button" data-modal="addCampusCareLocation">Add Building / Sublocations</button><div class="admin-list">${state.campusCareLocations.map(l=>`<div class="admin-list-row"><span><strong>${escapeHtml(l.building)}</strong><small>${escapeHtml((l.sublocations||[]).join(", "))}</small></span><span><button type="button" class="small secondary" data-edit-campus-location="${l.id}">Edit</button><button type="button" class="small danger" data-delete-campus-location="${l.id}">Hide</button></span></div>`).join("") || `<div class="empty">No locations yet.</div>`}</div></div><div class="card subtle-card"><h3>Status List</h3><button type="button" data-modal="addCampusCareStatus">Add Status</button><div class="admin-list">${state.campusCareStatuses.map(st=>`<div class="admin-list-row" style="border-left:8px solid ${st.color||'#fff7cc'}"><span><strong>${escapeHtml(st.name)}</strong><small>${escapeHtml(st.color||"")}</small></span><span><button type="button" class="small secondary" data-edit-campus-status="${st.id}">Edit</button><button type="button" class="small danger" data-delete-campus-status="${st.id}">Hide</button></span></div>`).join("") || `<div class="empty">No statuses yet.</div>`}</div></div></div>`;
+}
+function renderCampusCaresTool(){
+  state.currentView="campusCares";
+  const canSubmit = hasToolPermission(state.session,"campusCares","submit") || hasFullDevAccess(state.session);
+  const canAssigned = hasToolPermission(state.session,"campusCares","assigned") || hasToolPermission(state.session,"campusCares","manage") || hasFullDevAccess(state.session);
+  const canViewAll = hasToolPermission(state.session,"campusCares","viewAll") || hasToolPermission(state.session,"campusCares","manage") || hasFullDevAccess(state.session);
+  const canManage = hasToolPermission(state.session,"campusCares","manage") || hasFullDevAccess(state.session);
+  const tabs=[];
+  if(canSubmit) tabs.push(['submitted','Tasks I Have Submitted']);
+  if(canAssigned) tabs.push(['assigned','Tasks Assigned To Me']);
+  if(canViewAll) tabs.push(['all','All Tasks']);
+  if(canViewAll || canManage || canSubmit) tabs.push(['discussions','Ongoing Discussions']);
+  if(canManage) tabs.push(['completed','Completed Tasks']);
+  if(!tabs.length) tabs.push(['submitted','Tasks I Have Submitted']);
+  if(!tabs.some(t=>t[0]===state.campusCaresTab)) state.campusCaresTab=tabs[0][0];
+  const submitButton = canSubmit ? `<button type="button" data-open-campus-submit>Submit a Request</button>` : "";
+  $app.innerHTML=pageShell(`<section class="card"><div class="tool-heading-row"><h2>Campus Cares</h2>${submitButton}</div><div class="nav-tabs">${tabs.map(([k,l])=>`<button class="${state.campusCaresTab===k?'active':''}" data-campus-tab="${k}">${l}</button>`).join('')}</div>${state.campusCaresTab==='discussions'?renderCampusDiscussionsTab(canManage):renderCampusCareTable(state.campusCaresTab,canManage)}</section>${state.modal?renderModal():""}${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
+}
+function renderCampusCareSubmitForm(){
+  const u=state.session||{}; const defaultBuilding=u.defaultCampusCareBuildingId||""; const loc=state.campusCareLocations.find(l=>l.id===defaultBuilding)||state.campusCareLocations[0]; const defaultSub=u.defaultCampusCareSublocation||"";
+  return `<form id="campusCareRequestForm" class="stack"><label>Used Name<input name="usedName" required value="${escapeHtml(getUserUsedName(u))}"></label><div class="grid two"><label>Building<select name="buildingId" data-campus-building required>${state.campusCareLocations.map(l=>`<option value="${l.id}" ${loc?.id===l.id?'selected':''}>${escapeHtml(l.building)}</option>`).join('')}</select></label><label>Sublocation<select name="sublocation" data-campus-sublocation required>${(loc?.sublocations||[]).map(sl=>`<option ${defaultSub===sl?'selected':''}>${escapeHtml(sl)}</option>`).join('')}</select></label></div><label>Task Needed<input name="taskNeeded" required maxlength="160" placeholder="What needs to be done?"></label><label>Additional Information <input name="additionalInfo" maxlength="240" placeholder="Optional details"></label><button>Submit Request</button></form>`;
+}
+function campusTasksForTab(tab){ let tasks=state.campusCareTasks.filter(t=>t.active!==false).filter(t=>campusTaskInUserScope(t)); if(tab==='submitted') tasks=tasks.filter(t=>t.submittedByUid===state.session.uid&&!isCampusCompleted(t)); if(tab==='assigned') tasks=tasks.filter(t=>(t.assignedToUids||[]).includes(state.session.uid)&&!isCampusCompleted(t)); if(tab==='all') tasks=tasks.filter(t=>!isCampusCompleted(t)); if(tab==='completed') tasks=tasks.filter(isCampusCompleted); return tasks; }
+function campusStatusDisplay(t) { const updates = campusNoteList(t.statusUpdates||[]); if (!updates.length) return `<span class="muted">No status update yet.</span>`; const latest=updates[updates.length-1]; return `<div class="inline-status-update"><strong>${escapeHtml(latest.byName||'Status')}</strong> <small>${campusShortStamp(latest.at)}</small><p>${escapeHtml(latest.text||'')}</p></div>`; }
+function renderCampusCareTable(tab,canManage){ const tasks=campusTasksForTab(tab); return `<div class="sheet-scroll"><table class="campus-sheet"><thead><tr><th>Status</th><th>Submitted</th><th>Submitted By</th><th>Location</th><th>Task Needed</th><th>Additional Info</th><th>Status Update</th><th>Assign Task</th></tr></thead><tbody>${tasks.map(t=>renderCampusCareRow(t,canManage)).join('') || `<tr><td colspan="8" class="empty">No tasks here yet.</td></tr>`}</tbody></table></div>`; }
+function renderCampusCareRow(t,canManage){ const st=getCampusStatus(t.statusId); const statusCell = canManage ? `<select data-campus-status-change="${t.id}"><option value="" ${!t.statusId?'selected':''}>No status</option>${state.campusCareStatuses.map(s=>`<option value="${s.id}" ${s.id===t.statusId?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}</select>` : escapeHtml(st.name || ""); const assignCell = canManage ? `<button type="button" class="small secondary" data-campus-assign="${t.id}">Assign (${(t.assignedToNames||[]).length})</button>` : escapeHtml((t.assignedToNames||[]).join(', ')); return `<tr style="background:${st.color||t.statusColor||''}"><td>${statusCell}</td><td>${campusDate(t.createdAt)}<br><small>${campusTime(t.createdAt)}</small></td><td>${escapeHtml(t.usedName||t.submittedByName||'')}</td><td>${escapeHtml(`${t.buildingName||''}, ${t.sublocation||''}`)}</td><td>${escapeHtml(t.taskNeeded||'')}</td><td>${escapeHtml(t.additionalInfo||'')}</td><td>${campusStatusDisplay(t)}${canManage?`<button type="button" class="small secondary" data-campus-notes="${t.id}">Notes / Status</button>`:''}</td><td>${assignCell}</td></tr>`; }
+
+function renderCampusDiscussionsTab(canManage) {
+  const discussions = activeCampusDiscussions();
+  const active = discussions.find(d=>d.id===state.activeCampusDiscussionId) || discussions[0];
+  const list = discussions.map(d=>`<button type="button" class="discussion-list-item ${active?.id===d.id?'active':''}" data-open-campus-discussion="${d.id}"><strong>${escapeHtml(d.title||'Discussion')}</strong><small>${escapeHtml(d.description||'')}</small>${d.approved?'<span class="pill good">Approved</span>':''}</button>`).join('') || '<div class="empty">No discussions yet.</div>';
+  return `<div class="campus-discussions"><aside class="discussion-list"><div class="tool-heading-row"><h3>Ongoing Discussions</h3><button type="button" class="small" data-modal="addCampusDiscussion">Add Discussion</button></div>${list}</aside><main class="discussion-detail">${active?renderCampusDiscussionDetail(active,canManage):'<div class="empty">Add a discussion to start talking through ideas and possible solutions.</div>'}</main></div>`;
+}
+function renderCampusDiscussionDetail(d, canManage) {
+  const notes = campusNoteList(d.notes||[]);
+  const bubble = n => `<div class="chat-note ${n.byUid===state.session.uid?'mine':'theirs'}"><div class="chat-note-line"><strong>${escapeHtml(n.byName||'')}</strong><small>${campusShortStamp(n.at)}</small><span>${escapeHtml(n.text||'')}</span></div></div>`;
+  return `<div class="discussion-panel"><div class="tool-heading-row"><div><h3>${escapeHtml(d.title||'Discussion')}</h3><p class="helper">${escapeHtml(d.description||'')}</p></div>${d.approved?`<span class="pill good">Approved by ${escapeHtml(d.approvedByName||'leader')}</span>`:''}</div><div class="chat-thread discussion-chat">${notes.map(bubble).join('')||'<p class="empty">No notes yet.</p>'}</div><form id="campusDiscussionNoteForm" class="chat-input-row"><input type="hidden" name="discussionId" value="${d.id}"><input name="note" placeholder="Add a note..." autocomplete="off" required><button>Add</button></form><form id="campusDiscussionSolutionForm" class="stack proposed-solution-box"><input type="hidden" name="discussionId" value="${d.id}"><label>Proposed Solution<textarea name="proposedSolution" rows="3">${escapeHtml(d.proposedSolution||'')}</textarea></label><div class="actions"><button type="submit">Save Proposed Solution</button>${canManage?`<button type="button" class="secondary" data-approve-campus-discussion="${d.id}">Approve</button><button type="button" class="secondary" data-convert-campus-discussion="${d.id}">Make Campus Cares Task</button><button type="button" class="danger" data-remove-campus-discussion="${d.id}">Remove</button>`:''}</div></form></div>`;
 }
 
 function renderSystemAdmin() {
@@ -2284,6 +5530,9 @@ function renderSystemAdmin() {
         <button class="${state.adminTab === "roles" ? "active" : ""}" data-tab="roles">Roles</button>
         <button class="${state.adminTab === "tools" ? "active" : ""}" data-tab="tools">Tools</button>
         <button class="${state.adminTab === "moneyRequests" ? "active" : ""}" data-tab="moneyRequests">Money Requests</button>
+        <button class="${state.adminTab === "campusCares" ? "active" : ""}" data-tab="campusCares">Campus Cares</button>
+        <button class="${state.adminTab === "notifications" ? "active" : ""}" data-tab="notifications">Notifications</button>
+        <button class="${state.adminTab === "branding" ? "active" : ""}" data-tab="branding">Branding</button>
       </div>
 
       ${state.adminTab === "schools" ? `
@@ -2329,6 +5578,10 @@ function renderSystemAdmin() {
       ` : ""}
 
       ${state.adminTab === "tools" ? renderToolsTab() : ""}
+
+      ${state.adminTab === "branding" ? renderBrandingSettingsTab() : ""}
+
+      ${state.adminTab === "campusCares" ? `${isSystemAdmin(state.session) ? `<div class="card subtle-card danger-zone"><h3>Dev Testing Cleanup</h3><p class="helper">Deletes every Campus Cares request in Firestore. Use only for testing cleanup.</p><button class="danger" type="button" data-nuke-campus-care-requests>Nuke All Campus Cares Requests</button></div>` : ""}${renderCampusCaresAdminTab()}` : ""}
 
       ${state.adminTab === "moneyRequests" ? `
         ${isSystemAdmin(state.session) ? `<div class="card subtle-card danger-zone"><h3>Dev Testing Cleanup</h3><p class="helper">Deletes every money request in Firestore. Use only for testing cleanup.</p><button class="danger" type="button" data-nuke-money-requests>Nuke All Money Requests</button></div>` : ""}
@@ -2424,13 +5677,13 @@ function renderModal() {
   if (state.modal.type === "denyMoneyRequest") {
     return `
       <div class="modal-backdrop"><form class="modal card" id="denyMoneyRequestForm">
-        <h2>Deny request</h2>
-        <p class="helper">Add a note so the leader knows what to change before resubmitting.</p>
+        <h2>${state.modal.stage === "pendingOwner" ? "Return PO to DOSO" : "Deny request"}</h2>
+        <p class="helper">${state.modal.stage === "pendingOwner" ? "Add a reason so the DOSO knows what to change before sending it back to owners." : "Add a note so the requester knows what to change before resubmitting."}</p>
         <label>Reason
           <textarea name="denialNote" required placeholder="What needs to be fixed?"></textarea>
         </label>
         ${modalErrorHtml()}
-        <div class="actions"><button class="danger">Deny Request</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+        <div class="actions"><button class="danger">${state.modal.stage === "pendingOwner" ? "Return to DOSO" : "Deny Request"}</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
       </form></div>`;
   }
 
@@ -2559,7 +5812,7 @@ function renderModal() {
 
           <div class="actions">
             <button>${isEdit ? "Save Changes" : "Create Budget Code"}</button>
-            ${isEdit ? `<button type="button" class="danger" data-delete-budget-code="${budgetCode.id}">Hide</button>` : ""}
+            ${isEdit ? `<button type="button" class="danger" data-delete-budget-code="${budgetCode.id}">Delete Budget Code</button>` : ""}
             <button type="button" class="secondary" data-close-modal>Cancel</button>
           </div>
         </form>
@@ -2623,6 +5876,82 @@ if (state.modal.type === "addMoneyRequestType" || state.modal.type === "editMone
     `;
   }
 
+
+
+  if (state.modal.type === "campusCareSubmit") {
+    return `<div class="modal-backdrop"><div class="modal card wide-modal"><div class="tool-heading-row"><h2>Submit a Campus Cares Request</h2><button type="button" class="secondary small" data-close-modal>Close</button></div>${renderCampusCareSubmitForm()}<p class="helper">This window only closes when you submit or click Close, so clicking outside will not erase your progress.</p></div></div>`;
+  }
+  if (["addCampusCareLocation","editCampusCareLocation"].includes(state.modal.type)) {
+    const l = state.modal.location || {}; const isEdit=state.modal.type==="editCampusCareLocation";
+    return `<div class="modal-backdrop"><form class="modal card" id="campusCareLocationForm"><h2>${isEdit?'Edit':'Add'} Campus Cares Location</h2><input type="hidden" name="locationId" value="${l.id||''}"><label>Building<input name="building" required value="${escapeHtml(l.building||'')}"></label><label>Sublocations<textarea name="sublocations" rows="6" placeholder="One per line">${escapeHtml((l.sublocations||[]).join('\n'))}</textarea></label><div class="actions"><button>Save Location</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+  if (["addCampusCareStatus","editCampusCareStatus"].includes(state.modal.type)) {
+    const st = state.modal.status || {}; const isEdit=state.modal.type==="editCampusCareStatus";
+    return `<div class="modal-backdrop"><form class="modal card" id="campusCareStatusForm"><h2>${isEdit?'Edit':'Add'} Campus Cares Status</h2><input type="hidden" name="statusId" value="${st.id||''}"><label>Status Name<input name="name" required value="${escapeHtml(st.name||'')}"></label><label>Highlight Color<input type="color" name="color" value="${st.color||'#fff7cc'}"></label><label>Sort Order<input type="number" name="sortOrder" value="${st.sortOrder||0}"></label><div class="actions"><button>Save Status</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+  if (state.modal.type === "campusCareNotes") {
+    const t = state.modal.task || {}; const canManage=hasToolPermission(state.session,"campusCares","manage")||hasFullDevAccess(state.session);
+    const statusNotes = campusNoteList(t.statusUpdates||[]);
+    const leaderNotes = campusNoteList(t.leaderNotes||[]);
+    const bubble = n => `<div class="chat-note ${n.byUid===state.session.uid?'mine':'theirs'}"><div class="chat-note-line"><strong>${escapeHtml(n.byName||'')}</strong><small>${campusShortStamp(n.at)}</small><span>${escapeHtml(n.text||'')}</span></div></div>`;
+    return `<div class="modal-backdrop"><div class="modal card extra-wide-modal"><div class="tool-heading-row"><h2>${canManage?'Notes / Status':'Status Updates'}</h2><button type="button" class="secondary small" data-close-modal>Close</button></div><div class="campus-notes-layout"><section class="note-thread"><h3>Status Update</h3><div class="chat-thread">${statusNotes.map(bubble).join('')||'<p class="empty">No status update yet.</p>'}</div>${canManage?`<form id="campusCareNotesForm" class="chat-input-row"><input type="hidden" name="taskId" value="${t.id}"><input name="statusUpdate" placeholder="Replace teacher-visible status update..." autocomplete="off"><input type="hidden" name="leaderNote" value=""><button>Save</button></form>`:''}</section>${canManage?`<section class="note-thread leader-note-thread"><h3>Leader Notes</h3><div class="chat-thread">${leaderNotes.map(bubble).join('')||'<p class="empty">No leader notes yet.</p>'}</div><form id="campusCareLeaderNotesForm" class="chat-input-row"><input type="hidden" name="taskId" value="${t.id}"><input type="hidden" name="statusUpdate" value=""><input name="leaderNote" placeholder="Add leader note..." autocomplete="off"><button>Add</button></form></section>`:''}</div></div></div>`;
+  }
+  if (state.modal.type === "campusCareAssign") {
+    const t = state.modal.task || {};
+    return `<div class="modal-backdrop"><form class="modal card" data-campus-assign-form="${t.id}"><div class="tool-heading-row"><h2>Assign Task</h2><button type="button" class="secondary small" data-close-modal>Close</button></div><p class="helper">Choose who this task is assigned to. Only same-location leaders/owners are shown.</p><div class="assign-checklist">${campusLeaderUsers().map(u=>`<label><input type="checkbox" name="assignedToUids" value="${u.uid}" ${(t.assignedToUids||[]).includes(u.uid)?'checked':''}> ${escapeHtml(getUserUsedName(u))}</label>`).join('') || '<div class="empty">No assignable users found for this location.</div>'}</div><div class="actions"><button>Save Assignment</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+
+  if (state.modal.type === "addCampusDiscussion") {
+    return `<div class="modal-backdrop"><form class="modal card" id="campusDiscussionForm"><h2>Add Ongoing Discussion</h2><p class="helper">Use this for ongoing issues, recurring conversations, or recommendations that need discussion before becoming a task.</p><label>Short Description / Title<input name="title" required maxlength="120" placeholder="Example: Playground pickup flow"></label><label>Details<textarea name="description" rows="4" required placeholder="What should we talk through?"></textarea></label><div class="actions"><button>Add Discussion</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+  if (state.modal.type === "removeCampusDiscussion") {
+    const d = state.modal.discussion || {};
+    return `<div class="modal-backdrop"><form class="modal card" id="removeCampusDiscussionForm"><h2>Remove discussion?</h2><p class="helper">By removing this discussion you are concluding that this discussion is not something that will be addressed right now. You may add a reason if you like.</p><input type="hidden" name="discussionId" value="${d.id||''}"><label>Reason <textarea name="reason" rows="3" placeholder="Optional"></textarea></label><div class="actions"><button class="danger">Remove Discussion</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+  if (state.modal.type === "campusDiscussionToTask") {
+    const d = state.modal.discussion || {}; const loc = state.campusCareLocations[0];
+    return `<div class="modal-backdrop"><form class="modal card wide-modal" id="campusDiscussionToTaskForm"><h2>Make Campus Cares Task</h2><input type="hidden" name="discussionId" value="${d.id||''}"><label>Task Needed<input name="taskNeeded" required value="${escapeHtml(d.title||'')}"></label><label>Additional Info<textarea name="additionalInfo" rows="3">${escapeHtml((d.description||'') + (d.proposedSolution ? '\n\nProposed solution: ' + d.proposedSolution : ''))}</textarea></label><div class="grid two"><label>Building<select name="buildingId" data-campus-building required>${state.campusCareLocations.map(l=>`<option value="${l.id}" ${loc?.id===l.id?'selected':''}>${escapeHtml(l.building)}</option>`).join('')}</select></label><label>Sublocation<select name="sublocation" data-campus-sublocation required>${(loc?.sublocations||[]).map(sl=>`<option>${escapeHtml(sl)}</option>`).join('')}</select></label></div><div class="actions"><button>Create Task</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+  if (state.modal.type === "nukeCampusCareRequests") {
+    return `<div class="modal-backdrop"><form class="modal card" id="nukeCampusCareRequestsForm" autocomplete="off"><h2>Nuke all Campus Cares requests?</h2><p class="helper">This will delete every Campus Cares request. Enter your password to confirm.</p>${passwordFieldHtml("password", "Password")}${modalErrorHtml()}<div class="actions"><button class="danger">Delete All Campus Cares Requests</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+
+if (state.modal.type === "selfProfile") {
+    const u = state.modal.user || state.session || {};
+    return `
+      <div class="modal-backdrop"><form class="modal card" id="selfProfileForm">
+        <h2>My Profile</h2>
+        <p class="helper">This profile information can be used for Printables like Teacher Bio.</p>
+        <div class="grid two">
+          <label>Used Name <input name="usedName" placeholder="Ms. Peggy" value="${escapeHtml(u.usedName || "")}" /></label>
+          <label>Profile Picture
+            <input name="profilePicture" type="file" accept="image/*" data-user-profile-image-input />
+            <input type="hidden" name="profileImageData" value="${u.profileImageData || ""}" />
+          </label>
+        </div>
+        <div class="profile-preview-row">
+          ${u.profileImageData ? `<img class="user-profile-preview" src="${u.profileImageData}" alt="Profile preview" />` : `<div class="user-profile-preview empty">No Photo</div>`}
+        </div>
+        ${u.rawProfileImageData ? `
+          <div class="profile-crop-panel" data-profile-crop-panel>
+            <div class="profile-crop-stage"><img src="${u.rawProfileImageData}" alt="Crop preview" data-profile-crop-img /><div class="profile-crop-circle"></div></div>
+            <div class="grid three">
+              <label>Zoom<input type="range" min="1" max="3" step="0.05" value="${u.cropZoom || 1.2}" data-profile-crop-zoom /></label>
+              <label>Move Left/Right<input type="range" min="0" max="100" step="1" value="${u.cropX || 50}" data-profile-crop-x /></label>
+              <label>Move Up/Down<input type="range" min="0" max="100" step="1" value="${u.cropY || 50}" data-profile-crop-y /></label>
+            </div>
+            <div class="actions"><button type="button" data-apply-profile-crop>Use This Crop</button><button type="button" class="secondary" data-cancel-profile-crop>Cancel Crop</button></div>
+          </div>` : ""}
+        ${renderEducationBuilder(u)}
+        <div class="grid two">
+          <label>Started Working In Early Childhood Education <input name="earlyEducationStart" value="${escapeHtml(u.earlyEducationStart || "")}" placeholder="2018 / August 2018" /></label>
+          <label>Birthday <input type="date" name="birthday" value="${escapeHtml(u.birthday || "")}" /></label>
+        </div>
+        <label>Why I Chose Early Education <textarea name="whyEarlyEducation" rows="5">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>
+        <div class="actions"><button>Save My Profile</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+      </form></div>`;
+  }
+
 if (state.modal.type === "addUser" || state.modal.type === "editUser") {
     const u = state.modal.user || { roles: ["teacher"], schoolIds: [] };
     const isEdit = state.modal.type === "editUser";
@@ -2636,6 +5965,38 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
           <label>Last Name <input name="lastName" required value="${u.lastName || ""}" /></label>
         </div>
         <div class="grid two">
+          <label>Used Name <input name="usedName" placeholder="Ms. Peggy" value="${u.usedName || ""}" /></label>
+          <label>Profile Picture
+            <input name="profilePicture" type="file" accept="image/*" data-user-profile-image-input />
+            <input type="hidden" name="profileImageData" value="${u.profileImageData || ""}" />
+          </label>
+        </div>
+        <div class="profile-preview-row">
+          ${u.profileImageData ? `<img class="user-profile-preview" src="${u.profileImageData}" alt="Profile preview" />` : `<div class="user-profile-preview empty">No Photo</div>`}
+          <span class="helper">Used Name is what flyer shortcuts will use, like “Ms. Peggy”.</span>
+        </div>
+        ${u.rawProfileImageData ? `
+          <div class="profile-crop-panel" data-profile-crop-panel>
+            <div class="profile-crop-stage">
+              <img src="${u.rawProfileImageData}" alt="Crop preview" data-profile-crop-img />
+              <div class="profile-crop-circle"></div>
+            </div>
+            <div class="grid three">
+              <label>Zoom<input type="range" min="1" max="3" step="0.05" value="${u.cropZoom || 1.2}" data-profile-crop-zoom /></label>
+              <label>Move Left/Right<input type="range" min="0" max="100" step="1" value="${u.cropX || 50}" data-profile-crop-x /></label>
+              <label>Move Up/Down<input type="range" min="0" max="100" step="1" value="${u.cropY || 50}" data-profile-crop-y /></label>
+            </div>
+            <div class="actions"><button type="button" data-apply-profile-crop>Use This Crop</button><button type="button" class="secondary" data-cancel-profile-crop>Cancel Crop</button></div>
+            <p class="helper">Center the circle around the person. This is what will show in The Village Voice.</p>
+          </div>` : ""}
+        ${renderEducationBuilder(u)}
+        <div class="grid two">
+          <label>Started Working In Early Childhood Education <input name="earlyEducationStart" value="${escapeHtml(u.earlyEducationStart || "")}" placeholder="2018 / August 2018" /></label>
+          <label>Birthday <input type="date" name="birthday" value="${escapeHtml(u.birthday || "")}" /></label>
+        </div>
+        <label>Why I Chose Early Education <textarea name="whyEarlyEducation" rows="4" placeholder="Teacher writes their own answer here.">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>
+        <label>Printable Bio Summary <textarea name="leaderSummary" rows="4" placeholder="Leader-only summary that appears at the bottom of the printable bio without a label.">${escapeHtml(u.leaderSummary || "")}</textarea></label>
+        <div class="grid two">
           <label>4-Digit PIN <input name="pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required value="${u.pin || ""}" /></label>
           <label>Team Position
             <select name="teamPosition" required>
@@ -2643,6 +6004,15 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
               ${state.positions.map(p => `<option value="${p.name}" ${u.teamPosition === p.name ? "selected" : ""}>${p.name}</option>`).join("")}
             </select>
           </label>
+        </div>
+        <div class="grid two">
+          <label>Default Campus Cares Building
+            <select name="defaultCampusCareBuildingId">
+              <option value="">No default</option>
+              ${state.campusCareLocations.map(l => `<option value="${l.id}" ${u.defaultCampusCareBuildingId === l.id ? "selected" : ""}>${escapeHtml(l.building)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Default Campus Cares Sublocation <input name="defaultCampusCareSublocation" value="${escapeHtml(u.defaultCampusCareSublocation || "")}" placeholder="Classroom / office" /></label>
         </div>
         <label>Role
           <select name="role" required>
@@ -2705,6 +6075,24 @@ async function adminLeaderLogin(user, password, stayLoggedIn = false) {
 }
 
 
+function renderNotificationSettings(){
+  state.currentView="notificationSettings";
+  const tool = PERMISSION_TOOLS.find(t=>t.key==="notifications");
+  const settings = state.session?.notificationSettings || {};
+  const rows = (tool?.permissions || []).filter(p=>notificationAllowedForUser(state.session,p.key)).map(p=>`<label class="notification-setting-row"><input type="checkbox" name="${p.key}" ${settings[p.key]===true?'checked':''}> <span><strong>${escapeHtml(p.label)}</strong><small>${escapeHtml(p.description)}</small></span></label>`).join("");
+  $app.innerHTML = pageShell(`<section class="card"><h2>Notifications</h2><p class="helper">Choose the alerts you want. System Admin controls which notification types each role/position is allowed to choose.</p><form id="notificationSettingsForm" class="stack">${rows || '<div class="empty">No notification options are currently available for your role.</div>'}<div class="actions"><button>Save Notifications</button><button type="button" class="secondary" data-action="home">Back Home</button></div></form></section>${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
+}
+async function saveNotificationSettings(form){
+  const tool = PERMISSION_TOOLS.find(t=>t.key==="notifications");
+  const notificationSettings = { ...(state.session?.notificationSettings || {}) };
+  (tool?.permissions || []).forEach(p=>{ if(notificationAllowedForUser(state.session,p.key)) notificationSettings[p.key] = !!form.querySelector(`[name="${p.key}"]`)?.checked; });
+  await updateDoc(doc(db,"users",state.session.uid), { notificationSettings, updatedAt: serverTimestamp() });
+  state.session = { ...state.session, notificationSettings };
+  state.users = state.users.map(u=>u.uid===state.session.uid ? { ...u, notificationSettings } : u);
+  showToast("Notification settings saved.");
+  renderNotificationSettings();
+}
+
 function renderCurrentView() {
   if (!state.session) {
     renderLanding();
@@ -2730,6 +6118,13 @@ function renderCurrentView() {
     renderMoneyRequestsTool();
     return;
   }
+  if (state.currentView === "campusCares") { renderCampusCaresTool(); return; }
+  if (state.currentView === "notificationSettings") { renderNotificationSettings(); return; }
+
+  if (state.currentView === "villageVoice") {
+    renderVillageVoiceTool();
+    return;
+  }
 
   renderHome();
 }
@@ -2739,6 +6134,19 @@ function render() {
 }
 
 $app.addEventListener("change", async (e) => {
+  if (e.target.matches("[data-education-level]")) {
+    const row = e.target.closest("[data-education-row]");
+    const isCert = e.target.value === "Certificate";
+    row?.querySelector(".education-in")?.classList.toggle("hidden", isCert);
+    row?.querySelector('[name="educationField"]')?.classList.toggle("hidden", isCert);
+    row?.querySelector('[name="educationCertificate"]')?.classList.toggle("hidden", !isCert);
+    refreshEducationCertificateOptions(row?.closest("[data-education-builder]") || document);
+    return;
+  }
+  if (e.target.matches("[data-education-certificate]")) {
+    refreshEducationCertificateOptions(e.target.closest("[data-education-builder]") || document);
+    return;
+  }
   if (e.target.matches("[data-dev-view-role]")) {
     state.devViewRoleKey = e.target.value;
     state.selectedMoneyApprovalIds = [];
@@ -2746,6 +6154,146 @@ $app.addEventListener("change", async (e) => {
     renderHome();
     return;
   }
+  if (e.target.matches("[data-important-dates-import]")) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      await importImportantDatesFromPayload(payload);
+      await loadImportantDates();
+      renderHome();
+      showToast("Important dates import saved.");
+    } catch (err) {
+      alert(err.message || "That file could not be imported. Please use the converted family calendar JSON file.");
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-budget-code-upload]")) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      showAppLoading("Importing budget codes...");
+      await importBudgetCodesFromFile(file);
+      e.target.value = "";
+      renderOwnersPanel();
+    } catch (err) {
+      alert(err.message || "That budget code file could not be imported.");
+    } finally {
+      hideAppLoading();
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-weekly-theme-import]")) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      const form = e.target.closest("form");
+      applyWeeklyThemeImportToForm(form, payload);
+      await saveWeeklyThemes(form);
+      await loadWeeklyThemes();
+      renderHome();
+      showToast("Curriculum import saved to Weekly Themes.");
+    } catch (err) {
+      alert(err.message || "That file could not be imported. Please use the converted curriculum JSON file.");
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-letterland-sprite-sheet]")) {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const originalImage = await readRawImageData(file);
+        const dims = await getImageDimensionsFromDataUrl(originalImage);
+        const form = e.target.closest("form") || getWeeklyThemesForm();
+        setLetterlandSpriteSheetOnForm(form, originalImage);
+        if (form?.letterlandSpriteWidth) form.letterlandSpriteWidth.value = String(dims.width || "");
+        if (form?.letterlandSpriteHeight) form.letterlandSpriteHeight.value = String(dims.height || "");
+        syncLetterlandSpriteSheetToState(form, false);
+        refreshLetterlandSpriteSheetStatus(form);
+        e.target.value = "";
+        showToast("Sprite sheet replaced. Click Preview / adjust cells if needed, then choose images for each week.");
+      } catch (err) {
+        alert(err.message || "That sprite sheet could not be processed. Please try a smaller image.");
+      }
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-letterland-image-week]")) {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const compressedImage = await resizeToolImage(file);
+        const week = e.target.dataset.letterlandImageWeek;
+        const form = e.target.closest("form");
+        const hidden = form?.querySelector(`[name="letterImage_${week}"]`);
+        if (hidden) hidden.value = compressedImage;
+        const card = e.target.closest(".weekly-theme-card");
+        card?.querySelector(".weekly-letter-preview")?.remove();
+        card?.insertAdjacentHTML("beforeend", `<img class="weekly-letter-preview" src="${compressedImage}" alt="Letterland week ${week}" />`);
+        showToast("Letterland image ready. Click Save Weekly Themes to publish it.");
+      } catch (err) {
+        alert(err.message || "That image could not be processed. Please try a smaller image.");
+      }
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-village-block-bg]")) {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const compressedImage = await resizeToolImage(file);
+        const blockId = e.target.dataset.villageBlockBg;
+        const form = e.target.closest("form");
+        form?.querySelectorAll(`[data-block-bg-data="${blockId}"]`).forEach(hidden => { hidden.value = compressedImage; });
+        state.expandedVillageVoiceEditorId = blockId;
+        const kind = form?.dataset?.printableKind;
+        if (kind) updatePrintableDraftFromForm(kind, form); else updateVillageVoiceDraftFromForm(form);
+        renderVillageVoiceTool();
+        showToast("Block background image ready. Click Save to publish it.");
+      } catch (err) {
+        alert(err.message || "That image could not be processed. Please try a smaller image.");
+      }
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-village-block-clip]")) {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const compressedImage = await resizeToolImage(file);
+        const blockId = e.target.dataset.villageBlockClip;
+        const form = e.target.closest("form");
+        form?.querySelectorAll(`[data-block-clip-data="${blockId}"]`).forEach(hidden => { hidden.value = compressedImage; });
+        state.expandedVillageVoiceEditorId = blockId;
+        state.villageVoiceSelectedBlockTab = "content";
+        const kind = form?.dataset?.printableKind;
+        if (kind) updatePrintableDraftFromForm(kind, form); else updateVillageVoiceDraftFromForm(form);
+        renderVillageVoiceTool();
+        showToast("Clip art added to block. Click Save to publish it.");
+      } catch (err) {
+        alert(err.message || "That image could not be processed. Please try a smaller image.");
+      }
+    }
+    return;
+  }
+
+  if (e.target.matches("[data-campus-building]")) {
+    const loc = state.campusCareLocations.find(l => l.id === e.target.value);
+    const sub = e.target.closest("form")?.querySelector("[data-campus-sublocation]");
+    if (sub) sub.innerHTML = (loc?.sublocations || []).map(x => `<option>${escapeHtml(x)}</option>`).join("");
+    return;
+  }
+  if (e.target.matches("[data-campus-status-change]")) { await updateCampusTaskStatus(e.target.dataset.campusStatusChange, e.target.value); return; }
+
   if (e.target.matches("[data-dev-view-position]")) {
     state.devViewPosition = e.target.value;
     state.selectedMoneyApprovalIds = [];
@@ -2768,6 +6316,58 @@ $app.addEventListener("change", async (e) => {
     renderMoneyRequestsTool();
     return;
   }
+  if (e.target.matches("[data-user-profile-image-input]")) {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const rawImage = await readRawImageData(file);
+        const form = e.target.closest("form");
+        state.modal.user = {
+          ...(state.modal.user || { roles: ["teacher"], schoolIds: [] }),
+          firstName: form.firstName?.value || state.modal.user?.firstName || "",
+          lastName: form.lastName?.value || state.modal.user?.lastName || "",
+          usedName: form.usedName?.value || "",
+          birthday: form.birthday?.value || state.modal.user?.birthday || "",
+          educationList: collectEducationEntries(form),
+          earlyEducationStart: form.earlyEducationStart?.value || state.modal.user?.earlyEducationStart || "",
+          whyEarlyEducation: form.whyEarlyEducation?.value || state.modal.user?.whyEarlyEducation || "",
+          leaderSummary: form.leaderSummary?.value || state.modal.user?.leaderSummary || "",
+          pin: form.pin?.value || "",
+          teamPosition: form.teamPosition?.value || state.modal.user?.teamPosition || "",
+          role: form.role?.value || state.modal.user?.role || "teacher",
+          roles: [form.role?.value || state.modal.user?.role || "teacher"],
+          schoolIds: getFormSchoolIds(form),
+          profileImageData: form.profileImageData?.value || state.modal.user?.profileImageData || "",
+          rawProfileImageData: rawImage,
+          cropZoom: 1.2,
+          cropX: 50,
+          cropY: 50
+        };
+        renderCurrentView();
+        showToast("Adjust the crop, then click Use This Crop.");
+      } catch (err) {
+        alert(err.message || "That image could not be processed. Please try a smaller image.");
+      }
+    }
+    return;
+  }
+  if (e.target.matches("[data-branding-logo-input]")) {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const compressedImage = await resizeToolImage(file);
+        const form = e.target.closest("form");
+        const hidden = form?.querySelector('[name="ovaLogoData"]');
+        if (hidden) hidden.value = compressedImage;
+        state.appSettings = { ...(state.appSettings || {}), ovaLogoData: compressedImage };
+        showToast("Logo ready. Click Save Branding to publish it.");
+        renderSystemAdmin();
+      } catch (err) {
+        alert(err.message || "That image could not be processed. Please try a smaller image.");
+      }
+    }
+    return;
+  }
   if (e.target.matches("[data-tool-image-input]")) {
     const file = e.target.files?.[0];
     const toolKey = e.target.dataset.toolImageInput;
@@ -2784,6 +6384,59 @@ $app.addEventListener("change", async (e) => {
         alert(err.message || "That image could not be processed. Please try a smaller image.");
       }
     }
+    return;
+  }
+  if (e.target.matches("[data-profile-crop-zoom], [data-profile-crop-x], [data-profile-crop-y]")) {
+    const user = state.modal?.user || {};
+    user.cropZoom = document.querySelector("[data-profile-crop-zoom]")?.value || user.cropZoom || 1.2;
+    user.cropX = document.querySelector("[data-profile-crop-x]")?.value || user.cropX || 50;
+    user.cropY = document.querySelector("[data-profile-crop-y]")?.value || user.cropY || 50;
+    state.modal.user = user;
+    const img = document.querySelector("[data-profile-crop-img]");
+    if (img) {
+      img.style.transformOrigin = `${user.cropX}% ${user.cropY}%`;
+      img.style.transform = `scale(${user.cropZoom})`;
+    }
+    return;
+  }
+  if (e.target.matches("[data-village-month]")) {
+    state.villageVoiceSelectedMonth = e.target.value;
+    const form = e.target.closest("form");
+    if (form?.theme) form.theme.value = getSeasonTheme(e.target.value);
+    renderVillageVoicePreviewOnly();
+    return;
+  }
+  if (e.target.matches("[data-village-live]")) {
+    const form = e.target.closest("form");
+    const kind = form?.dataset?.printableKind;
+    if (e.target.matches("[data-block-function]")) {
+      if (kind) updatePrintableDraftFromForm(kind, form); else updateVillageVoiceDraftFromForm(form);
+      renderVillageVoiceTool();
+    } else {
+      if (kind) renderPrintablePreviewOnly(kind); else renderVillageVoicePreviewOnly();
+    }
+    return;
+  }
+  if (e.target.matches("[data-printable-live]")) {
+    const kind = e.target.closest("form")?.dataset?.printableKind;
+    if (kind) renderPrintablePreviewOnly(kind);
+    return;
+  }
+  if (e.target.matches("[data-door-live]")) {
+    renderDoorPreviewOnly();
+    return;
+  }
+  if (e.target.matches("[data-teacher-bio-live]")) {
+    renderTeacherBioPreviewOnly();
+    return;
+  }
+  if (e.target.matches("[data-printable-live]")) {
+    const kind = e.target.closest("form")?.dataset?.printableKind;
+    if (kind) renderPrintablePreviewOnly(kind);
+    return;
+  }
+  if (e.target.matches("[data-door-live]")) {
+    renderDoorPreviewOnly();
     return;
   }
   if (e.target.matches("[data-budget-category]")) {
@@ -2819,6 +6472,18 @@ $app.addEventListener("click", async (e) => {
   const deleteRequestTypeId = e.target.closest("[data-delete-request-type]")?.dataset.deleteRequestType;
   const editBudgetCodeId = e.target.closest("[data-edit-budget-code]")?.dataset.editBudgetCode;
   const deleteBudgetCodeId = e.target.closest("[data-delete-budget-code]")?.dataset.deleteBudgetCode;
+  const deleteImportantDateId = e.target.closest("[data-delete-important-date]")?.dataset.deleteImportantDate;
+  const editImportantDateId = e.target.closest("[data-edit-important-date]")?.dataset.editImportantDate;
+  const cancelImportantDateEdit = e.target.closest("[data-cancel-important-date-edit]");
+  const deleteCertificateId = e.target.closest("[data-delete-certificate]")?.dataset.deleteCertificate;
+  const printableTab = e.target.closest("[data-printable-tab]")?.dataset.printableTab;
+  const clearBrandingLogo = e.target.closest("[data-clear-branding-logo]");
+  if (printableTab) {
+    state.printableTab = printableTab;
+    renderVillageVoiceTool();
+    return;
+  }
+
   const leadershipTab = e.target.closest("[data-leadership-tab]")?.dataset.leadershipTab;
   const ownerTab = e.target.closest("[data-owner-tab]")?.dataset.ownerTab;
   const toolId = e.target.closest("[data-tool]")?.dataset.tool;
@@ -2834,7 +6499,9 @@ $app.addEventListener("click", async (e) => {
   const restoreToolId = e.target.closest("[data-restore-tool]")?.dataset.restoreTool;
   const saveToolConfigKey = e.target.closest("[data-save-tool-config]")?.dataset.saveToolConfig;
   const nukeMoneyRequests = e.target.closest("[data-nuke-money-requests]");
+  const nukeCampusCareRequests = e.target.closest("[data-nuke-campus-care-requests]");
   const clearDevPreview = e.target.closest("[data-clear-dev-preview]");
+  const openSelfProfile = e.target.closest("[data-open-self-profile]");
 
   const permissionToolToggle = e.target.closest("[data-permission-tool-toggle]")?.dataset.permissionToolToggle;
   const addPermissionRole = e.target.closest("[data-add-permission-role]")?.dataset.addPermissionRole;
@@ -2842,8 +6509,36 @@ $app.addEventListener("click", async (e) => {
   const addPermissionPosition = e.target.closest("[data-add-permission-position]")?.dataset.addPermissionPosition;
   const removePermissionPosition = e.target.closest("[data-remove-permission-position]")?.dataset.removePermissionPosition;
 
+  if (openSelfProfile) { state.modal = { type: "selfProfile", user: { ...state.session } }; renderCurrentView(); return; }
+
   if (clearDevPreview) { await withAppLoading("Updating view...", async () => { state.devViewRoleKey = ""; state.devViewPosition = ""; renderHome(); }); return; }
+  if (editImportantDateId) { state.editingImportantDateId = editImportantDateId; renderLeadership(); return; }
+  if (cancelImportantDateEdit) { state.editingImportantDateId = ""; renderLeadership(); return; }
+  if (deleteImportantDateId) { await withAppLoading("Deleting date...", async () => { await deleteImportantDate(deleteImportantDateId); await refreshAdminData(); renderLeadership(); }); return; }
+  if (deleteCertificateId) { await withAppLoading("Deleting certificate...", async () => { await deleteCertificate(deleteCertificateId); await refreshAdminData(); renderLeadership(); }); return; }
+  if (e.target.closest("[data-add-education-row]")) { const builder = e.target.closest("[data-education-builder]"); const wrap = builder?.querySelector("[data-education-rows]"); if (wrap) { wrap.insertAdjacentHTML("beforeend", renderEducationRow({})); refreshEducationCertificateOptions(builder); } return; }
+  if (e.target.closest("[data-remove-education-row]")) { const builder = e.target.closest("[data-education-builder]"); const rows = builder?.querySelector("[data-education-rows]"); e.target.closest("[data-education-row]")?.remove(); if (rows && !rows.querySelector("[data-education-row]")) rows.insertAdjacentHTML("beforeend", renderEducationRow({})); refreshEducationCertificateOptions(builder || document); return; }
+  if (e.target.closest("[data-add-village-block]")) { addVillageVoiceBlock(); return; }
+  if (e.target.closest("[data-reset-village-voice]")) { resetVillageVoiceDraft(); return; }
+  if (e.target.closest("[data-export-village-pdf]")) { exportVillageVoicePdf(); return; }
+  const addPrintableKind = e.target.closest("[data-add-printable-block]")?.dataset.addPrintableBlock;
+  if (addPrintableKind) { addPrintableBlock(addPrintableKind); return; }
+  const exportPrintableKind = e.target.closest("[data-export-printable-pdf]")?.dataset.exportPrintablePdf;
+  if (exportPrintableKind) { exportPrintablePdf(exportPrintableKind); return; }
+  if (e.target.closest("[data-export-door-pdf]")) { exportDoorPdf(); return; }
+  if (e.target.closest("[data-save-illness-template]")) { await saveIllnessTemplate(); return; }
+  const illnessTemplateId = e.target.closest("[data-load-illness-template]")?.dataset.loadIllnessTemplate;
+  if (illnessTemplateId) { loadIllnessTemplate(illnessTemplateId); return; }
   if (nukeMoneyRequests) { await withAppLoading("Opening confirmation...", async () => { state.modal = { type: "nukeMoneyRequests", error: "" }; renderSystemAdmin(); }); return; }
+  if (nukeCampusCareRequests) { await withAppLoading("Opening confirmation...", async () => { state.modal = { type: "nukeCampusCareRequests", error: "" }; renderSystemAdmin(); }); return; }
+
+  const collapseVoiceBlock = e.target.closest("[data-voice-collapse]")?.dataset.voiceCollapse;
+  if (collapseVoiceBlock) {
+    const block = e.target.closest(".voice-edit-block");
+    block?.classList.toggle("collapsed");
+    e.target.textContent = block?.classList.contains("collapsed") ? "Expand" : "Collapse";
+    return;
+  }
 
   if (e.target.closest("[data-show-password]")) {
     const wrap = e.target.closest(".password-input-wrap");
@@ -2868,6 +6563,9 @@ $app.addEventListener("click", async (e) => {
     return;
   }
   if (saveToolConfigKey) { await withAppLoading("Saving tool settings...", async () => { await saveToolConfig(saveToolConfigKey); renderSystemAdmin(); }); return; }
+  if (e.target.closest("[data-campus-open-menu]")) { e.target.closest(".home-tool-wrap")?.classList.toggle("menu-open"); return; }
+  const campusOpenMode = e.target.closest("[data-campus-open-mode]")?.dataset.campusOpenMode;
+  if (campusOpenMode) { setCampusCaresOpenPreference(campusOpenMode); renderHome(); showToast("Campus Cares opening preference saved."); return; }
   if (bookmarkToolId) { await withAppLoading("Updating bookmarks...", async () => { const prefs=getToolPrefs(); prefs.bookmarks = prefs.bookmarks || []; prefs.bookmarks = prefs.bookmarks.includes(bookmarkToolId) ? prefs.bookmarks.filter(id=>id!==bookmarkToolId) : [...prefs.bookmarks, bookmarkToolId]; saveToolPrefs(prefs); renderHome(); }); return; }
   if (hideToolId) { await withAppLoading("Hiding tool...", async () => { const prefs=getToolPrefs(); prefs.hidden = Array.from(new Set([...(prefs.hidden || []), hideToolId])); prefs.bookmarks=(prefs.bookmarks||[]).filter(id=>id!==hideToolId); saveToolPrefs(prefs); renderHome(); }); return; }
   if (restoreToolId) { await withAppLoading("Restoring tool...", async () => { const prefs=getToolPrefs(); prefs.hidden=(prefs.hidden||[]).filter(id=>id!==restoreToolId); saveToolPrefs(prefs); renderHome(); }); return; }
@@ -2940,6 +6638,30 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  const campusTab = e.target.closest("[data-campus-tab]")?.dataset.campusTab;
+  if (campusTab) { state.campusCaresTab = campusTab; renderCampusCaresTool(); return; }
+  if (e.target.closest("[data-open-campus-submit]")) { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); return; }
+  const campusNotes = e.target.closest("[data-campus-notes]")?.dataset.campusNotes;
+  if (campusNotes) { state.modal = { type:"campusCareNotes", task: state.campusCareTasks.find(t=>t.id===campusNotes) }; renderCampusCaresTool(); return; }
+  const campusAssign = e.target.closest("[data-campus-assign]")?.dataset.campusAssign;
+  if (campusAssign) { state.modal = { type:"campusCareAssign", task: state.campusCareTasks.find(t=>t.id===campusAssign) }; renderCampusCaresTool(); return; }
+  const editCampusLocation = e.target.closest("[data-edit-campus-location]")?.dataset.editCampusLocation;
+  if (editCampusLocation) { state.modal={type:"editCampusCareLocation", location: state.campusCareLocations.find(l=>l.id===editCampusLocation)}; renderSystemAdmin(); return; }
+  const editCampusStatus = e.target.closest("[data-edit-campus-status]")?.dataset.editCampusStatus;
+  if (editCampusStatus) { state.modal={type:"editCampusCareStatus", status: state.campusCareStatuses.find(s=>s.id===editCampusStatus)}; renderSystemAdmin(); return; }
+  const delCampusLocation = e.target.closest("[data-delete-campus-location]")?.dataset.deleteCampusLocation;
+  if (delCampusLocation) { if(confirm("Hide this location?")) await hideCampusCareLocation(delCampusLocation); renderSystemAdmin(); return; }
+  const delCampusStatus = e.target.closest("[data-delete-campus-status]")?.dataset.deleteCampusStatus;
+  if (delCampusStatus) { if(confirm("Hide this status?")) await hideCampusCareStatus(delCampusStatus); renderSystemAdmin(); return; }
+  const openCampusDiscussion = e.target.closest("[data-open-campus-discussion]")?.dataset.openCampusDiscussion;
+  if (openCampusDiscussion) { state.activeCampusDiscussionId = openCampusDiscussion; renderCampusCaresTool(); return; }
+  const approveCampusDiscussionId = e.target.closest("[data-approve-campus-discussion]")?.dataset.approveCampusDiscussion;
+  if (approveCampusDiscussionId) { await approveCampusDiscussion(approveCampusDiscussionId); return; }
+  const removeCampusDiscussionId = e.target.closest("[data-remove-campus-discussion]")?.dataset.removeCampusDiscussion;
+  if (removeCampusDiscussionId) { state.modal={type:"removeCampusDiscussion", discussion: state.campusCareDiscussions.find(d=>d.id===removeCampusDiscussionId)}; renderCampusCaresTool(); return; }
+  const convertCampusDiscussionId = e.target.closest("[data-convert-campus-discussion]")?.dataset.convertCampusDiscussion;
+  if (convertCampusDiscussionId) { state.modal={type:"campusDiscussionToTask", discussion: state.campusCareDiscussions.find(d=>d.id===convertCampusDiscussionId)}; renderCampusCaresTool(); return; }
+
   const receiptRequestId = e.target.closest("[data-receipt-request]")?.dataset.receiptRequest;
   if (receiptRequestId) {
     await withAppLoading("Opening receipt form...", async () => {
@@ -2968,6 +6690,11 @@ $app.addEventListener("click", async (e) => {
       state.expandedMoneyRequestId = state.expandedMoneyRequestId === expandMoneyRequestId ? "" : expandMoneyRequestId;
       renderMoneyRequestsTool();
     });
+    return;
+  }
+
+  if (e.target.closest("[data-trigger-budget-code-upload]")) {
+    document.querySelector("[data-budget-code-upload]")?.click();
     return;
   }
 
@@ -3071,6 +6798,8 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (toolId === "campusCares") { await withAppLoading("Opening Campus Cares...", async () => { await refreshCampusCaresData(); const mode=getCampusCaresOpenPreference(); if (mode === "submitted") state.campusCaresTab = "submitted"; renderCampusCaresTool(); if (mode === "submitPopup") { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); } }); return; }
+  if (toolId === "villageVoice") { await withAppLoading("Opening Printables...", async () => { await refreshAdminData(); state.printableTab = state.printableTab || "villageVoice"; renderVillageVoiceTool(); }); return; }
   if (toolId === "moneyRequests") {
     await withAppLoading("Opening Money Requests...", async () => {
       await refreshMoneyRequestsData();
@@ -3131,8 +6860,8 @@ $app.addEventListener("click", async (e) => {
   }
 
   if (deleteBudgetCodeId) {
-    if (confirm("Hide this budget code?")) {
-      await hideBudgetCode(deleteBudgetCodeId);
+    if (confirm("Delete this budget code? Existing submitted requests will keep their saved code/category.")) {
+      await deleteBudgetCode(deleteBudgetCodeId);
       state.modal = null;
       await refreshAdminData();
       state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin();
@@ -3197,6 +6926,15 @@ if (editRoleId) {
   }
 
 
+  if (clearBrandingLogo) {
+    const form = clearBrandingLogo.closest("form");
+    const hidden = form?.querySelector('[name="ovaLogoData"]');
+    if (hidden) hidden.value = "";
+    state.appSettings = { ...(state.appSettings || {}), ovaLogoData: "" };
+    renderSystemAdmin();
+    return;
+  }
+
   if (loginUid) {
     await withAppLoading("Opening login...", async () => {
       const user = state.roster.find(u => u.uid === loginUid) || await readUser(loginUid);
@@ -3211,7 +6949,8 @@ if (editRoleId) {
       await refreshAdminData();
       state.modal = { type: modalType };
       if (modalType === "addBudgetCode" && state.currentView === "ownersPanel") renderOwnersPanel();
-      else if (["addSchool", "addPosition", "addRole", "addMoneyRequestType", "addBudgetCode"].includes(modalType)) renderSystemAdmin();
+      else if (["addSchool", "addPosition", "addRole", "addMoneyRequestType", "addBudgetCode", "addCampusCareLocation", "addCampusCareStatus"].includes(modalType)) renderSystemAdmin();
+      else if (["addCampusDiscussion"].includes(modalType)) renderCampusCaresTool();
       else renderLeadership();
     });
     return;
@@ -3228,8 +6967,212 @@ if (editRoleId) {
   if (action === "home") { await withAppLoading("Loading home...", async () => renderHome()); return; }
   if (action === "leadership") { await withAppLoading("Opening Leadership Panel...", async () => { await refreshAdminData(); renderLeadership(); }); return; }
   if (action === "ownersPanel") { await withAppLoading("Opening Owners Panel...", async () => { await refreshAdminData(); renderOwnersPanel(); }); return; }
+  if (action === "home") { await withAppLoading("Opening Home...", async () => { renderHome(); }); return; }
   if (action === "systemAdmin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminData(); renderSystemAdmin(); }); return; }
+  if (action === "notificationSettings") { await withAppLoading("Opening notifications...", async () => { renderNotificationSettings(); }); return; }
   if (action === "admin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminData(); renderSystemAdmin(); }); return; }
+  const voiceBlockTab = e.target.closest("[data-voice-block-tab]");
+  if (voiceBlockTab) {
+    const form = document.getElementById("villageVoiceForm");
+    if (form) updateVillageVoiceDraftFromForm(form);
+    const keepFocusId = state.expandedVillageVoiceEditorId;
+    state.villageVoiceSelectedBlockTab = voiceBlockTab.dataset.voiceBlockTab || "content";
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(keepFocusId);
+    return;
+  }
+
+  const openBgModal = e.target.closest("[data-open-voice-bg-modal]");
+  if (openBgModal) {
+    const form = document.getElementById("villageVoiceForm");
+    if (form) updateVillageVoiceDraftFromForm(form);
+    state.villageVoiceBgPickerId = openBgModal.dataset.openVoiceBgModal;
+    state.villageVoiceSelectedBlockTab = "style";
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(state.expandedVillageVoiceEditorId);
+    return;
+  }
+  if (e.target.closest("[data-stop-voice-bg-close]")) {
+    // keep clicks inside the modal from falling through to the preview selector
+  }
+  const closeBgModal = e.target.matches("[data-close-voice-bg-modal]") || e.target.closest("button[data-close-voice-bg-modal]");
+  if (closeBgModal) {
+    state.villageVoiceBgPickerId = "";
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(state.expandedVillageVoiceEditorId);
+    return;
+  }
+  const modalColorBtn = e.target.closest("[data-apply-voice-bg-color]");
+  if (modalColorBtn) {
+    const id = modalColorBtn.dataset.applyVoiceBgColor;
+    const form = document.getElementById("villageVoiceForm");
+    const color = form?.querySelector(`[data-voice-bg-modal-color="${id}"]`)?.value || "#ffffff";
+    form?.querySelectorAll(`[data-block-bg-color="${id}"]`).forEach(input => { input.value = color; });
+    updateVillageVoiceDraftFromForm(form);
+    state.villageVoiceBgPickerId = "";
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(id);
+    return;
+  }
+
+  const closeVoiceInline = e.target.closest("[data-close-voice-inline]");
+  if (closeVoiceInline) {
+    const form = document.getElementById("villageVoiceForm");
+    if (form) updateVillageVoiceDraftFromForm(form);
+    state.expandedVillageVoiceEditorId = "";
+    renderVillageVoiceTool();
+    return;
+  }
+  if (e.target.closest(".voice-inline-editor, .voice-left-block-editor")) return;
+  const previewBlock = e.target.closest("[data-preview-block]");
+  const previewSpecial = e.target.closest("[data-preview-special]");
+  if (previewBlock || previewSpecial) {
+    const form = document.getElementById("villageVoiceForm");
+    if (form) updateVillageVoiceDraftFromForm(form);
+    state.expandedVillageVoiceEditorId = previewBlock?.dataset.previewBlock || previewSpecial?.dataset.previewSpecial || "";
+    state.villageVoiceSelectedBlockTab = "content";
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(state.expandedVillageVoiceEditorId);
+    return;
+  }
+
+  const voiceToggle = e.target.closest("[data-voice-toggle]");
+  const voiceCollapse = e.target.closest("[data-voice-collapse]");
+  if (voiceToggle || voiceCollapse) {
+    const id = (voiceCollapse || voiceToggle).dataset.voiceCollapse || (voiceCollapse || voiceToggle).dataset.voiceToggle;
+    if (e.target.matches("input, textarea, select, option")) return;
+    const wasOpen = state.expandedVillageVoiceEditorId === id;
+    state.expandedVillageVoiceEditorId = wasOpen ? "" : id;
+    if (!wasOpen) state.villageVoiceSelectedBlockTab = "content";
+    const form = document.getElementById("villageVoiceForm") || document.querySelector(".printable-builder-form");
+    if (form?.dataset?.printableKind) updatePrintableDraftFromForm(form.dataset.printableKind, form);
+    else if (form?.id === "doorRemindersForm") updateDoorRemindersDraftFromForm(form);
+    else if (form) updateVillageVoiceDraftFromForm(form);
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(state.expandedVillageVoiceEditorId);
+    return;
+  }
+  const clearVoiceBg = e.target.closest("[data-clear-voice-bg]");
+  if (clearVoiceBg) {
+    const form = clearVoiceBg.closest("form");
+    const id = clearVoiceBg.dataset.clearVoiceBg;
+    form?.querySelectorAll(`[data-block-bg-data="${id}"]`).forEach(input => { input.value = ""; });
+    const keepFocusId = state.expandedVillageVoiceEditorId || id;
+    state.villageVoiceBgPickerId = "";
+    if (form?.dataset?.printableKind) updatePrintableDraftFromForm(form.dataset.printableKind, form);
+    else updateVillageVoiceDraftFromForm(form);
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(keepFocusId);
+    return;
+  }
+
+  const clearVoiceClip = e.target.closest("[data-clear-voice-clip]");
+  if (clearVoiceClip) {
+    const form = clearVoiceClip.closest("form");
+    const id = clearVoiceClip.dataset.clearVoiceClip;
+    form?.querySelectorAll(`[data-block-clip-data="${id}"]`).forEach(input => { input.value = ""; });
+    if (form?.dataset?.printableKind) updatePrintableDraftFromForm(form.dataset.printableKind, form);
+    else updateVillageVoiceDraftFromForm(form);
+    renderVillageVoiceTool();
+    return;
+  }
+
+  const ovaColor = e.target.closest("[data-ova-block-color]");
+  if (ovaColor) {
+    const form = ovaColor.closest("form");
+    const id = ovaColor.dataset.ovaBlockColor;
+    const color = ovaColor.dataset.ovaColor;
+    form?.querySelectorAll(`[data-block-bg-color="${id}"]`).forEach(input => { input.value = color; });
+    const keepFocusId = state.expandedVillageVoiceEditorId || id;
+    state.villageVoiceBgPickerId = "";
+    if (form?.dataset?.printableKind) updatePrintableDraftFromForm(form.dataset.printableKind, form);
+    else updateVillageVoiceDraftFromForm(form);
+    renderVillageVoiceTool();
+    focusVillageVoiceEditingSection(keepFocusId);
+    return;
+  }
+
+  const removeLetterlandSheet = e.target.closest("[data-remove-letterland-sheet]");
+  if (removeLetterlandSheet) {
+    const form = removeLetterlandSheet.closest("form") || getWeeklyThemesForm();
+    setLetterlandSpriteSheetOnForm(form, "");
+    window.__vvLetterlandSpriteSheet = "";
+    syncLetterlandSpriteSheetToState(form, true);
+    refreshLetterlandSpriteSheetStatus(form);
+    await saveWeeklyThemes(form);
+    await refreshAdminData();
+    renderLeadership();
+    showToast("Letterland sprite sheet and selected week images removed.");
+    return;
+  }
+
+  const openSheetPreview = e.target.closest("[data-open-letterland-sheet-preview]");
+  if (openSheetPreview) {
+    openLetterlandSpritePicker("", openSheetPreview.closest("form") || document.querySelector("#weeklyThemesForm"));
+    return;
+  }
+
+  const openLetterlandPicker = e.target.closest("[data-open-letterland-picker]");
+  if (openLetterlandPicker) {
+    openLetterlandSpritePicker(openLetterlandPicker.dataset.openLetterlandPicker, openLetterlandPicker.closest("form"));
+    return;
+  }
+
+  const closeLetterlandPicker = e.target.closest("[data-close-letterland-picker]");
+  if (closeLetterlandPicker || e.target.matches("[data-letterland-picker-modal]")) {
+    document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+    return;
+  }
+
+  const pickedLetterlandTile = e.target.closest("[data-pick-letterland-tile]");
+  if (pickedLetterlandTile) {
+    const week = pickedLetterlandTile.dataset.pickerWeek || "";
+    if (!week) return;
+    const form = getWeeklyThemesForm();
+    try {
+      await applyLetterlandSpriteTileToWeek(form, week, pickedLetterlandTile.dataset.pickLetterlandTile);
+      document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+      showToast("Letterland image selected. Use the floating Save button to publish it.");
+    } catch (err) {
+      alert(err.message || "That sprite tile could not be applied.");
+    }
+    return;
+  }
+
+
+  const clearLetterlandImage = e.target.closest("[data-clear-letterland-image]");
+  if (clearLetterlandImage) {
+    const week = clearLetterlandImage.dataset.clearLetterlandImage;
+    const form = clearLetterlandImage.closest("form") || getWeeklyThemesForm();
+    clearLetterlandWeekImage(form, week);
+    await saveWeeklyThemes(form);
+    await refreshAdminData();
+    renderLeadership();
+    showToast("Letterland week image removed.");
+    return;
+  }
+
+  const applyProfileCrop = e.target.closest("[data-apply-profile-crop]");
+  if (applyProfileCrop) {
+    const form = applyProfileCrop.closest("form");
+    const user = state.modal?.user || {};
+    try {
+      const cropped = await cropProfileImageToSquare(user.rawProfileImageData, user.cropZoom || 1.2, user.cropX || 50, user.cropY || 50);
+      state.modal.user = { ...user, profileImageData: cropped, rawProfileImageData: "" };
+      renderCurrentView();
+      showToast("Profile crop ready. Click Save User to publish it.");
+    } catch (err) {
+      alert(err.message || "That crop could not be applied.");
+    }
+    return;
+  }
+  const cancelProfileCrop = e.target.closest("[data-cancel-profile-crop]");
+  if (cancelProfileCrop) {
+    state.modal.user = { ...(state.modal.user || {}), rawProfileImageData: "" };
+    renderCurrentView();
+    return;
+  }
+
   if (e.target.closest("[data-close-modal]")) {
     state.modal = null;
     renderCurrentView();
@@ -3273,6 +7216,37 @@ $app.addEventListener("input", (e) => {
   if (e.target.matches("[data-budget-code]")) {
     syncBudgetFromCode(e.target);
   }
+  if (e.target.matches("[data-profile-crop-zoom], [data-profile-crop-x], [data-profile-crop-y]")) {
+    const user = state.modal?.user || {};
+    user.cropZoom = document.querySelector("[data-profile-crop-zoom]")?.value || user.cropZoom || 1.2;
+    user.cropX = document.querySelector("[data-profile-crop-x]")?.value || user.cropX || 50;
+    user.cropY = document.querySelector("[data-profile-crop-y]")?.value || user.cropY || 50;
+    state.modal.user = user;
+    const img = document.querySelector("[data-profile-crop-img]");
+    if (img) {
+      img.style.transformOrigin = `${user.cropX}% ${user.cropY}%`;
+      img.style.transform = `scale(${user.cropZoom})`;
+    }
+    return;
+  }
+  if (e.target.matches("[data-village-month]")) {
+    state.villageVoiceSelectedMonth = e.target.value;
+    const form = e.target.closest("form");
+    if (form?.theme) form.theme.value = getSeasonTheme(e.target.value);
+    renderVillageVoicePreviewOnly();
+    return;
+  }
+  if (e.target.matches("[data-village-live]")) {
+    const form = e.target.closest("form");
+    const kind = form?.dataset?.printableKind;
+    if (e.target.matches("[data-block-function]")) {
+      if (kind) updatePrintableDraftFromForm(kind, form); else updateVillageVoiceDraftFromForm(form);
+      renderVillageVoiceTool();
+    } else {
+      if (kind) renderPrintablePreviewOnly(kind); else renderVillageVoicePreviewOnly();
+    }
+    return;
+  }
   if (e.target.matches("[data-budget-category]")) {
     syncBudgetFromCategory(e.target);
   }
@@ -3281,6 +7255,35 @@ $app.addEventListener("input", (e) => {
   }
 });
 
+function previewVillageVoiceBlockBgColor(blockId, color) {
+  const block = document.querySelector(`[data-preview-block="${blockId}"]`);
+  if (!block || !color) return;
+  block.style.setProperty("--voice-block-bg", color);
+  block.style.setProperty("background-color", color, "important");
+}
+function restoreVillageVoiceBlockBgColor(blockId) {
+  const form = document.getElementById("villageVoiceForm");
+  const color = form?.querySelector(`[data-block-bg-color="${blockId}"]`)?.value || "#ffffff";
+  previewVillageVoiceBlockBgColor(blockId, color);
+}
+$app.addEventListener("mouseover", (e) => {
+  const swatch = e.target.closest?.("[data-ova-block-color]");
+  if (!swatch) return;
+  previewVillageVoiceBlockBgColor(swatch.dataset.ovaBlockColor, swatch.dataset.ovaColor);
+}, true);
+$app.addEventListener("mouseout", (e) => {
+  const swatch = e.target.closest?.("[data-ova-block-color]");
+  if (!swatch) return;
+  const to = e.relatedTarget;
+  if (to && swatch.contains(to)) return;
+  restoreVillageVoiceBlockBgColor(swatch.dataset.ovaBlockColor);
+}, true);
+$app.addEventListener("input", (e) => {
+  if (e.target.matches?.("[data-voice-bg-modal-color]")) {
+    previewVillageVoiceBlockBgColor(e.target.dataset.voiceBgModalColor, e.target.value);
+    return;
+  }
+}, true);
 $app.addEventListener("blur", (e) => {
   if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; renderHome(); return; }
   if (e.target.matches("[data-money-input]")) {
@@ -3288,6 +7291,48 @@ $app.addEventListener("blur", (e) => {
     updateMoneyRequestAddButtons();
   }
 }, true);
+
+function villageVoiceDescribeElement(el) {
+  if (!el) return null;
+  const block = el.closest?.(".voice-edit-block, [data-preview-block]");
+  const form = document.getElementById("villageVoiceForm");
+  return {
+    tag: el.tagName,
+    className: el.className,
+    text: (el.textContent || "").trim().slice(0, 80),
+    inVillageForm: !!(form && form.contains(el)),
+    closestBlockId: block?.dataset?.voiceBlock || block?.dataset?.previewBlock || "",
+    closestBlockClass: block?.className || "",
+    closestBlockDraggable: block?.getAttribute?.("draggable") || ""
+  };
+}
+["pointerdown", "mousedown", "dragstart", "dragenter", "dragover", "drop", "dragend"].forEach(type => {
+  $app.addEventListener(type, (e) => {
+    if (!villageVoiceDndDebugOn()) return;
+    const form = document.getElementById("villageVoiceForm");
+    const nearVoiceBlock = e.target.closest?.(".voice-edit-block, [data-preview-block]");
+    const inVoiceForm = !!(form && form.contains(e.target));
+    if (!nearVoiceBlock && !inVoiceForm) return;
+    const dtTypes = e.dataTransfer ? Array.from(e.dataTransfer.types || []) : [];
+    villageVoiceDndLog(`event:${type}`, {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      button: e.button,
+      defaultPrevented: e.defaultPrevented,
+      dataTransferTypes: dtTypes,
+      stateDraggedBlock: state.villageVoiceDraggedBlock || "",
+      target: villageVoiceDescribeElement(e.target),
+      nearestDropTarget: (() => {
+        try {
+          const t = getVoiceDropTarget(e);
+          return t ? { id: t.dataset.voiceBlock || t.dataset.previewBlock || "", className: t.className } : null;
+        } catch (err) {
+          return { error: String(err) };
+        }
+      })()
+    });
+  }, true);
+});
 
 $app.addEventListener("dragstart", (e) => {
   const tool = e.target.closest("[data-drag-tool]");
@@ -3298,7 +7343,7 @@ $app.addEventListener("dragstart", (e) => {
 $app.addEventListener("dragend", (e) => { e.target.closest("[data-drag-tool]")?.classList.remove("dragging"); });
 $app.addEventListener("dragover", (e) => {
   const zone = e.target.closest("[data-tool-drop-zone]");
-  const over = e.target.closest("[data-tool-card]");
+  const over = getHomeDropCard(e);
   if (!zone || !over) return;
   e.preventDefault();
   document.querySelectorAll(".drop-before,.drop-after").forEach(el => el.classList.remove("drop-before","drop-after"));
@@ -3307,7 +7352,7 @@ $app.addEventListener("dragover", (e) => {
 });
 $app.addEventListener("drop", (e) => {
   const zone = e.target.closest("[data-tool-drop-zone]");
-  const over = e.target.closest("[data-tool-card]");
+  const over = getHomeDropCard(e);
   if (!zone || !over) return;
   e.preventDefault();
   const draggedId = e.dataTransfer.getData("text/plain");
@@ -3322,20 +7367,86 @@ $app.addEventListener("drop", (e) => {
   renderHome();
 });
 
+
+$app.addEventListener("dragstart", (e) => {
+  if (e.target.matches("input, textarea, select, button, label")) return;
+  const block = e.target.closest(".voice-edit-block[draggable='true'], [data-preview-block][draggable='true']");
+  if (!block || !document.getElementById("villageVoiceForm")?.contains(block)) return;
+  const id = block.dataset.voiceBlock || block.dataset.previewBlock;
+  if (!id) { villageVoiceDndLog("dragstart-rejected", { reason: "no block id", block }); return; }
+  villageVoiceDndLog("dragstart", { id, source: block.dataset.voiceBlock ? "left editor" : "preview", className: block.className, layout: villageVoiceLayoutSnapshot() });
+  state.villageVoiceDraggedBlock = id;
+  e.dataTransfer.setData("application/x-village-voice-block", id);
+  e.dataTransfer.setData("text/plain", id);
+  e.dataTransfer.effectAllowed = "move";
+  block.classList.add("dragging");
+}, true);
+
+$app.addEventListener("dragend", (e) => {
+  e.target.closest(".voice-edit-block, [data-preview-block]")?.classList.remove("dragging");
+  state.villageVoiceDraggedBlock = "";
+  clearVillageVoiceDropMarkers();
+}, true);
+
+$app.addEventListener("dragover", (e) => {
+  const draggedId = getVillageVoiceDraggedId(e);
+  if (!draggedId) { villageVoiceDndLog("dragover-ignored", { reason: "no dragged id", eventTarget: e.target }); return; }
+  const target = getVoiceDropTarget(e);
+  const targetId = getVillageVoiceTargetId(target);
+  if (!target || !targetId || targetId === draggedId) { villageVoiceDndLog("dragover-rejected", { draggedId, targetId, hasTarget: !!target }); return; }
+  e.preventDefault();
+  e.stopPropagation();
+  e.dataTransfer.dropEffect = "move";
+  const place = villageVoiceDropPlacement(e, target);
+  clearVillageVoiceDropMarkers();
+  target.classList.add(`drop-${place}`);
+  villageVoiceDndLog("dragover-accepted", { draggedId, targetId, place });
+}, true);
+
+$app.addEventListener("drop", (e) => {
+  const draggedId = getVillageVoiceDraggedId(e);
+  if (!draggedId) { villageVoiceDndLog("drop-ignored", { reason: "no dragged id", eventTarget: e.target }); return; }
+  const target = getVoiceDropTarget(e);
+  const targetId = getVillageVoiceTargetId(target);
+  if (!target || !targetId || targetId === draggedId) { villageVoiceDndLog("drop-rejected", { draggedId, targetId, hasTarget: !!target }); return; }
+  e.preventDefault();
+  e.stopPropagation();
+  const place = villageVoiceDropPlacement(e, target);
+  villageVoiceDndLog("drop-accepted", { draggedId, targetId, place, beforeLayout: villageVoiceLayoutSnapshot() });
+  updateVillageVoiceDraftFromForm(document.getElementById("villageVoiceForm"));
+  const moved = moveVillageVoiceBlock(draggedId, targetId, place);
+  villageVoiceDndLog("drop-complete", { moved, afterLayout: villageVoiceLayoutSnapshot() });
+  state.villageVoiceDraggedBlock = "";
+  clearVillageVoiceDropMarkers();
+}, true);
+
 $app.addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.target;
   showAppLoading(form.id === "loginForm" ? "Logging in..." : "Saving...");
   try {
     await new Promise(resolve => requestAnimationFrame(resolve));
+    if (form.dataset.campusAssignForm) { await assignCampusTask(form.dataset.campusAssignForm, form); hideAppLoading(); return; }
+    if (form.id === "campusCareRequestForm") { await submitCampusCareRequest(form); hideAppLoading(); return; }
+    if (form.id === "campusCareLocationForm") { await saveCampusCareLocation(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
+    if (form.id === "campusCareStatusForm") { await saveCampusCareStatus(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
+    if (form.id === "campusCareNotesForm" || form.id === "campusCareLeaderNotesForm") { await saveCampusTaskNote(form); hideAppLoading(); return; }
+    if (form.id === "campusDiscussionForm") { await saveCampusDiscussion(form); hideAppLoading(); return; }
+    if (form.id === "campusDiscussionNoteForm") { await saveCampusDiscussionNote(form); hideAppLoading(); return; }
+    if (form.id === "campusDiscussionSolutionForm") { await saveCampusDiscussionSolution(form); hideAppLoading(); return; }
+    if (form.id === "removeCampusDiscussionForm") { await removeCampusDiscussion(form); hideAppLoading(); return; }
+    if (form.id === "campusDiscussionToTaskForm") { await createCampusTaskFromDiscussion(form); hideAppLoading(); return; }
+    if (form.id === "notificationSettingsForm") { await saveNotificationSettings(form); hideAppLoading(); return; }
     if (form.id === "adminPasswordLoginForm") { await adminLeaderLogin(state.modal.user, form.password.value, !!form.stayLoggedIn?.checked); hideAppLoading(); return; }
     if (form.id === "approvalPasswordForm" || form.id === "selfDosoApprovalForm") { await completeApprovalPassword(form.password.value); hideAppLoading(); return; }
     if (form.id === "nukeMoneyRequestsForm") { await completeNukeMoneyRequests(form.password.value); hideAppLoading(); return; }
+    if (form.id === "nukeCampusCareRequestsForm") { await completeNukeCampusCareRequests(form.password.value); hideAppLoading(); return; }
     if (form.id === "denyMoneyRequestForm") { await denyMoneyRequest(state.modal.requestId, state.modal.stage, form.denialNote.value.trim()); hideAppLoading(); return; }
     if (form.id === "editDeniedMoneyRequestForm") { await saveEditedDeniedMoneyRequest(form); hideAppLoading(); return; }
     if (form.id === "loginForm") await loginUser(state.modal.user, form.credential.value.trim(), !!form.stayLoggedIn?.checked);
     if (form.id === "passwordSetupForm") await saveNewPassword(form.password.value);
     if (form.id === "pinChangeForm") await saveNewPin(form.pin.value.trim());
+    if (form.id === "selfProfileForm") { await updateSelfProfile(form); hideAppLoading(); return; }
     if (form.id === "schoolForm") { await addSchool(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "editSchoolForm") { await updateSchool(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "positionForm") { await addPosition(form); await refreshAdminData(); renderSystemAdmin(); }
@@ -3349,13 +7460,22 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "receiptUploadForm") { await saveReceiptForMoneyRequest(form); hideAppLoading(); return; }
     if (form.id === "editRoleForm") { await updateRole(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "permissionsForm") { await savePermissionsMatrix(form); await refreshAdminData(); renderSystemAdmin(); }
+    if (form.id === "villageVoiceForm") { await saveVillageVoice(form); hideAppLoading(); return; }
+    if (form.id === "teacherBioForm") { await saveGenericPrintable("teacherBio", form); hideAppLoading(); return; }
+    if (form.id === "illnessNoticeForm") { await saveGenericPrintable("illnessNotice", form); hideAppLoading(); return; }
+    if (form.id === "doorRemindersForm") { await saveDoorReminders(form); hideAppLoading(); return; }
+    if (form.id === "importantDateEditForm") { await updateImportantDate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "importantDateForm") { await addImportantDate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "weeklyThemesForm") { await saveWeeklyThemes(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "certificateForm") { await addCertificate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "brandingSettingsForm") { await saveBrandingSettings(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
     if (form.id === "userForm") { await addUser(form); await refreshAdminData(); renderLeadership(); }
     if (form.id === "editUserForm") { await updateAppUser(form); await refreshAdminData(); renderLeadership(); }
     hideAppLoading();
   } catch (err) {
     hideAppLoading();
     console.error(err);
-    const isPasswordForm = ["loginForm", "adminPasswordLoginForm", "approvalPasswordForm", "selfDosoApprovalForm", "nukeMoneyRequestsForm", "passwordSetupForm"].includes(form.id);
+    const isPasswordForm = ["loginForm", "adminPasswordLoginForm", "approvalPasswordForm", "selfDosoApprovalForm", "nukeMoneyRequestsForm", "nukeCampusCareRequestsForm", "passwordSetupForm"].includes(form.id);
     const code = err?.code || "";
     if (isPasswordForm && (code.includes("wrong-password") || code.includes("invalid-credential") || code.includes("invalid-login-credentials") || code.includes("too-many-requests"))) {
       state.modal = { ...state.modal, error: code.includes("too-many-requests") ? "Too many attempts. Please wait a minute and try again." : "Incorrect password." };
@@ -3368,6 +7488,227 @@ $app.addEventListener("submit", async (e) => {
       return;
     }
     showToast(err.message || "Something went wrong.");
+  }
+});
+
+
+/* v104 Letterland modal picker hardening
+   - Modal now owns its form reference so picking works even if the click target is outside the form.
+   - Preview modal includes live row/column controls and a full-sheet preview.
+   - Capture-phase click handler handles picker/close before other app click logic can swallow it. */
+window.__vvLetterlandActiveForm = null;
+
+
+function renderLetterlandFullSheetPreview(sheet, rows, cols, meta = getLetterlandSpriteMetaFromSettings()) {
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  if (!sheet) return `<div class="empty">Upload a sprite sheet first.</div>`;
+  const w = Number(meta.width || 0) || 1;
+  const h = Number(meta.height || 0) || 1;
+  return `<div class="letterland-full-sheet-wrap" style="--ll-sheet-w:${w};--ll-sheet-h:${h};">
+    <img src="${sheet}" alt="Letterland sprite sheet preview" />
+    <svg class="letterland-full-grid-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+      ${Array.from({length:r*c},(_,idx)=>{ const crop=getLetterlandTileCrop(meta,r,c,idx+1); return `<g><rect x="${crop.sx}" y="${crop.sy}" width="${crop.sw}" height="${crop.sh}"></rect><text x="${crop.sx+5}" y="${crop.sy+15}">${idx+1}</text></g>`; }).join("")}
+    </svg>
+  </div>`;
+}
+
+function renderLetterlandSpritePickerModal(week, sheet, rows, cols) {
+  const r = Math.max(1, Number(rows) || 1);
+  const c = Math.max(1, Number(cols) || 1);
+  const form = window.__vvLetterlandActiveForm || getWeeklyThemesForm();
+  const meta = getLetterlandSpriteMetaFromForm(form);
+  const isWeekPicker = !!week;
+  const title = isWeekPicker ? `Choose Letterland image for Week ${week}` : "Preview / adjust Letterland Sprite Sheet";
+  return `<div class="letterland-picker-backdrop" data-letterland-picker-modal data-picker-week="${escapeHtml(week || "")}">
+    <div class="letterland-picker-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+      <div class="letterland-picker-head">
+        <div><h3>${escapeHtml(title)}</h3><p class="helper">${isWeekPicker ? "Click a tile to use it for this week." : "Adjust rows, columns, margins, and gaps until the indicator lines match each cell."}</p></div>
+        <button type="button" class="secondary small" data-close-letterland-picker>Close</button>
+      </div>
+      ${isWeekPicker ? "" : `<div class="letterland-modal-grid-controls">
+        <label>Rows<input type="number" min="1" max="20" value="${r}" data-letterland-modal-rows /></label>
+        <label>Columns<input type="number" min="1" max="20" value="${c}" data-letterland-modal-cols /></label>
+        <label>Left/Right margin<input type="number" min="0" max="1000" value="${escapeHtml(meta.marginX)}" data-letterland-modal-margin-x /></label>
+        <label>Top/Bottom margin<input type="number" min="0" max="1000" value="${escapeHtml(meta.marginY)}" data-letterland-modal-margin-y /></label>
+        <label>Column gap<input type="number" min="0" max="1000" value="${escapeHtml(meta.gapX)}" data-letterland-modal-gap-x /></label>
+        <label>Row gap<input type="number" min="0" max="1000" value="${escapeHtml(meta.gapY)}" data-letterland-modal-gap-y /></label>
+        <label>Cell width<input type="number" min="0" max="2000" value="${escapeHtml(meta.cellW || "")}" placeholder="auto" data-letterland-modal-cell-w /></label>
+        <label>Cell height<input type="number" min="0" max="2000" value="${escapeHtml(meta.cellH || "")}" placeholder="auto" data-letterland-modal-cell-h /></label>
+        <button type="button" class="secondary small" data-letterland-refresh-grid-preview>Refresh lines</button>
+        <button type="button" class="secondary small" data-letterland-apply-grid>Apply + save grid</button>
+      </div>
+      ${renderLetterlandFullSheetPreview(sheet, r, c, meta)}`}
+      <h4 class="letterland-picker-subtitle">${isWeekPicker ? "Pick a tile" : "Tile preview"}</h4>
+      ${sheet ? renderLetterlandSpriteOptions(sheet, r, c, week || "", meta) : `<div class="empty">Upload a sprite sheet first.</div>`}
+    </div>
+  </div>`;
+}
+
+function openLetterlandSpritePicker(week, form) {
+  document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+  const realForm = form || getWeeklyThemesForm();
+  window.__vvLetterlandActiveForm = realForm;
+  const sheet = getLetterlandSpriteSheetFromForm(realForm);
+  const { rows, cols } = getLetterlandGridFromForm(realForm);
+  document.body.insertAdjacentHTML("beforeend", renderLetterlandSpritePickerModal(week || "", sheet, rows, cols));
+}
+
+async function applyLetterlandModalGrid() {
+  const modal = document.querySelector("[data-letterland-picker-modal]");
+  const form = window.__vvLetterlandActiveForm || getWeeklyThemesForm();
+  if (!modal || !form) return;
+  const rows = Math.max(1, Math.min(20, Number(modal.querySelector("[data-letterland-modal-rows]")?.value || 1)));
+  const cols = Math.max(1, Math.min(20, Number(modal.querySelector("[data-letterland-modal-cols]")?.value || 1)));
+  const rowField = form.querySelector('[name="letterlandSpriteRows"]');
+  const colField = form.querySelector('[name="letterlandSpriteCols"]');
+  if (rowField) rowField.value = String(rows);
+  if (colField) colField.value = String(cols);
+  const marginX = Math.max(0, Number(modal.querySelector("[data-letterland-modal-margin-x]")?.value || 0));
+  const marginY = Math.max(0, Number(modal.querySelector("[data-letterland-modal-margin-y]")?.value || 0));
+  const gapX = Math.max(0, Number(modal.querySelector("[data-letterland-modal-gap-x]")?.value || 0));
+  const gapY = Math.max(0, Number(modal.querySelector("[data-letterland-modal-gap-y]")?.value || 0));
+  if (form.letterlandSpriteMarginX) form.letterlandSpriteMarginX.value = String(marginX);
+  if (form.letterlandSpriteMarginY) form.letterlandSpriteMarginY.value = String(marginY);
+  if (form.letterlandSpriteGapX) form.letterlandSpriteGapX.value = String(gapX);
+  if (form.letterlandSpriteGapY) form.letterlandSpriteGapY.value = String(gapY);
+  const cellW = Math.max(0, Number(modal.querySelector("[data-letterland-modal-cell-w]")?.value || 0));
+  const cellH = Math.max(0, Number(modal.querySelector("[data-letterland-modal-cell-h]")?.value || 0));
+  if (form.letterlandSpriteCellW) form.letterlandSpriteCellW.value = cellW ? String(cellW) : "";
+  if (form.letterlandSpriteCellH) form.letterlandSpriteCellH.value = cellH ? String(cellH) : "";
+
+  // Persist the grid immediately so a later week picker does not rebuild using the old saved row/column count.
+  syncLetterlandSpriteSheetToState(form, false);
+  const current = state.weeklyThemes.find(t => t.id === "current");
+  if (current) {
+    current.letterlandSpriteRows = String(rows);
+    current.letterlandSpriteCols = String(cols);
+    current.letterlandSpriteMarginX = String(marginX);
+    current.letterlandSpriteMarginY = String(marginY);
+    current.letterlandSpriteGapX = String(gapX);
+    current.letterlandSpriteGapY = String(gapY);
+    current.letterlandSpriteCellW = cellW ? String(cellW) : "";
+    current.letterlandSpriteCellH = cellH ? String(cellH) : "";
+  }
+  try {
+    await saveWeeklyThemes(form);
+    await refreshAdminData();
+  } catch (err) {
+    console.warn("Could not immediately save Letterland grid.", err);
+    showToast("Grid applied locally, but it could not be saved yet.");
+  }
+
+  const week = modal.dataset.pickerWeek || "";
+  const sheet = getLetterlandSpriteSheetFromForm(form);
+  const freshForm = getWeeklyThemesForm() || form;
+  window.__vvLetterlandActiveForm = freshForm;
+  refreshLetterlandSpriteSheetStatus(freshForm);
+  document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+  document.body.insertAdjacentHTML("beforeend", renderLetterlandSpritePickerModal(week, sheet, rows, cols));
+  showToast("Letterland grid saved.");
+}
+
+document.addEventListener("click", async function vvLetterlandModalCapture(e) {
+  const closeBtn = e.target.closest?.("[data-close-letterland-picker]");
+  if (closeBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+    return;
+  }
+
+  const backdrop = e.target.matches?.("[data-letterland-picker-modal]") ? e.target : null;
+  if (backdrop) {
+    e.preventDefault();
+    e.stopPropagation();
+    document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+    return;
+  }
+
+  const refreshGrid = e.target.closest?.("[data-letterland-refresh-grid-preview]");
+  if (refreshGrid) {
+    e.preventDefault();
+    e.stopPropagation();
+    const modal = refreshGrid.closest("[data-letterland-picker-modal]");
+    const form = window.__vvLetterlandActiveForm || getWeeklyThemesForm();
+    const rows = Math.max(1, Math.min(20, Number(modal.querySelector("[data-letterland-modal-rows]")?.value || 1)));
+    const cols = Math.max(1, Math.min(20, Number(modal.querySelector("[data-letterland-modal-cols]")?.value || 1)));
+    const meta = getLetterlandSpriteMetaFromForm(form);
+    meta.marginX = Number(modal.querySelector("[data-letterland-modal-margin-x]")?.value || 0);
+    meta.marginY = Number(modal.querySelector("[data-letterland-modal-margin-y]")?.value || 0);
+    meta.gapX = Number(modal.querySelector("[data-letterland-modal-gap-x]")?.value || 0);
+    meta.gapY = Number(modal.querySelector("[data-letterland-modal-gap-y]")?.value || 0);
+    meta.cellW = Number(modal.querySelector("[data-letterland-modal-cell-w]")?.value || 0);
+    meta.cellH = Number(modal.querySelector("[data-letterland-modal-cell-h]")?.value || 0);
+    const sheet = getLetterlandSpriteSheetFromForm(form);
+    const wrap = modal.querySelector(".letterland-full-sheet-wrap");
+    if (wrap) wrap.outerHTML = renderLetterlandFullSheetPreview(sheet, rows, cols, meta);
+    const palette = modal.querySelector(".letterland-sprite-palette");
+    if (palette) palette.outerHTML = renderLetterlandSpriteOptions(sheet, rows, cols, modal.dataset.pickerWeek || "", meta);
+    return;
+  }
+
+  const applyGrid = e.target.closest?.("[data-letterland-apply-grid]");
+  if (applyGrid) {
+    e.preventDefault();
+    e.stopPropagation();
+    await applyLetterlandModalGrid();
+    return;
+  }
+
+  const picked = e.target.closest?.("[data-pick-letterland-tile]");
+  if (picked) {
+    const modal = picked.closest("[data-letterland-picker-modal]");
+    const week = picked.dataset.pickerWeek || modal?.dataset.pickerWeek || "";
+    if (!week) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const form = window.__vvLetterlandActiveForm || getWeeklyThemesForm();
+    try {
+      await applyLetterlandSpriteTileToWeek(form, week, picked.dataset.pickLetterlandTile);
+      document.querySelectorAll("[data-letterland-picker-modal]").forEach(el => el.remove());
+      showToast("Letterland image selected. Use the floating Save button to publish it.");
+    } catch (err) {
+      alert(err.message || "That sprite tile could not be applied.");
+    }
+  }
+}, true);
+
+
+document.addEventListener("click", async function vvLetterlandExtraActions(e) {
+  const saveNow = e.target.closest?.("[data-save-weekly-themes-now]");
+  if (saveNow) {
+    e.preventDefault();
+    const form = getWeeklyThemesForm();
+    if (!form) return;
+    try {
+      await saveWeeklyThemes(form);
+      await refreshAdminData();
+      document.querySelectorAll('[data-weekly-theme-floating-save]').forEach(el => el.remove());
+      showToast("Weekly themes saved.");
+    } catch (err) { alert(err.message || "Weekly themes could not be saved."); }
+    return;
+  }
+
+  const removeBg = e.target.closest?.("[data-letterland-remove-bg]");
+  if (removeBg) {
+    e.preventDefault();
+    const form = removeBg.closest("form") || getWeeklyThemesForm();
+    const sheet = getLetterlandSpriteSheetFromForm(form);
+    if (!sheet) { alert("Upload a sprite sheet first."); return; }
+    try {
+      const color = form.querySelector("[data-letterland-bg-color]")?.value || "#ffffff";
+      const tolerance = form.querySelector("[data-letterland-bg-tolerance]")?.value || 28;
+      const cleaned = await removeColorFromImageDataUrl(sheet, color, tolerance);
+      const dims = await getImageDimensionsFromDataUrl(cleaned);
+      setLetterlandSpriteSheetOnForm(form, cleaned);
+      if (form.letterlandSpriteWidth) form.letterlandSpriteWidth.value = String(dims.width || "");
+      if (form.letterlandSpriteHeight) form.letterlandSpriteHeight.value = String(dims.height || "");
+      syncLetterlandSpriteSheetToState(form, false);
+      refreshLetterlandSpriteSheetStatus(form);
+      showWeeklyThemesFloatingSave(form);
+      showToast("Background color removed. Save Weekly Themes when ready.");
+    } catch (err) { alert(err.message || "Could not remove that background color."); }
   }
 });
 

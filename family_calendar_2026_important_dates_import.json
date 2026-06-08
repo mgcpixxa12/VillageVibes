@@ -1,0 +1,464 @@
+{
+  "source": "Family Calendar 2026.docx",
+  "items": [
+    {
+      "date": "2025-12-22",
+      "endDate": "2025-12-26",
+      "dateLabel": "12/22-12/26/2025",
+      "description": "Closed for Winter Break \u2014 The OVA Campus will have a deep cleaning during this time closed so all personal items for the children should be taken home to be laundered and then returned in January.",
+      "title": "Closed for Winter Break",
+      "details": "The OVA Campus will have a deep cleaning during this time closed so all personal items for the children should be taken home to be laundered and then returned in January.",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-01-01",
+      "endDate": "",
+      "dateLabel": "1/1/2026",
+      "description": "Closed in observance of New Year\u2019s Day",
+      "title": "Closed in observance of New Year\u2019s Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-01-19",
+      "endDate": "",
+      "dateLabel": "1/19/2026",
+      "description": "Closed in observance of Martin Luther King Jr. Day",
+      "title": "Closed in observance of Martin Luther King Jr. Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-02-06",
+      "endDate": "",
+      "dateLabel": "2/6/2026",
+      "description": "National Wear Red Day in observance of American Heart Association \u2014 Optional",
+      "title": "National Wear Red Day in observance of American Heart Association",
+      "details": "Optional",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-02-06",
+      "endDate": "",
+      "dateLabel": "2/6/2026",
+      "description": "Village Square Event \u2014 Someone Special Dance 5:30-7:00 pm",
+      "title": "Village Square Event",
+      "details": "Someone Special Dance 5:30-7:00 pm",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-02-10",
+      "endDate": "",
+      "dateLabel": "2/10/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the Holly Springs School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the Holly Springs School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-02-13",
+      "endDate": "",
+      "dateLabel": "2/13/2026",
+      "description": "Heart and Love Celebrations \u2014 PM Snack in Individual Classrooms",
+      "title": "Heart and Love Celebrations",
+      "details": "PM Snack in Individual Classrooms",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-02-16",
+      "endDate": "",
+      "dateLabel": "2/16/2026",
+      "description": "Closed for a Team Training Day",
+      "title": "Closed for a Team Training Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-02-27",
+      "endDate": "",
+      "dateLabel": "2/27/2026",
+      "description": "Village Square Event \u2014 Passports Around The World 4:00-6:00 pm",
+      "title": "Village Square Event",
+      "details": "Passports Around The World 4:00-6:00 pm",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-03-10",
+      "endDate": "",
+      "dateLabel": "3/10/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the West Cary School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the West Cary School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-03-17",
+      "endDate": "",
+      "dateLabel": "3/17/2026",
+      "description": "Shamrock Celebrations \u2014 PM Snack in Individual Classrooms-Dressing in Green is Optional",
+      "title": "Shamrock Celebrations",
+      "details": "PM Snack in Individual Classrooms-Dressing in Green is Optional",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-04-01",
+      "endDate": "",
+      "dateLabel": "4/1/2026",
+      "description": "Spring Celebrations and Egg Hunts \u2014 Schedule TBD",
+      "title": "Spring Celebrations and Egg Hunts",
+      "details": "Schedule TBD",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-04-03",
+      "endDate": "",
+      "dateLabel": "4/3/2026",
+      "description": "Closed in observance of Good Friday",
+      "title": "Closed in observance of Good Friday",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-04-06",
+      "endDate": "",
+      "dateLabel": "4/6/2026",
+      "description": "Closed in observance of Easter Monday",
+      "title": "Closed in observance of Easter Monday",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-04-10",
+      "endDate": "",
+      "dateLabel": "4/10/2026",
+      "description": "Blue Out (Wear Blue) for Child Abuse Awareness Day",
+      "title": "Blue Out (Wear Blue) for Child Abuse Awareness Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-04-13",
+      "endDate": "2026-04-17",
+      "dateLabel": "4/13/2026-4/17/2026",
+      "description": "Week of the Young Child Celebrations",
+      "title": "Week of the Young Child Celebrations",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-04-24",
+      "endDate": "",
+      "dateLabel": "4/24/2026",
+      "description": "Family Planting Day Event to Celebrate Earth Day (Earth Day 4/22/2026) \u2014 Schedule TBD",
+      "title": "Family Planting Day Event to Celebrate Earth Day (Earth Day 4/22/2026)",
+      "details": "Schedule TBD",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-04",
+      "endDate": "2026-05-08",
+      "dateLabel": "5/4/2026-5/8/2026",
+      "description": "Team Appreciation Week",
+      "title": "Team Appreciation Week",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-08",
+      "endDate": "",
+      "dateLabel": "5/8/2026",
+      "description": "Closed for a Team Mental Health Day",
+      "title": "Closed for a Team Mental Health Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-11",
+      "endDate": "",
+      "dateLabel": "5/11/2026",
+      "description": "Village Square Event \u2014 Tiaras and Ties Picnic: A Mother\u2019s Day Event, 3:00-5:30 pm",
+      "title": "Village Square Event",
+      "details": "Tiaras and Ties Picnic: A Mother\u2019s Day Event, 3:00-5:30 pm",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-12",
+      "endDate": "",
+      "dateLabel": "5/12/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the Holly Springs School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the Holly Springs School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-18",
+      "endDate": "",
+      "dateLabel": "5/18/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the West Cary School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the West Cary School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-18",
+      "endDate": "2026-05-29",
+      "dateLabel": "5/18/2026-5/29/2026",
+      "description": "Conferences",
+      "title": "Conferences",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-05-25",
+      "endDate": "",
+      "dateLabel": "5/25/2026",
+      "description": "Closed in observance of Memorial Day",
+      "title": "Closed in observance of Memorial Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-06-18",
+      "endDate": "",
+      "dateLabel": "6/18/2026",
+      "description": "Village Square Event \u2014 Cookies and Cars: A Father\u2019s Day Event, 3:00-5:00 pm",
+      "title": "Village Square Event",
+      "details": "Cookies and Cars: A Father\u2019s Day Event, 3:00-5:00 pm",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-06-19",
+      "endDate": "",
+      "dateLabel": "6/19/2026",
+      "description": "Closed in observance of Juneteenth",
+      "title": "Closed in observance of Juneteenth",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-06-26",
+      "endDate": "",
+      "dateLabel": "6/26/2026",
+      "description": "Pre-K Graduation \u2014 Times TBD at each OVA Location",
+      "title": "Pre-K Graduation",
+      "details": "Times TBD at each OVA Location",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-07-02",
+      "endDate": "",
+      "dateLabel": "7/2/2026",
+      "description": "Village Square Event \u2014 Hero Parade 10:00-10:30 am",
+      "title": "Village Square Event",
+      "details": "Hero Parade 10:00-10:30 am",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-07-03",
+      "endDate": "",
+      "dateLabel": "7/3/2026",
+      "description": "Closed in observance of Independence Day",
+      "title": "Closed in observance of Independence Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-07-08",
+      "endDate": "",
+      "dateLabel": "7/8/2026",
+      "description": "Village Square Event \u2014 Bring a Teddy Bear to enjoy PM snack with.",
+      "title": "Village Square Event",
+      "details": "Bring a Teddy Bear to enjoy PM snack with.",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-08-07",
+      "endDate": "",
+      "dateLabel": "8/7/2026",
+      "description": "Parent Night Out 6:00-8:00 pm",
+      "title": "Parent Night Out 6:00-8:00 pm",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-08-11",
+      "endDate": "",
+      "dateLabel": "8/11/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the Holly Springs School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the Holly Springs School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-08-17",
+      "endDate": "",
+      "dateLabel": "8/17/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the West Cary School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the West Cary School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-09-07",
+      "endDate": "",
+      "dateLabel": "9/7/2026",
+      "description": "Closed in observance of Labor Day",
+      "title": "Closed in observance of Labor Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-09-11",
+      "endDate": "",
+      "dateLabel": "9/11/2026",
+      "description": "Village Square Event \u2014 Generations Greeting and Gathering 3:00-5:30 PM",
+      "title": "Village Square Event",
+      "details": "Generations Greeting and Gathering 3:00-5:30 PM",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-10-09",
+      "endDate": "",
+      "dateLabel": "10/9/2026",
+      "description": "Village Square Event \u2014 PINK-Tober Fun Run / Wear Pink (Time-TBD)",
+      "title": "Village Square Event",
+      "details": "PINK-Tober Fun Run / Wear Pink (Time-TBD)",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-10-12",
+      "endDate": "",
+      "dateLabel": "10/12/2026",
+      "description": "Closed in observance of Indigenous People\u2019s Day",
+      "title": "Closed in observance of Indigenous People\u2019s Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-10-23",
+      "endDate": "",
+      "dateLabel": "10/23/2026",
+      "description": "Fall Festival 6:00-7:30 PM Village Square Event \u2014 **OVAWC Celebrating \u201c9\u201d Years** **OVAHS Celebrating \u201c4\u201d Years**",
+      "title": "Fall Festival 6:00-7:30 PM Village Square Event",
+      "details": "**OVAWC Celebrating \u201c9\u201d Years** **OVAHS Celebrating \u201c4\u201d Years**",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-02",
+      "endDate": "2026-11-13",
+      "dateLabel": "11/2/2026-11/13/2026",
+      "description": "Conferences",
+      "title": "Conferences",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-06",
+      "endDate": "",
+      "dateLabel": "11/6/2026",
+      "description": "Village Square Event \u2014 Favorite Character\u2019s Day National Author\u2019s Day",
+      "title": "Village Square Event",
+      "details": "Favorite Character\u2019s Day National Author\u2019s Day",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-11",
+      "endDate": "",
+      "dateLabel": "11/11/2026",
+      "description": "Closed in observance of Veteran\u2019s Day",
+      "title": "Closed in observance of Veteran\u2019s Day",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-13",
+      "endDate": "",
+      "dateLabel": "11/13/2026",
+      "description": "Village Square Event \u2014 Full STEAM Ahead 3:00-5:00 pm",
+      "title": "Village Square Event",
+      "details": "Full STEAM Ahead 3:00-5:00 pm",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-16",
+      "endDate": "",
+      "dateLabel": "11/16/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the West Cary School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the West Cary School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-17",
+      "endDate": "",
+      "dateLabel": "11/17/2026",
+      "description": "Family Involvement Group Meeting 5:30-6:30 pm \u2014 *For the Holly Springs School ONLY",
+      "title": "Family Involvement Group Meeting 5:30-6:30 pm",
+      "details": "*For the Holly Springs School ONLY",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-20",
+      "endDate": "",
+      "dateLabel": "11/20/2026",
+      "description": "Village Square Event \u2014 Thankful Celebrations in Classrooms and Gathering",
+      "title": "Village Square Event",
+      "details": "Thankful Celebrations in Classrooms and Gathering",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-24",
+      "endDate": "",
+      "dateLabel": "11/24/2026",
+      "description": "Team Thankful Luncheon",
+      "title": "Team Thankful Luncheon",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-11-26",
+      "endDate": "2026-11-27",
+      "dateLabel": "11/26/2026 and 11/27/2026",
+      "description": "Closed in observance of Thanksgiving",
+      "title": "Closed in observance of Thanksgiving",
+      "details": "",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-12-10",
+      "endDate": "",
+      "dateLabel": "12/10/2026",
+      "description": "Cocoa With Santa \u2014 Time TBD at each OVA Location",
+      "title": "Cocoa With Santa",
+      "details": "Time TBD at each OVA Location",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-12-11",
+      "endDate": "",
+      "dateLabel": "12/11/2026",
+      "description": "Snowball Showcase \u2014 Winter Celebrations in Classrooms After Snowball Showcase",
+      "title": "Snowball Showcase",
+      "details": "Winter Celebrations in Classrooms After Snowball Showcase",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2026-12-24",
+      "endDate": "2027-01-01",
+      "dateLabel": "12/24/2026-1/1/2027",
+      "description": "Closed for Winter Break \u2014 The OVA Campus will have a deep cleaning during this time closed so all personal items for the children should be taken home to be laundered and then returned in January.",
+      "title": "Closed for Winter Break",
+      "details": "The OVA Campus will have a deep cleaning during this time closed so all personal items for the children should be taken home to be laundered and then returned in January.",
+      "includeInVillageVoice": true
+    },
+    {
+      "date": "2027-01-01",
+      "endDate": "",
+      "dateLabel": "1/1/2027",
+      "description": "Closed in observance of New Year\u2019s Day \u2014 Closed in observance of New Year\u2019s Day",
+      "title": "Closed in observance of New Year\u2019s Day",
+      "details": "Closed in observance of New Year\u2019s Day",
+      "includeInVillageVoice": true
+    }
+  ]
+}
