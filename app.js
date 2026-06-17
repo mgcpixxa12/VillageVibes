@@ -6,6 +6,7 @@ import {
   signOut,
   updatePassword,
   deleteUser,
+  onAuthStateChanged,
   setPersistence,
   browserLocalPersistence,
   browserSessionPersistence
@@ -25,7 +26,8 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-console.log("VILLAGE VIBES PHASE 1 VERSION: v184-photo-duplicate-keys-textfit-fix");
+const VV_APP_VERSION = "v185-cache-login-persistence-fix";
+console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
 // Firebase config is already filled in for this project.
@@ -226,6 +228,45 @@ function setStayLoggedInPreference(value) {
 
 async function applyLoginPersistence(stayLoggedIn) {
   await setPersistence(auth, stayLoggedIn ? browserLocalPersistence : browserSessionPersistence);
+}
+
+async function waitForFirebaseAuthReady() {
+  if (auth.currentUser) return auth.currentUser;
+  return await new Promise((resolve) => {
+    const off = onAuthStateChanged(auth, (user) => {
+      off();
+      resolve(user || null);
+    }, () => {
+      off();
+      resolve(null);
+    });
+  });
+}
+
+async function restorePersistedSessionIfAvailable() {
+  await applyLoginPersistence(getStayLoggedInPreference());
+  const firebaseUser = await waitForFirebaseAuthReady();
+  if (!firebaseUser?.uid) return false;
+  const profile = await readUser(firebaseUser.uid);
+  if (!profile || profile.active === false) {
+    await signOut(auth).catch(() => {});
+    return false;
+  }
+  state.session = profile;
+  rememberPickedUser(profile);
+  await refreshAdminData();
+  return true;
+}
+
+function clearOldAppCachesInBackground() {
+  try {
+    const last = localStorage.getItem("villageVibesAppVersion");
+    localStorage.setItem("villageVibesAppVersion", VV_APP_VERSION);
+    if (last && last !== VV_APP_VERSION && window.caches?.keys) {
+      caches.keys().then(keys => keys.forEach(key => caches.delete(key))).catch(() => {});
+      navigator.serviceWorker?.getRegistrations?.().then(regs => regs.forEach(reg => reg.unregister())).catch(() => {});
+    }
+  } catch (err) {}
 }
 
 
@@ -10628,10 +10669,15 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
 
 (async function start() {
   applyThemePreference(getThemePreference());
+  clearOldAppCachesInBackground();
   const shareParam = new URLSearchParams(window.location.search).get("share");
   if (shareParam) state.publicShareView = shareParam;
   try {
     await refreshLandingData();
+    if (!shareParam) {
+      const restored = await restorePersistedSessionIfAvailable();
+      if (restored) return;
+    }
   } catch (err) {
     console.warn("Initial load failed. This is expected until Firebase config/rules are set.", err);
   }
