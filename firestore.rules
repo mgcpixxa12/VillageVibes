@@ -2,10 +2,55 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // TEMPORARY DEVELOPMENT RULES.
-    // Use only while building locally. Replace with locked-down rules before publishing.
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function myUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(roleName) {
+      return signedIn() && (
+        myUser().role == roleName ||
+        roleName in myUser().roles ||
+        roleName in myUser().roleKeys
+      );
+    }
+
+    function isLeaderOrHigher() {
+      return hasRole('leader') || hasRole('doso') || hasRole('owner') || hasRole('admin') || hasRole('systemAdmin');
+    }
+
+    function isDosoOrHigher() {
+      return hasRole('doso') || hasRole('owner') || hasRole('admin') || hasRole('systemAdmin');
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if isLeaderOrHigher() || isSelf(uid);
+      allow update: if isLeaderOrHigher() || isSelf(uid);
+      allow delete: if hasRole('owner') || hasRole('admin') || hasRole('systemAdmin');
+    }
+
+    match /appSettings/{docId} {
+      allow read: if signedIn();
+      allow write: if isDosoOrHigher();
+    }
+
+    match /coreChampionRounds/{monthKey} {
+      allow read: if signedIn();
+      allow create: if isDosoOrHigher();
+      allow update: if signedIn();
+      allow delete: if isDosoOrHigher();
+    }
+
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if signedIn();
     }
   }
 }

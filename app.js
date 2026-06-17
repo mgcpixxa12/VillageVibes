@@ -25,7 +25,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-console.log("VILLAGE VIBES PHASE 1 VERSION: v119-budget-code-delete-in-modal");
+console.log("VILLAGE VIBES PHASE 1 VERSION: v184-photo-duplicate-keys-textfit-fix");
 const DEV_MODE = false;
 
 // Firebase config is already filled in for this project.
@@ -53,8 +53,11 @@ const STAY_LOGGED_IN_KEY = "villageVibesStayLoggedIn";
 const VILLAGE_VOICE_SESSION_KEY = "villageVibesVillageVoiceUnsavedSession";
 const VILLAGE_VOICE_LAYOUT_OVERRIDE_KEY = "villageVoiceExplicitSlotLayoutV97";
 const LETTERLAND_SPRITE_LOCAL_PREFIX = "local:letterlandSprite:";
+const LETTERLAND_SPRITE_FIRESTORE_PREFIX = "firestore:letterlandSprite:";
 const LETTERLAND_SPRITE_LOCAL_INDEX_KEY = "villageVibesLetterlandSpriteIndex";
 const LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES = 900000;
+const LETTERLAND_FIRESTORE_CHUNK_BYTES = 650000;
+const VILLAGE_VOICE_EMPTY_SLOT = "__voice_empty__";
 
 function readLocalJson(key, fallback) {
   try {
@@ -81,29 +84,60 @@ function makeTinyHash(text = "") {
   return (h >>> 0).toString(36);
 }
 
+function pruneLetterlandSpriteLocalStorage(keepKey = "") {
+  try {
+    const index = readLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, []);
+    index.forEach(item => { if (item?.key && item.key !== keepKey) localStorage.removeItem(item.key); });
+    Object.keys(localStorage).forEach(key => { if (key.startsWith(LETTERLAND_SPRITE_LOCAL_PREFIX) && key !== keepKey) localStorage.removeItem(key); });
+    writeLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, keepKey ? [{ key: keepKey, savedAt: new Date().toISOString() }] : []);
+  } catch (err) {}
+}
+
 function storeLetterlandSpriteLocally(dataUrl = "") {
   if (!dataUrl) return "";
   const id = `${Date.now().toString(36)}_${makeTinyHash(dataUrl).slice(0, 8)}`;
   const key = `${LETTERLAND_SPRITE_LOCAL_PREFIX}${id}`;
   window.__vvLetterlandSpriteSheet = dataUrl;
+  try { sessionStorage.setItem(key, dataUrl); } catch (err) {}
   try {
+    pruneLetterlandSpriteLocalStorage();
     localStorage.setItem(key, dataUrl);
-    const index = readLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, []);
-    index.unshift({ key, savedAt: new Date().toISOString(), bytes: dataUrl.length });
-    writeLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, index.slice(0, 8));
+    writeLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, [{ key, savedAt: new Date().toISOString(), bytes: dataUrl.length }]);
     return key;
   } catch (err) {
-    console.warn("Could not store Letterland sprite sheet locally.", err);
-    return "__LETTERLAND_RUNTIME_ONLY__";
+    try {
+      // One more pass: older saved drafts can hold big data URLs. Keep the current runtime sheet,
+      // but clear old Letterland local copies so the latest sheet has the best chance to survive reloads.
+      pruneLetterlandSpriteLocalStorage();
+      localStorage.setItem(key, dataUrl);
+      writeLocalJson(LETTERLAND_SPRITE_LOCAL_INDEX_KEY, [{ key, savedAt: new Date().toISOString(), bytes: dataUrl.length }]);
+      return key;
+    } catch (err2) {
+      console.warn("Could not store Letterland sprite sheet locally.", err2);
+      return "__LETTERLAND_RUNTIME_ONLY__";
+    }
   }
+}
+
+function getLetterlandSpriteFirestoreId(ref = "") {
+  const raw = String(ref || "");
+  return raw.startsWith(LETTERLAND_SPRITE_FIRESTORE_PREFIX) ? raw.slice(LETTERLAND_SPRITE_FIRESTORE_PREFIX.length) : "";
+}
+
+function getLetterlandSpriteCacheKey(id = "current") {
+  return `__vvLetterlandSpriteSheet_${id || "current"}`;
 }
 
 function resolveLetterlandSpriteSheet(value = "") {
   const raw = String(value || "");
   if (!raw) return "";
   if (raw === "__LETTERLAND_RUNTIME_ONLY__") return window.__vvLetterlandSpriteSheet || "";
+  if (raw.startsWith(LETTERLAND_SPRITE_FIRESTORE_PREFIX)) {
+    const id = getLetterlandSpriteFirestoreId(raw) || "current";
+    return window[getLetterlandSpriteCacheKey(id)] || window.__vvLetterlandSpriteSheet || "";
+  }
   if (raw.startsWith(LETTERLAND_SPRITE_LOCAL_PREFIX)) {
-    try { return localStorage.getItem(raw) || window.__vvLetterlandSpriteSheet || ""; } catch (err) { return window.__vvLetterlandSpriteSheet || ""; }
+    try { return localStorage.getItem(raw) || sessionStorage.getItem(raw) || window.__vvLetterlandSpriteSheet || ""; } catch (err) { try { return sessionStorage.getItem(raw) || window.__vvLetterlandSpriteSheet || ""; } catch (_) { return window.__vvLetterlandSpriteSheet || ""; } }
   }
   return raw;
 }
@@ -111,12 +145,57 @@ function resolveLetterlandSpriteSheet(value = "") {
 function getLetterlandSpriteSheetRefFromForm(form) {
   const realForm = form || getWeeklyThemesForm();
   const field = realForm?.querySelector('[name="letterlandSpriteSheet"]');
+  return field?.value || "";
+}
+
+async function saveLetterlandSpriteSheetToFirestore(dataUrl = "", id = "current") {
+  const safeId = id || "current";
+  const text = String(dataUrl || "");
+  if (!text) return "";
+  const chunks = [];
+  for (let i = 0; i < text.length; i += LETTERLAND_FIRESTORE_CHUNK_BYTES) chunks.push(text.slice(i, i + LETTERLAND_FIRESTORE_CHUNK_BYTES));
+  const chunksRef = collection(db, "letterlandSpriteSheets", safeId, "chunks");
+  try {
+    const old = await getDocs(chunksRef);
+    await Promise.all(old.docs.map(d => deleteDoc(doc(db, "letterlandSpriteSheets", safeId, "chunks", d.id))));
+  } catch (err) {}
+  await Promise.all(chunks.map((chunk, i) => setDoc(doc(db, "letterlandSpriteSheets", safeId, "chunks", String(i).padStart(4, "0")), { i, chunk })));
+  await setDoc(doc(db, "letterlandSpriteSheets", safeId), {
+    chunkCount: chunks.length,
+    bytes: text.length,
+    updatedAt: serverTimestamp(),
+    updatedBy: state.session?.uid || ""
+  }, { merge: true });
+  window[getLetterlandSpriteCacheKey(safeId)] = text;
+  window.__vvLetterlandSpriteSheet = text;
+  return `${LETTERLAND_SPRITE_FIRESTORE_PREFIX}${safeId}`;
+}
+
+async function loadLetterlandSpriteSheetFromFirestore(ref = "") {
+  const id = getLetterlandSpriteFirestoreId(ref);
+  if (!id) return "";
+  const cached = window[getLetterlandSpriteCacheKey(id)];
+  if (cached) return cached;
+  const snap = await getDocs(query(collection(db, "letterlandSpriteSheets", id, "chunks"), orderBy("i")));
+  const dataUrl = snap.docs.map(d => d.data()?.chunk || "").join("");
+  if (dataUrl) {
+    window[getLetterlandSpriteCacheKey(id)] = dataUrl;
+    window.__vvLetterlandSpriteSheet = dataUrl;
+  }
+  return dataUrl;
+}
+
+async function getLetterlandSpriteSheetRefForSave(form) {
+  const realForm = form || getWeeklyThemesForm();
+  const field = realForm?.querySelector('[name="letterlandSpriteSheet"]');
   const raw = field?.value || "";
-  if (raw && raw.length > LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES) {
-    storeLetterlandSpriteLocally(raw);
-    if (field) field.value = "__LETTERLAND_RUNTIME_ONLY__";
-    window.__vvLetterlandSpriteSheet = raw;
-    return "__LETTERLAND_RUNTIME_ONLY__";
+  if (!raw) return "";
+  if (raw.startsWith(LETTERLAND_SPRITE_FIRESTORE_PREFIX)) return raw;
+  const resolved = resolveLetterlandSpriteSheet(raw) || raw;
+  if (resolved && resolved.length > LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES) {
+    const ref = await saveLetterlandSpriteSheetToFirestore(resolved, "current");
+    if (field) field.value = ref;
+    return ref;
   }
   return raw;
 }
@@ -295,6 +374,14 @@ const PERMISSION_TOOLS = [
     ]
   },
   {
+    key: "coreChampion",
+    name: "Core Count Champion",
+    permissions: [
+      { key: "vote", label: "Vote / Nominate", description: "Can nominate and vote for Core Counts Champion." },
+      { key: "manage", label: "Manage Champion Voting", description: "Can open rounds, pick winners, and manage eligibility." }
+    ]
+  },
+  {
     key: "villageVoice",
     name: "Printables",
     permissions: [
@@ -390,7 +477,12 @@ let state = {
   adminLoginOpen: false,
   devViewRoleKey: "",
   devViewPosition: "",
-  editMoneyRequestId: ""
+  editMoneyRequestId: "",
+  onboardingStep: 0,
+  publicShareView: null,
+  publicShareUsers: [],
+  coreChampionRounds: [],
+  photoPrint: { photos: [], texts: [], selectedId: "", selectedIds: [], selectedType: "", nextZ: 1, loaded: false, zoom: 0.75, contextMenu: null }
 };
 
 const $app = document.getElementById("app");
@@ -401,6 +493,134 @@ function safeLower(value) {
 
 function makeDisplayName(user) {
   return `${user.firstName || ""} ${(user.lastName || "").slice(0, 1)}.`.trim();
+}
+
+
+const WHAT_I_LIKE_SUGGESTIONS = {
+  restaurants: ["McDonald's", "Chick-fil-A", "Starbucks", "Panera", "Chipotle", "Jersey Mike's", "Subway", "Taco Bell", "Wendy's", "Cook Out", "Dunkin'", "Bojangles"],
+  drinks: ["Starbucks", "Dunkin'", "Sweet Tea", "Coffee", "Dr Pepper", "Diet Coke", "Coke Zero", "Sprite", "Lemonade", "Water", "Sparkling Water"],
+  shops: ["Target", "Amazon", "Walmart", "TJ Maxx", "Marshalls", "Hobby Lobby", "Michael's", "Bath & Body Works", "HomeGoods", "Dollar Tree", "Five Below"],
+  snacks: ["Chocolate", "Reese's", "M&M's", "Skittles", "Sour Patch Kids", "Goldfish", "Popcorn", "Pretzels", "Chips", "Trail Mix", "Fruit"],
+  candle: ["Vanilla", "Lavender", "Fresh Linen", "Pumpkin Spice", "Cinnamon", "Eucalyptus", "Mahogany Teakwood", "Apple", "Coconut", "Coffee"],
+  flower: ["Sunflowers", "Roses", "Tulips", "Daisies", "Lilies", "Peonies", "Hydrangeas", "Carnations"],
+  color: ["Blue", "Green", "Pink", "Purple", "Yellow", "Red", "Orange", "Teal", "Black", "White", "Gold"],
+  team: ["NC State", "UNC", "Duke", "Carolina Panthers", "Carolina Hurricanes", "Charlotte Hornets", "Atlanta Braves"],
+  special: ["I love handwritten notes", "I collect mugs", "I love plants", "I enjoy reading", "I love cozy blankets", "I enjoy puzzles", "I love classroom supplies"],
+  dietary: ["No allergies", "Gluten free", "Dairy free", "Nut allergy", "Vegetarian", "Vegan", "No pork", "No seafood", "Low sugar"]
+};
+
+function likeDatalistId(key) { return `likeSuggestions_${key}`; }
+function renderLikeDatalist(key) {
+  const items = WHAT_I_LIKE_SUGGESTIONS[key] || [];
+  return `<datalist id="${likeDatalistId(key)}">${items.map(v => `<option value="${escapeHtml(v)}"></option>`).join("")}</datalist>`;
+}
+
+const WHAT_I_LIKE_FIELDS = [
+  ["dietary", "Special Dietary Restrictions or Allergies"],
+  ["restaurants", "Favorite Restaurants / Places to Eat"],
+  ["drinks", "Favorite Drinks"],
+  ["shops", "Favorite Places to Shop"],
+  ["snacks", "Favorite Snacks / Candy / Treats"],
+  ["candle", "Favorite Candle Smell"],
+  ["flower", "Favorite Flower"],
+  ["color", "Favorite Color"],
+  ["team", "Favorite Team"],
+  ["special", "Something Special About Me"]
+];
+
+function normalizeLikeList(value) {
+  if (Array.isArray(value)) return value.map(v => String(v || "").trim()).filter(Boolean);
+  return String(value || "").split(/\n|;/).map(v => v.trim()).filter(Boolean);
+}
+
+function getWhatILike(user = {}) {
+  const v = user.whatILike || {};
+  const out = {};
+  WHAT_I_LIKE_FIELDS.forEach(([key]) => { out[key] = normalizeLikeList(key === "dietary" ? (v.dietary || v.allergies || "") : v[key]); });
+  return out;
+}
+
+function collectLikeList(form, key) {
+  const chips = Array.from(form.querySelectorAll(`[data-like-chip-value="${key}"]`)).map(i => i.value.trim()).filter(Boolean);
+  const modern = Array.from(form.querySelectorAll(`[name="like_${key}"]`)).map(i => i.value.trim()).filter(Boolean);
+  const combined = [...chips, ...modern];
+  if (combined.length) return Array.from(new Set(combined));
+  const legacyName = "like" + key.charAt(0).toUpperCase() + key.slice(1);
+  return normalizeLikeList(form[legacyName]?.value || "");
+}
+
+function collectWhatILike(form) {
+  const out = {};
+  WHAT_I_LIKE_FIELDS.forEach(([key]) => { out[key] = collectLikeList(form, key); });
+  return out;
+}
+
+function renderLikeChip(key, value) {
+  return `<span class="like-chip" data-like-chip><input type="hidden" data-like-chip-value="${key}" value="${escapeHtml(value)}" /><span>${escapeHtml(value)}</span><button type="button" class="like-chip-remove" data-remove-like-chip aria-label="Remove ${escapeHtml(value)}">−</button></span>`;
+}
+
+function renderLikeRows(key, values = []) {
+  const chips = (values || []).filter(Boolean).map(value => renderLikeChip(key, value)).join("");
+  return `<div class="like-chip-list ${chips ? "" : "is-empty"}" data-like-chip-list="${key}">${chips || `<span class="like-empty-hint">No items yet.</span>`}</div>
+  <div class="like-entry-row" data-like-row>
+    <input name="like_${key}" value="" list="${likeDatalistId(key)}" placeholder="Type one favorite..." autocomplete="off" data-like-entry-input="${key}" />
+    <button type="button" class="secondary small like-add-button hidden" data-add-like-row="${key}" title="Add item">+</button>
+  </div>
+  ${renderLikeDatalist(key)}`;
+}
+
+function renderWhatILikeFields(user = {}) {
+  const v = getWhatILike(user);
+  return `<div class="what-i-like-editor dynamic-likes-editor">
+    <div class="likes-editor-intro">
+      <h3>What I Like</h3>
+      <p class="helper">Add one favorite at a time. Start typing and suggestions will appear, then press + or Enter to add it to the list.</p>
+    </div>
+    <div class="likes-editor-grid">
+      ${WHAT_I_LIKE_FIELDS.map(([key, label]) => `<section class="like-editor-card" data-like-group="${key}">
+        <div class="like-card-heading"><h4>${escapeHtml(label)}</h4><small>${(WHAT_I_LIKE_SUGGESTIONS[key] || []).slice(0,3).map(escapeHtml).join(" • ")}</small></div>
+        <div data-like-rows="${key}">${renderLikeRows(key, v[key])}</div>
+      </section>`).join("")}
+    </div>
+  </div>`;
+}
+
+function renderWhatILikeDisplay(user = {}, compact = false) {
+  const v = getWhatILike(user);
+  const items = WHAT_I_LIKE_FIELDS.map(([key, label]) => [label, v[key]]).filter(([, value]) => Array.isArray(value) && value.length);
+  if (!items.length) return `<p class="helper">No favorites have been added yet.</p>`;
+  return `<div class="likes-grid ${compact ? "compact-likes-grid" : ""}">${items.map(([label, values]) => `<div class="like-tile"><small>${escapeHtml(label)}</small><strong>${values.map(value => `<span>${escapeHtml(value)}</span>`).join("")}</strong></div>`).join("")}</div>`;
+}
+
+function getOnboardingMissingItems(user = {}) {
+  const missing = [];
+  if (!String(user.usedName || "").trim()) missing.push("Confirm or add your used name");
+  if (!String(user.birthday || "").trim()) missing.push("Add your birthday");
+  const educationItems = normalizeEducationList(user.educationList || user.education);
+  if (!educationItems.length) missing.push("Add education");
+  if (!String(user.whyEarlyEducation || "").trim()) missing.push("Fill out Why I Chose Early Education");
+  const likes = getWhatILike(user);
+  if (!Object.values(likes).some(v => Array.isArray(v) ? v.length : String(v || "").trim())) missing.push("Add at least one What I Like item");
+  return missing;
+}
+
+function getOnboardingStatusHtml(user = {}) {
+  const checks = [
+    [!!String(user.usedName || "").trim(), "Profile details"],
+    [!!String(user.birthday || "").trim(), "Birthday"],
+    [normalizeEducationList(user.educationList || user.education).length > 0, "Education"],
+    [!!String(user.whyEarlyEducation || "").trim(), "Why I chose education"],
+    [Object.values(getWhatILike(user)).some(v => Array.isArray(v) ? v.length : String(v || "").trim()), "What I like"]
+  ];
+  return `<div class="onboarding-mini-checklist">${checks.map(([ok, label]) => `<span class="${ok ? "done" : "todo"}">${ok ? "✓" : "○"} ${escapeHtml(label)}</span>`).join("")}</div>`;
+}
+
+function isOnboardingRequired(user = {}) {
+  return !!user && user.active !== false && (user.onboardingRequired === true || user.pinResetRequired === true);
+}
+
+function isOnboardingComplete(user = {}) {
+  return getOnboardingMissingItems(user).length === 0;
 }
 
 function getResolvedRoleKeys(user) {
@@ -550,6 +770,7 @@ async function refreshAdminData() {
   await loadAllUsers();
   await loadPositions();
   await loadRoles();
+  await loadCoreChampionRounds();
   await loadMoneyRequestTypes();
   await loadMoneyRequests();
   await loadCampusCaresAdmin();
@@ -709,6 +930,11 @@ async function loadWeeklyThemes() {
   try {
     const snap = await getDocs(collection(db, "weeklyThemes"));
     state.weeklyThemes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const current = state.weeklyThemes.find(t => t.id === "current");
+    const ref = current?.letterlandSpriteSheet || "";
+    if (String(ref).startsWith(LETTERLAND_SPRITE_FIRESTORE_PREFIX)) {
+      await loadLetterlandSpriteSheetFromFirestore(ref).catch(err => console.warn("Could not load shared Letterland sprite sheet.", err));
+    }
   } catch (err) { state.weeklyThemes = []; }
 }
 
@@ -732,6 +958,7 @@ function normalizeEducationList(value) {
 function educationDisplayText(item) {
   if (!item) return "";
   if (item.level === "Certificate") return item.certificate || item.field || "Certificate";
+  if (item.level === "High School Diploma") return item.field ? `High School Diploma, Class of ${item.field}` : "High School Diploma";
   const level = item.level || "Education";
   const field = item.field || "";
   return field ? `${level} in ${field}` : level;
@@ -740,7 +967,7 @@ function educationDisplayText(item) {
 function collectEducationEntries(form) {
   return Array.from(form.querySelectorAll("[data-education-row]")).map(row => ({
     level: row.querySelector('[name="educationLevel"]')?.value || "",
-    field: row.querySelector('[name="educationField"]')?.value?.trim() || "",
+    field: row.querySelector('[name="educationGradYear"]')?.value || row.querySelector('[name="educationField"]')?.value?.trim() || "",
     certificate: row.querySelector('[name="educationCertificate"]')?.value || ""
   })).filter(item => item.level || item.field || item.certificate);
 }
@@ -759,12 +986,19 @@ function renderEducationRow(item = {}) {
   const levels = ["", "High School Diploma", "Certificate", "Associate Degree", "Bachelor's Degree", "Master's Degree", "Doctorate", "Other"];
   const certs = state.certificates || [];
   const isCert = item.level === "Certificate";
+  const isHighSchool = item.level === "High School Diploma";
+  const currentYear = new Date().getFullYear();
+  const gradYears = Array.from({ length: currentYear - 1949 }, (_, i) => String(currentYear - i));
   return `<div class="education-row" data-education-row>
     <select name="educationLevel" data-education-level title="${escapeHtml(item.level || "Select level...")}">
       ${levels.map(l => `<option value="${escapeHtml(l)}" ${item.level === l ? "selected" : ""}>${l || "Select level..."}</option>`).join("")}
     </select>
-    <span class="education-in ${isCert ? "hidden" : ""}">in</span>
-    <input name="educationField" class="${isCert ? "hidden" : ""}" value="${escapeHtml(item.field || "")}" placeholder="Early Childhood Education" />
+    <span class="education-in ${isCert || isHighSchool ? "hidden" : ""}">in</span>
+    <input name="educationField" class="${isCert || isHighSchool ? "hidden" : ""}" value="${escapeHtml(!isHighSchool ? (item.field || "") : "")}" placeholder="Early Childhood Education" />
+    <select name="educationGradYear" data-education-grad-year class="${isHighSchool ? "" : "hidden"}" title="${escapeHtml(item.field || "Graduation year...")}">
+      <option value="">Graduation year...</option>
+      ${gradYears.map(y => `<option value="${escapeHtml(y)}" ${String(item.field || "") === y ? "selected" : ""}>${escapeHtml(y)}</option>`).join("")}
+    </select>
     <select name="educationCertificate" data-education-certificate class="${isCert ? "" : "hidden"}" title="${escapeHtml(item.certificate || "Select certificate...")}">
       <option value="">Select certificate...</option>
       ${certs.map(c => `<option value="${escapeHtml(c.name || "")}" ${item.certificate === c.name ? "selected" : ""}>${escapeHtml(c.name || "")}</option>`).join("")}
@@ -860,6 +1094,36 @@ function birthdayDateForDisplay(birthday) {
   if (parts.length < 3) return "";
   const y = new Date().getFullYear();
   return `${y}-${parts[1]}-${parts[2]}`;
+}
+
+function renderBirthdayDropdowns(birthday = "") {
+  const parts = String(birthday || "").split("-");
+  const currentYear = new Date().getFullYear();
+  const selectedYear = parts[0] || String(currentYear - 18);
+  const selectedMonth = parts[1] || "";
+  const selectedDay = parts[2] || "";
+  const months = [
+    ["01", "January"], ["02", "February"], ["03", "March"], ["04", "April"], ["05", "May"], ["06", "June"],
+    ["07", "July"], ["08", "August"], ["09", "September"], ["10", "October"], ["11", "November"], ["12", "December"]
+  ];
+  const years = [];
+  for (let y = currentYear - 14; y >= currentYear - 90; y--) years.push(String(y));
+  if (selectedYear && !years.includes(selectedYear)) years.unshift(selectedYear);
+  return `<div class="grid three birthday-dropdown-grid" data-birthday-dropdowns>
+    <label>Birth Month<select name="birthdayMonth" required><option value="">Month...</option>${months.map(([value, label]) => `<option value="${value}" ${selectedMonth === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label>Birth Day<select name="birthdayDay" required><option value="">Day...</option>${Array.from({ length: 31 }, (_, i) => String(i + 1).padStart(2, "0")).map(day => `<option value="${day}" ${selectedDay === day ? "selected" : ""}>${Number(day)}</option>`).join("")}</select></label>
+    <label>Birth Year<select name="birthdayYear" required>${years.map(year => `<option value="${year}" ${selectedYear === year ? "selected" : ""}>${year}</option>`).join("")}</select></label>
+  </div>`;
+}
+
+function collectBirthdayFromForm(form) {
+  if (form.birthdayMonth || form.birthdayDay || form.birthdayYear) {
+    const m = form.birthdayMonth?.value || "";
+    const d = form.birthdayDay?.value || "";
+    const y = form.birthdayYear?.value || "";
+    return (m && d && y) ? `${y}-${m}-${d}` : "";
+  }
+  return form.birthday?.value || "";
 }
 
 function getAutoBirthdayImportantDates() {
@@ -1147,9 +1411,9 @@ async function loginUser(user, credential, stayLoggedIn = false) {
   rememberPickedUser(fresh);
   await refreshAdminData();
 
-  if (fresh.pinResetRequired || credential === "0000") {
-    state.modal = { type: "forcePinChange" };
-    renderHome();
+  if (fresh.pinResetRequired || credential === "0000" || fresh.onboardingRequired === true) {
+    state.modal = null;
+    renderOnboardingPage();
     return;
   }
 
@@ -1188,9 +1452,11 @@ async function saveNewPassword(password) {
 
 async function saveNewPin(pin) {
   if (!/^\d{4}$/.test(pin)) throw new Error("PIN must be exactly 4 digits.");
+  const nextUser = { ...(state.session || {}), pin, pinResetRequired: false };
   await updateDoc(doc(db, "users", state.session.uid), {
     pin,
     pinResetRequired: false,
+    onboardingRequired: !isOnboardingComplete(nextUser),
     updatedAt: serverTimestamp()
   });
   await createAudit("pinChanged", { uid: state.session.uid });
@@ -1233,9 +1499,9 @@ async function updateAppUser(form) {
   const profileImageData = form.profileImageData?.value || state.modal.user.profileImageData || "";
   const role = getFormRole(form);
   const roles = [role];
-  const teamPosition = form.teamPosition.value.trim();
+  const teamPosition = form.teamPosition?.value?.trim() || "Unassigned";
   const schoolIds = getFormSchoolIds(form);
-  if (!teamPosition) throw new Error("Team position is required.");
+  /* Team position can remain Unassigned until onboarding is complete. */
 
   await updateDoc(doc(db, "users", uid), {
     firstName,
@@ -1247,9 +1513,12 @@ async function updateAppUser(form) {
     education: collectEducationEntries(form).map(educationDisplayText).join("; "),
     earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
     whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
-    birthday: form.birthday?.value || "",
+    birthday: collectBirthdayFromForm(form),
     leaderSummary: form.leaderSummary?.value?.trim() || "",
+    whatILike: collectWhatILike(form),
     pin: form.pin.value.trim(),
+    pinResetRequired: form.pin.value.trim() === "0000",
+    onboardingRequired: form.pin.value.trim() === "0000" ? true : (state.modal.user?.onboardingRequired || false),
     teamPosition,
     role,
     roles,
@@ -1448,6 +1717,7 @@ function getAvailableTools(user) {
   const canProcessMoney = hasToolPermission(user, "moneyRequests", "processApproved");
   const canEditVillageVoice = hasToolPermission(user, "villageVoice", "editFlyer");
   const canUseCampusCares = hasToolPermission(user, "campusCares", "submit") || hasToolPermission(user, "campusCares", "assigned") || hasToolPermission(user, "campusCares", "viewAll") || hasToolPermission(user, "campusCares", "manage");
+  const canUsePhotoPrint = hasFullDevAccess(user) || getUserRoleKeys(user).some(r => ["teacher", "mentor", "leader", "admin", "owner", "systemAdmin"].includes(r));
 
   if (canSubmitMoney || canApproveMoney || canProcessMoney || hasFullDevAccess(user)) {
     tools.push({
@@ -1460,6 +1730,14 @@ function getAvailableTools(user) {
 
   if (canUseCampusCares || hasFullDevAccess(user)) {
     tools.push({ id: "campusCares", title: "Campus Cares", icon: "C", desc: "Submit, track, assign, and complete campus care tasks." });
+  }
+
+  if (canUsePhotoPrint) {
+    tools.push({ id: "photoPrint", title: "Photo Print and Edit", icon: "📷", desc: "Arrange classroom photos on standard copy paper, then print or save as PDF." });
+  }
+
+  if (hasToolPermission(user, "coreChampion", "vote") || hasToolPermission(user, "coreChampion", "manage") || hasFullDevAccess(user) || getUserRoleKeys(user).includes("teacher") || getUserRoleKeys(user).includes("mentor")) {
+    tools.push({ id: "coreChampion", title: "Core Count Champion", icon: "★", desc: "Nominate and vote for the monthly Core Counts Champion." });
   }
 
   if (canEditVillageVoice || hasFullDevAccess(user)) {
@@ -1509,98 +1787,6 @@ async function hideBudgetCode(id) {
   });
 
   showToast("Budget code hidden.");
-}
-
-async function deleteBudgetCode(id) {
-  await deleteDoc(doc(db, "budgetCodes", id));
-  showToast("Budget code deleted.");
-}
-
-function parseCsvLine(line) {
-  const out = [];
-  let value = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    const next = line[i + 1];
-    if (ch === '"' && inQuotes && next === '"') { value += '"'; i += 1; continue; }
-    if (ch === '"') { inQuotes = !inQuotes; continue; }
-    if (ch === "," && !inQuotes) { out.push(value.trim()); value = ""; continue; }
-    value += ch;
-  }
-  out.push(value.trim());
-  return out;
-}
-
-function parseBudgetCodeUploadText(text) {
-  const rows = String(text || "")
-    .replace(/\r/g, "")
-    .split("\n")
-    .map(line => line.trim())
-    .filter(Boolean);
-
-  if (!rows.length) return [];
-
-  let startIndex = 0;
-  const firstCells = parseCsvLine(rows[0]).map(x => x.toLowerCase());
-  const hasHeader = firstCells.some(x => ["code", "budget code", "category", "budget category", "name", "description"].includes(x));
-  if (hasHeader) startIndex = 1;
-
-  return rows.slice(startIndex).map(line => {
-    const cells = parseCsvLine(line);
-    let code = "";
-    let category = "";
-
-    if (cells.length >= 2) {
-      code = cells[0];
-      category = cells.slice(1).join(" ").trim();
-    } else {
-      const match = line.match(/^(\d{3,})\s+(.+)$/);
-      if (match) {
-        code = match[1];
-        category = match[2].trim();
-      }
-    }
-
-    return { code: String(code || "").trim(), category: String(category || "").trim() };
-  }).filter(item => item.code && item.category);
-}
-
-async function importBudgetCodesFromFile(file) {
-  const text = await file.text();
-  const items = parseBudgetCodeUploadText(text);
-  if (!items.length) throw new Error("No budget codes were found. Use a CSV with Code and Category columns.");
-
-  const existingByCode = new Map(state.budgetCodes.map(c => [String(c.code || "").trim().toLowerCase(), c]));
-  let added = 0;
-  let updated = 0;
-
-  await Promise.all(items.map(async item => {
-    const key = item.code.toLowerCase();
-    const existing = existingByCode.get(key);
-    const payload = {
-      code: item.code,
-      category: item.category,
-      allSchools: true,
-      schoolIds: [],
-      active: true,
-      updatedAt: serverTimestamp()
-    };
-
-    if (existing?.id) {
-      updated += 1;
-      await updateDoc(doc(db, "budgetCodes", existing.id), payload);
-    } else {
-      added += 1;
-      await setDoc(doc(collection(db, "budgetCodes")), {
-        ...payload,
-        createdAt: serverTimestamp()
-      });
-    }
-  }));
-
-  await loadBudgetCodes();
-  showToast(`Budget codes imported. ${added} added, ${updated} updated.`);
 }
 
 async function addMoneyRequestType(form) {
@@ -1660,21 +1846,32 @@ async function addSchool(form) {
   showToast("School added.");
 }
 
+async function verifyCurrentLeaderPasswordIfNeeded(form) {
+  const makingLeader = !!form.isLeader?.checked;
+  if (!makingLeader) return;
+  const password = form.leaderPassword?.value || "";
+  if (!password) throw new Error("Enter your password before creating a leader account.");
+  if (!state.session?.fakeEmail) throw new Error("Your leader account does not have a login email saved, so password confirmation could not run.");
+  await signInWithEmailAndPassword(auth, state.session.fakeEmail, password);
+}
+
+function selectedNewUserRole(form) {
+  return form.isLeader?.checked ? "leader" : "teacher";
+}
+
 async function addUser(form) {
   const firstName = form.firstName.value.trim();
   const lastName = form.lastName.value.trim();
-  const pin = form.pin.value.trim();
   const usedName = form.usedName?.value?.trim() || `${firstName} ${lastName}`;
-  const profileImageData = form.profileImageData?.value || "";
   const selectedSchoolIds = getFormSchoolIds(form);
-  const role = getFormRole(form);
+  const role = selectedNewUserRole(form);
   const roles = [role];
-  const teamPosition = form.teamPosition.value.trim();
+  const teamPosition = "Unassigned";
+  const pin = "0000";
 
   if (!firstName || !lastName) throw new Error("First and last name are required.");
-  if (!/^\d{4}$/.test(pin)) throw new Error("PIN must be exactly 4 digits.");
   if (!selectedSchoolIds.length) throw new Error("Select at least one school.");
-  if (!teamPosition) throw new Error("Team position is required.");
+  await verifyCurrentLeaderPasswordIfNeeded(form);
 
   const fakeEmail = generateFakeEmail(firstName, lastName);
   const uid = await createFirebaseUserWithoutSwitchingSession(fakeEmail, DEFAULT_AUTH_PASSWORD);
@@ -1684,24 +1881,26 @@ async function addUser(form) {
     lastName,
     displayName: `${firstName} ${lastName.slice(0, 1)}.`,
     usedName,
-    profileImageData,
-    educationList: collectEducationEntries(form),
-    education: collectEducationEntries(form).map(educationDisplayText).join("; "),
-    earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
-    whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
-    birthday: form.birthday?.value || "",
-    leaderSummary: form.leaderSummary?.value?.trim() || "",
+    profileImageData: "",
+    educationList: [],
+    education: "",
+    earlyEducationStart: "",
+    whyEarlyEducation: "",
+    birthday: "",
+    leaderSummary: "",
+    whatILike: {},
     fakeEmail,
     pin,
     teamPosition,
     role,
-    pinResetRequired: false,
-    roles: roles.length ? roles : ["teacher"],
+    pinResetRequired: true,
+    onboardingRequired: true,
+    roles,
     schoolIds: selectedSchoolIds,
-    defaultCampusCareBuildingId: form.defaultCampusCareBuildingId?.value || "",
-    defaultCampusCareSublocation: form.defaultCampusCareSublocation?.value?.trim() || "",
+    defaultCampusCareBuildingId: "",
+    defaultCampusCareSublocation: "",
     active: true,
-    passwordRequired: false,
+    passwordRequired: roleRequiresPassword(role),
     passwordSet: false,
     homeLayout: [],
     hiddenToolIds: [],
@@ -1709,21 +1908,48 @@ async function addUser(form) {
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
   });
-  await createAudit("userCreated", { uid, fakeEmail, schoolIds: selectedSchoolIds });
+  await createAudit("userCreated", { uid, fakeEmail, schoolIds: selectedSchoolIds, role, defaultPosition: teamPosition });
   await loadRoster();
   state.modal = null;
-  showToast("User added.");
+  showToast(roleRequiresPassword(role) ? "Leader added. They will finish setup during onboarding." : "Teacher added. They will finish setup during onboarding.");
 }
 
 async function resetUserPin(uid) {
   await updateDoc(doc(db, "users", uid), {
     pin: "0000",
     pinResetRequired: true,
+    onboardingRequired: true,
     updatedAt: serverTimestamp()
   });
   await createAudit("pinReset", { uid });
   await loadRoster();
   showToast("PIN reset to 0000.");
+}
+
+async function resetUserForOnboarding(uid) {
+  const target = await readUser(uid);
+  if (!target) throw new Error("User not found.");
+  const resetPatch = {
+    pin: "0000",
+    pinResetRequired: true,
+    onboardingRequired: true,
+    birthday: "",
+    educationList: [],
+    education: "",
+    earlyEducationStart: "",
+    whyEarlyEducation: "",
+    whatILike: {},
+    teamPosition: "Unassigned",
+    updatedAt: serverTimestamp()
+  };
+  await updateDoc(doc(db, "users", uid), resetPatch);
+  await createAudit("userOnboardingReset", { uid, fakeEmail: target.fakeEmail || "" });
+  await loadRoster();
+  if (state.session?.uid === uid) {
+    state.session = { ...state.session, ...resetPatch, updatedAt: new Date().toISOString() };
+    state.onboardingStep = 0;
+  }
+  showToast("User reset. They can test onboarding again with PIN 0000.");
 }
 
 async function deleteAppUser(uid) {
@@ -1848,6 +2074,7 @@ function renderLanding() {
 }
 
 function renderHome() {
+  if (state.session && isOnboardingRequired(state.session)) { renderOnboardingPage(); return; }
   state.currentView = "home";
   if (state.modal && ["login", "adminPasswordLogin"].includes(state.modal.type)) state.modal = null;
 
@@ -1878,6 +2105,8 @@ function renderHome() {
       </div>
     </section>
     ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
 }
@@ -2179,10 +2408,8 @@ async function saveEditedDeniedMoneyRequest(form) {
     customFields: (item.customFields || []).map((f, j) => ({ ...f, value: form[`field_${i}_${j}`]?.value || "" }))
   }));
   const requestSchoolId = form.requestSchoolId.value;
-  const permissionUser = getPermissionUser(state.session);
-  const canAutoApproveDoso = hasToolPermission(permissionUser, "moneyRequests", "approvePending") && userSchoolMatchesScope([requestSchoolId], state.session);
   await updateDoc(doc(db, "moneyRequests", requestId), {
-    status: canAutoApproveDoso ? "selfDosoPasswordNeeded" : "pendingDoso",
+    status: "pendingDoso",
     requestSchoolId,
     requestSchoolName: getSchoolNameById(requestSchoolId),
     todayDate: form.todayDate.value,
@@ -2192,20 +2419,14 @@ async function saveEditedDeniedMoneyRequest(form) {
     deniedByUid: "",
     deniedByName: "",
     deniedAt: null,
-    returnedToUid: "",
-    returnedToRole: "",
     updatedAt: serverTimestamp()
   });
-  if (canAutoApproveDoso) {
-    state.modal = { type: "selfDosoApproval", ids: [requestId], stage: "pendingDoso", error: "" };
-  } else {
-    await createNotification({ title: "Money request resubmitted", body: `${state.session?.firstName || "Someone"} resubmitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests", targetTab: "pendingDoso" });
-    state.modal = null;
-  }
+  await createNotification({ title: "Money request resubmitted", body: `${state.session?.firstName || "Someone"} resubmitted a money request for ${getSchoolNameById(requestSchoolId)}.`, toPositions: ["DOSO"], schoolIds: [requestSchoolId], toolKey: "moneyRequests", targetTab: "pendingDoso" });
+  state.modal = null;
   await loadMoneyRequests();
   await loadNotifications();
-  state.moneyRequestsTab = canAutoApproveDoso ? "myRequests" : "pendingDoso";
-  showToast(canAutoApproveDoso ? "Request updated. Approve it as DOSO to send back to owners." : "Request resubmitted.");
+  state.moneyRequestsTab = "myRequests";
+  showToast("Request resubmitted.");
   renderMoneyRequestsTool();
 }
 
@@ -2213,25 +2434,15 @@ async function denyMoneyRequest(requestId, stage, note) {
   const request = state.moneyRequests.find(r => r.id === requestId);
   if (!request) throw new Error("Request not found.");
   const isDoso = stage === "pendingDoso";
-  const returnToUid = isDoso ? request.submittedByUid : (request.dosoApprovedByUid || request.submittedByUid);
   await updateDoc(doc(db, "moneyRequests", requestId), {
     status: isDoso ? "deniedByDoso" : "deniedByOwner",
     denialNote: note,
     deniedByUid: state.session?.uid || null,
     deniedByName: `${state.session?.firstName || ""} ${state.session?.lastName || ""}`.trim(),
     deniedAt: serverTimestamp(),
-    returnedToUid: returnToUid || null,
-    returnedToRole: isDoso ? "submitter" : "doso",
     updatedAt: serverTimestamp()
   });
-  await createNotification({
-    title: isDoso ? "Money request denied" : "PO returned by owner",
-    body: note || (isDoso ? "A money request needs changes before resubmitting." : "An owner returned a PO for DOSO changes."),
-    toUids: [returnToUid].filter(Boolean),
-    schoolIds: [request.requestSchoolId].filter(Boolean),
-    toolKey: "moneyRequests",
-    targetTab: "myRequests"
-  });
+  await createNotification({ title: "Money request denied", body: note || "A money request needs changes before resubmitting.", toUids: [request.submittedByUid], schoolIds: [request.requestSchoolId].filter(Boolean), toolKey: "moneyRequests", targetTab: "myRequests" });
   state.modal = null;
   await loadMoneyRequests();
   await loadNotifications();
@@ -2391,8 +2602,8 @@ function renderMoneyRequestQueue(status, canApproveDoso, canApproveOwner) {
           <b>${formatMoneyAmount(total)}</b>
         </button>
         <div class="money-summary-actions">
-          ${status === "pendingDoso" && canApproveDoso ? `${!canBulk ? `<button class="small" type="button" data-doso-approve-money-request="${request.id}">DOSO Approve</button>` : ""}<button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingDoso">Deny</button>` : ""}
-          ${status === "pendingOwner" && canApproveOwner ? `${!canBulk ? `<button class="small" type="button" data-owner-approve-money-request="${request.id}">Owner Approve</button>` : ""}<button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingOwner">Deny</button>` : ""}
+          ${!canBulk && status === "pendingDoso" && canApproveDoso ? `<button class="small" type="button" data-doso-approve-money-request="${request.id}">DOSO Approve</button><button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingDoso">Deny</button>` : ""}
+          ${!canBulk && status === "pendingOwner" && canApproveOwner ? `<button class="small" type="button" data-owner-approve-money-request="${request.id}">Owner Approve</button><button class="secondary small" type="button" data-deny-money-request="${request.id}" data-deny-stage="pendingOwner">Deny</button>` : ""}
           ${status === "finalApproved" && canApproveOwner ? `<button class="secondary small" type="button" disabled>Final Approved</button>` : ""}
         </div>
       </div>
@@ -2605,6 +2816,8 @@ function renderMoneyRequestsTool() {
       ${activeTab === "receipts" && canAddReceipts ? renderReceiptQueue(canAddReceipts) : ""}
     </section>
     ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
 }
@@ -2619,20 +2832,15 @@ function renderBudgetCodeSchoolSummary(code) {
 
 function renderBudgetCodesManager() {
   return `
-    <div class="actions" style="justify-content:flex-start; align-items:center; gap:10px; flex-wrap:wrap;">
+    <div class="actions" style="justify-content:flex-start;">
       <button data-modal="addBudgetCode">Add Budget Code</button>
-      <button type="button" class="secondary" data-trigger-budget-code-upload>Upload Budget Codes</button>
-      <input type="file" accept=".csv,.txt" data-budget-code-upload hidden />
     </div>
-    <p class="helper">Upload a CSV or text file with Code and Category columns.</p>
-    <div class="name-grid admin-name-grid budget-code-grid">
+    <div class="name-grid admin-name-grid">
       ${state.budgetCodes.length ? state.budgetCodes.map(c => `
-        <div class="budget-code-card">
-          <button class="name-button budget-code-edit" data-edit-budget-code="${c.id}" type="button">
-            ${c.category}
-            <span>${c.code} · ${renderBudgetCodeSchoolSummary(c)}</span>
-          </button>
-        </div>
+        <button class="name-button" data-edit-budget-code="${c.id}" type="button">
+          ${c.category}
+          <span>${c.code} · ${renderBudgetCodeSchoolSummary(c)}</span>
+        </button>
       `).join("") : `<div class="empty grid-empty">No budget codes yet.</div>`}
     </div>
   `;
@@ -2699,8 +2907,190 @@ function renderOwnersPanel() {
       ${state.ownerTab === "analytics" ? renderBudgetAnalyticsPanel() : ""}
     </section>
     ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
+}
+
+
+function coreChampionMonthKey(date = new Date()) { return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`; }
+function coreChampionMonthLabel(key) { const [y,m]=String(key||coreChampionMonthKey()).split("-"); return new Date(Number(y), Number(m)-1, 1).toLocaleString("en-US", { month:"long", year:"numeric" }); }
+async function loadCoreChampionRounds(){
+  try { const snap = await getDocs(collection(db,"coreChampionRounds")); state.coreChampionRounds = snap.docs.map(d=>({ id:d.id, ...d.data() })).sort((a,b)=>String(b.monthKey||b.id).localeCompare(String(a.monthKey||a.id))); }
+  catch(err){ state.coreChampionRounds = []; }
+}
+function getCoreRound(monthKey = coreChampionMonthKey()){ return state.coreChampionRounds.find(r => (r.monthKey || r.id) === monthKey) || null; }
+function getCorePastWinnerIds(){ return new Set((state.coreChampionRounds||[]).map(r=>r.winnerUid).filter(Boolean)); }
+function isCoreChampionManager(user=state.session){ return hasToolPermission(user,"coreChampion","manage") || hasFullDevAccess(user) || String(user?.teamPosition||"").toLowerCase().includes("doso"); }
+function isCoreDefaultEligibleUser(user){
+  const roles = getUserRoleKeys(user);
+  const position = String(user?.teamPosition || user?.position || "").toLowerCase();
+  if (roles.some(r => ["owner", "admin", "systemadmin", "system-admin", "system_admin", "dev", "leader", "lead"].includes(r))) return false;
+  if (/owner|director|doso|leader|admin|campus cares/.test(position)) return false;
+  if (roles.some(r => ["teacher", "mentor"].includes(r))) return true;
+  if (/teacher|mentor/.test(position)) return true;
+  return true;
+}
+function isCoreEffectivelyEligible(user){
+  if (!user || user.active === false) return false;
+  if (getCorePastWinnerIds().has(user.uid)) return false;
+  if (typeof user.coreChampionIneligible === "boolean") return !user.coreChampionIneligible;
+  return isCoreDefaultEligibleUser(user);
+}
+function isCoreEligibleUser(user){ return isCoreEffectivelyEligible(user); }
+function getCoreEligibleUsers(){ return (state.users||[]).filter(isCoreEligibleUser).sort(byName); }
+function getCoreNominationChoices(){
+  const me = state.session?.uid || "";
+  return getCoreEligibleUsers().filter(u => u.uid !== me);
+}
+function getCoreUser(uid){ return (state.users||[]).find(u=>u.uid===uid) || (state.roster||[]).find(u=>u.uid===uid) || null; }
+function renderCorePersonFace(user, className="core-person-face"){
+  const initial = escapeHtml((getUserUsedName(user) || "?").slice(0,1).toUpperCase());
+  return user?.profileImageData ? `<img class="${className}" src="${user.profileImageData}" alt="" />` : `<span class="${className}">${initial}</span>`;
+}
+function renderCorePersonButton(user, attrs=""){
+  return `<button class="core-person-choice" type="button" ${attrs}>${renderCorePersonFace(user)}<span><strong>${escapeHtml(getUserUsedName(user))}</strong><small>${escapeHtml(user.teamPosition||user.position||"")}</small></span></button>`;
+}
+function coreNominationFor(round, uid){ return (round?.nominations||[]).find(n=>n.candidateUid===uid); }
+function coreVotesFor(round, uid){ return (round?.votes||[]).filter(v=>v.candidateUid===uid); }
+function coreUniqueNominations(round){
+  const seen = new Set();
+  return (round?.nominations||[]).filter(n => {
+    if (!n?.candidateUid || seen.has(n.candidateUid)) return false;
+    seen.add(n.candidateUid);
+    return true;
+  });
+}
+function coreUserHasNominated(round, uid=state.session?.uid){
+  if (!uid) return false;
+  if ((round?.nominationLocks||[]).some(n=>n.nominatorUid===uid)) return true;
+  return (round?.nominations||[]).some(n=>n.nominatorUid===uid);
+}
+function coreUserVotedFor(round, candidateUid, voterUid=state.session?.uid){ return (round?.votes||[]).some(v=>v.candidateUid===candidateUid && v.voterUid===voterUid); }
+
+function coreAutoDueToday(settings = state.appSettings || {}, date = new Date()) {
+  if (settings.coreChampionScheduleType === "day") return date.getDate() === Number(settings.coreChampionScheduleDay || 20);
+  if (settings.coreChampionScheduleType === "weekday") {
+    const map = { SU:0, MO:1, TU:2, WE:3, TH:4, FR:5, SA:6 };
+    const want = map[settings.coreChampionScheduleWeekday || "MO"];
+    if (date.getDay() !== want) return false;
+    const ordinal = settings.coreChampionScheduleOrdinal || "last";
+    const day = date.getDate();
+    if (ordinal === "first") return day <= 7;
+    if (ordinal === "second") return day >= 8 && day <= 14;
+    if (ordinal === "third") return day >= 15 && day <= 21;
+    if (ordinal === "fourth") return day >= 22 && day <= 28;
+    const nextWeek = new Date(date); nextWeek.setDate(day + 7);
+    return nextWeek.getMonth() !== date.getMonth();
+  }
+  return false;
+}
+async function applyCoreChampionAutoOpenIfDue(){
+  const monthKey = coreChampionMonthKey();
+  if (!isCoreChampionManager(state.session)) return;
+  if (getCoreRound(monthKey)) return;
+  if (!coreAutoDueToday(state.appSettings || {})) return;
+  await openCoreChampionRound(monthKey);
+}
+
+async function openCoreChampionRound(monthKey=coreChampionMonthKey()){
+  const existing = getCoreRound(monthKey);
+  await setDoc(doc(db,"coreChampionRounds",monthKey), {
+    monthKey,
+    status:"open",
+    openedAt:serverTimestamp(),
+    openedBy:state.session?.uid||"",
+    resetAt: existing?.winnerUid ? serverTimestamp() : (existing?.resetAt || null),
+    resetBy: existing?.winnerUid ? (state.session?.uid||"") : (existing?.resetBy || ""),
+    nominations:[],
+    nominationLocks:[],
+    votes:[],
+    updatedAt:serverTimestamp()
+  });
+  await loadCoreChampionRounds(); showToast(existing?.winnerUid ? "Month reset and voting reopened." : "Voting opened.");
+}
+async function closeCoreChampionRound(monthKey=coreChampionMonthKey()){
+  await setDoc(doc(db,"coreChampionRounds",monthKey), { status:"closed", updatedAt:serverTimestamp() }, { merge:true });
+  await loadCoreChampionRounds(); showToast("Voting closed.");
+}
+async function saveCoreChampionSettings(form){
+  const type = form.scheduleType?.value || "manual";
+  const settings = { ...(state.appSettings||{}), coreChampionScheduleType: type };
+  if (type === "day") {
+    settings.coreChampionScheduleDay = Math.max(1, Math.min(31, Number(form.scheduleDay?.value || 20)));
+    delete settings.coreChampionScheduleWeekday;
+    delete settings.coreChampionScheduleOrdinal;
+  } else if (type === "weekday") {
+    settings.coreChampionScheduleWeekday = form.scheduleWeekday?.value || "MO";
+    settings.coreChampionScheduleOrdinal = form.scheduleOrdinal?.value || "last";
+    delete settings.coreChampionScheduleDay;
+  } else {
+    delete settings.coreChampionScheduleDay;
+    delete settings.coreChampionScheduleWeekday;
+    delete settings.coreChampionScheduleOrdinal;
+  }
+  await setDoc(doc(db,"appSettings","main"), settings, { merge:true });
+  state.appSettings = settings;
+  showToast("Champion settings saved.");
+  renderLeadership();
+}
+async function toggleCoreEligible(uid, checked){ await updateDoc(doc(db,"users",uid), { coreChampionIneligible: !checked, updatedAt:serverTimestamp() }); await refreshAdminData(); showToast("Eligibility updated."); renderLeadership(); }
+async function setCoreWinner(monthKey, uid){ await setDoc(doc(db,"coreChampionRounds",monthKey), { winnerUid: uid, status:"closed", decidedAt:serverTimestamp(), decidedBy:state.session?.uid||"", updatedAt:serverTimestamp() }, { merge:true }); await loadCoreChampionRounds(); showToast("Winner saved."); renderLeadership(); }
+async function submitCoreNomination(form){
+  const monthKey = form.monthKey.value, candidateUid = form.candidateUid.value, reason = form.reason.value.trim();
+  const round = getCoreRound(monthKey); if (!round || round.status !== "open") throw new Error("Voting is not open.");
+  if (candidateUid === state.session?.uid) throw new Error("You cannot nominate yourself.");
+  if (coreUserHasNominated(round)) throw new Error("You already nominated someone this month.");
+  const createdAt = new Date().toISOString();
+  const nomineeAlreadyExists = !!coreNominationFor(round, candidateUid);
+  const nominations = nomineeAlreadyExists ? coreUniqueNominations(round) : [...coreUniqueNominations(round), { candidateUid, nominatorUid: state.session.uid, reason, createdAt }];
+  const nominationLocks = [...(round.nominationLocks||[]), { candidateUid, nominatorUid: state.session.uid, reason, createdAt }];
+  const votes = coreUserVotedFor(round, candidateUid) ? (round.votes||[]) : [...(round.votes||[]), { candidateUid, voterUid: state.session.uid, reason, createdAt, fromNomination:true }];
+  await setDoc(doc(db,"coreChampionRounds",monthKey), { nominations, nominationLocks, votes, updatedAt:serverTimestamp() }, { merge:true }); await loadCoreChampionRounds(); state.modal={type:"coreVoteRound", monthKey}; showToast(nomineeAlreadyExists ? "This person was already nominated, so your nomination was added as your vote." : "Nomination locked in and counted as your vote."); renderCoreChampionTool();
+}
+async function submitCoreVote(form){
+  const monthKey = form.monthKey.value, candidateUid = form.candidateUid.value, reason = form.reason.value.trim();
+  const round = getCoreRound(monthKey); if (!round || round.status !== "open") throw new Error("Voting is not open.");
+  if (coreUserVotedFor(round,candidateUid)) throw new Error("You already voted for this nominee.");
+  const votes = [...(round.votes||[]), { candidateUid, voterUid: state.session.uid, reason, createdAt: new Date().toISOString() }];
+  await setDoc(doc(db,"coreChampionRounds",monthKey), { votes, updatedAt:serverTimestamp() }, { merge:true }); await loadCoreChampionRounds(); state.modal=null; showToast("Vote saved."); renderCoreChampionTool();
+}
+function renderCoreChampionTool(){
+  state.currentView="coreChampion";
+  const months = Array.from({length:12},(_,i)=>`${new Date().getFullYear()}-${String(i+1).padStart(2,"0")}`);
+  $app.innerHTML = pageShell(`<section class="card core-champion-hero"><p class="eyebrow">OVA CORE Counts</p><h2>Core Count Champion</h2><p class="helper">Celebrate team members who show kindness, teamwork, ownership, and commitment.</p></section>
+  <section class="core-month-grid">${months.map(key=>{ const r=getCoreRound(key); const winner=getCoreUser(r?.winnerUid); const open=r?.status==="open"; const hasNominated=coreUserHasNominated(r); const manager=isCoreChampionManager(state.session); return `<div class="card core-month-card ${open?'is-open':''}"><h3>${coreChampionMonthLabel(key)}</h3>${winner?`<p class="core-winner">🏆 ${escapeHtml(getUserUsedName(winner))}</p>`:`<p class="helper">No winner yet.</p>`}${open?`<button type="button" data-core-open-vote="${key}">${hasNominated?'See Nominees!':'Nominate!'}</button>`:""}${r && manager?`<small>${(r.votes||[]).length} vote${(r.votes||[]).length===1?'':'s'}</small>`:""}</div>`}).join("")}</section>${state.modal?renderModal():""}${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
+}
+function renderCoreVoteRoundModal(monthKey){
+  const round = getCoreRound(monthKey);
+  if (!round || round.status !== "open") return `<div class="modal-backdrop"><div class="modal card"><h2>Voting is closed</h2><button type="button" class="secondary" data-close-modal>Close</button></div></div>`;
+  const nominations = coreUniqueNominations(round);
+  const hasNominated = coreUserHasNominated(round);
+  return `<div class="modal-backdrop"><div class="modal card wide-modal core-vote-modal"><div class="tool-heading-row"><div><p class="eyebrow">${escapeHtml(coreChampionMonthLabel(monthKey))}</p><h2>${hasNominated?'See Nominees':'Nominate Core Count Champion'}</h2></div><button type="button" class="secondary small" data-close-modal>Close</button></div>${!hasNominated?`<p class="helper">Choose one person to nominate. If they were already nominated, your nomination will be counted as your vote instead of creating a duplicate. You cannot nominate yourself.</p><div class="core-person-grid">${getCoreNominationChoices().map(u=>renderCorePersonButton(u,`data-core-nominate="${u.uid}" data-core-month="${monthKey}"`)).join("") || `<div class="empty">No eligible team members are available right now.</div>`}</div>`:`<p class="helper">Your nomination is in. You can support any additional nominee below.</p><div class="core-nominee-list core-nominee-grid">${nominations.map(n=>{ const u=getCoreUser(n.candidateUid); const voted=coreUserVotedFor(round,n.candidateUid); return `<div class="core-nominee-card core-nominee-person-card"><div class="core-nominee-head">${renderCorePersonFace(u)}<span><strong>${escapeHtml(getUserUsedName(u)||"Team Member")}</strong><small>${escapeHtml(u?.teamPosition||"")}</small></span></div>${voted?`<span class="pill">✓ Supported</span>`:`<button type="button" data-core-vote="${n.candidateUid}" data-core-month="${monthKey}">Support + Reason</button>`}</div>`}).join("") || `<div class="empty">No nominees yet.</div>`}</div>`}</div></div>`;
+}
+function renderCoreScheduleSettings(settings = {}) {
+  const type = settings.coreChampionScheduleType || "manual";
+  const ordinal = settings.coreChampionScheduleOrdinal || "last";
+  const weekday = settings.coreChampionScheduleWeekday || "MO";
+  const day = settings.coreChampionScheduleDay || 20;
+  const option = (value, label, desc, inner = "") => `<label class="core-schedule-option ${type===value?'selected':''}"><span class="core-schedule-choice"><input type="radio" name="scheduleType" value="${value}" data-core-schedule-type ${type===value?'checked':''} /><span><strong>${label}</strong><small>${desc}</small></span></span>${type===value && inner ? `<div class="core-schedule-fields">${inner}</div>` : ""}</label>`;
+  return `<div class="core-schedule-options">
+    ${option("manual", "Manual only", "DOSO opens voting when ready.")}
+    ${option("day", "Same date every month", "Example: the 20th of every month.", `<label>Day of month <input type="number" min="1" max="31" name="scheduleDay" value="${day}" /></label>`)}
+    ${option("weekday", "Weekday pattern", "Example: last Monday of every month.", `<div class="grid two"><label>Which one <select name="scheduleOrdinal"><option value="first" ${ordinal==='first'?'selected':''}>First</option><option value="second" ${ordinal==='second'?'selected':''}>Second</option><option value="third" ${ordinal==='third'?'selected':''}>Third</option><option value="fourth" ${ordinal==='fourth'?'selected':''}>Fourth</option><option value="last" ${ordinal==='last'?'selected':''}>Last</option></select></label><label>Weekday <select name="scheduleWeekday"><option value="MO" ${weekday==='MO'?'selected':''}>Monday</option><option value="TU" ${weekday==='TU'?'selected':''}>Tuesday</option><option value="WE" ${weekday==='WE'?'selected':''}>Wednesday</option><option value="TH" ${weekday==='TH'?'selected':''}>Thursday</option><option value="FR" ${weekday==='FR'?'selected':''}>Friday</option></select></label></div>`)}
+  </div>`;
+}
+function renderCoreChampionLeadershipTab(){
+  const monthKey = coreChampionMonthKey(); const current=getCoreRound(monthKey); const settings=state.appSettings||{};
+  return `<div class="core-admin-panel"><div class="card slim-card"><h3>Core Count Champion Controls</h3><p class="helper">Open monthly voting, choose winners, and mark people ineligible.</p></div>
+  <form id="coreChampionSettingsForm" class="card core-settings-card"><h4>Auto preference</h4><p class="helper">Pick one auto-opening rule, or leave voting manual.</p>${renderCoreScheduleSettings(settings)}<div class="actions"><button>Save Preference</button><button type="button" data-core-open-round="${monthKey}">${current?.status==='open'?'Voting Open':current?.winnerUid?'Reset + Reopen Month':'Open This Month'}</button>${current?.status==='open'?`<button type="button" class="secondary" data-core-close-round="${monthKey}">Close Voting</button>`:""}</div></form>
+  <div class="card"><h4>Current Month</h4>${current?renderCoreRoundAdmin(current):`<p class="helper">No round opened for ${coreChampionMonthLabel(monthKey)} yet.</p>`}</div>
+  <div class="card"><h4>Eligibility</h4><p class="helper">Checked means eligible. Leaders and owners start unchecked by default; teachers and mentors start checked by default. Past winners stay locked out.</p><div class="name-grid admin-name-grid">${(state.users||[]).map(u=>{ const past=getCorePastWinnerIds().has(u.uid); const eligible=isCoreEffectivelyEligible(u); return `<label class="core-eligibility-row ${past?'is-disabled':''}"><input type="checkbox" data-core-eligible="${u.uid}" ${eligible?'checked':''} ${past?'disabled':''} /> <span><strong>${escapeHtml(getUserUsedName(u))}</strong><small>${escapeHtml(u.teamPosition||'No position')}${past?' · Past winner':''}</small></span></label>` }).join("")}</div></div></div>`;
+}
+function renderCoreRoundAdmin(round){
+  const candidateIds = Array.from(new Set([...(round.nominations||[]).map(n=>n.candidateUid), ...(round.votes||[]).map(v=>v.candidateUid)]));
+  return `<div class="core-nominee-list">${candidateIds.map(uid=>{ const u=getCoreUser(uid); const nom=coreNominationFor(round,uid); const votes=coreVotesFor(round,uid); return `<div class="core-nominee-card"><strong>${escapeHtml(getUserUsedName(u)||'Team Member')}</strong><p>${escapeHtml(nom?.reason||'')}</p><small>${votes.length} vote${votes.length===1?'':'s'}</small><button type="button" data-core-set-winner="${uid}" data-core-month="${round.monthKey}">${round.winnerUid===uid?'✓ Winner':'Set Winner'}</button></div>`}).join("") || `<div class="empty">No nominations yet.</div>`}</div>`;
 }
 
 function renderLeadership() {
@@ -2720,6 +3110,8 @@ function renderLeadership() {
         <button class="${state.leadershipTab === "importantDates" ? "active" : ""}" data-leadership-tab="importantDates">Important Dates</button>
         <button class="${state.leadershipTab === "weeklyThemes" ? "active" : ""}" data-leadership-tab="weeklyThemes">Weekly Themes</button>
         <button class="${state.leadershipTab === "certificates" ? "active" : ""}" data-leadership-tab="certificates">Certificates</button>
+        <button class="${state.leadershipTab === "shareableLinks" ? "active" : ""}" data-leadership-tab="shareableLinks">Shareable Links</button>
+        <button class="${state.leadershipTab === "coreChampion" ? "active" : ""}" data-leadership-tab="coreChampion">Core Champion</button>
       </div>
 
       ${state.leadershipTab === "users" ? `
@@ -2739,10 +3131,64 @@ function renderLeadership() {
       ${state.leadershipTab === "importantDates" ? renderImportantDatesLeadershipTab() : ""}
       ${state.leadershipTab === "weeklyThemes" ? renderWeeklyThemesLeadershipTab() : ""}
       ${state.leadershipTab === "certificates" ? renderCertificatesLeadershipTab() : ""}
+      ${state.leadershipTab === "shareableLinks" ? renderShareableLinksLeadershipTab() : ""}
+      ${state.leadershipTab === "coreChampion" ? renderCoreChampionLeadershipTab() : ""}
     </section>
     ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
+}
+
+
+function getShareablePositionsUrl() {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("share", "positions");
+  if (state.selectedSchoolId) url.searchParams.set("school", state.selectedSchoolId);
+  return url.toString();
+}
+
+function renderShareableLinksLeadershipTab() {
+  const positionUrl = getShareablePositionsUrl();
+  return `<div class="share-links-panel">
+    <div class="card slim-card">
+      <h3>Shareable Links</h3>
+      <p class="helper">Links here are made for people outside of the tool. More link types can be added later for sign ups, feedback, and other forms.</p>
+    </div>
+    <div class="share-link-card card">
+      <div><strong>Teacher Positions + What I Like Pages</strong><p class="helper">Parents can pick a classroom/position, choose a teacher, and see their What I Like page.</p></div>
+      <input readonly value="${escapeHtml(positionUrl)}" onclick="this.select()" />
+      <button type="button" data-copy-share-link="${escapeHtml(positionUrl)}">Copy Link</button>
+    </div>
+  </div>`;
+}
+
+async function renderPublicSharePage(view) {
+  const params = new URLSearchParams(window.location.search);
+  const schoolId = params.get("school") || state.selectedSchoolId || "";
+  await loadSchools();
+  await loadPositions();
+  let users = [];
+  try {
+    const q = schoolId ? query(collection(db, "users"), where("schoolIds", "array-contains", schoolId)) : collection(db, "users");
+    const snap = await getDocs(q);
+    users = snap.docs.map(d => ({ uid: d.id, ...d.data() })).filter(u => u.active !== false).sort(byName);
+  } catch (err) { users = []; }
+  const school = state.schools.find(s => s.id === schoolId);
+  state.publicShareUsers = users;
+  const grouped = state.positions.map(pos => ({ position: pos.name, people: users.filter(u => u.teamPosition === pos.name) })).filter(g => g.people.length);
+  const loose = users.filter(u => !u.teamPosition || !state.positions.some(p => p.name === u.teamPosition));
+  if (loose.length) grouped.push({ position: "Other Team Members", people: loose });
+  $app.innerHTML = `<main class="shell public-share-shell">
+    <section class="card public-share-hero"><p class="eyebrow">Oak Village Academy</p><h1>Meet the OVA Team!</h1><p class="helper">${escapeHtml(school?.name || "Select a position to find a team member and see the things they like.")}</p></section>
+    <section class="public-position-list">
+      ${grouped.length ? grouped.map(g => `<details class="card public-position-card" data-public-position-card><summary><strong>${escapeHtml(g.position)}</strong><span>${g.people.length} team member${g.people.length === 1 ? "" : "s"}</span></summary><div class="public-teacher-list">${g.people.map(u => `<button type="button" class="public-teacher-card" data-public-person="${escapeHtml(u.uid)}">${u.profileImageData ? `<img src="${u.profileImageData}" alt="" />` : `<b>${escapeHtml((u.firstName || "?").slice(0,1))}</b>`}<span><strong>${escapeHtml(getUserUsedName(u))}</strong><small>${escapeHtml(u.teamPosition || "")}</small></span></button>`).join("")}</div></details>`).join("") : `<div class="card empty">No team information is available yet.</div>`}
+    </section>
+    ${state.modal ? renderModal() : ""}
+  </main>`;
 }
 
 function importantDateMonthKey(item) {
@@ -2858,7 +3304,7 @@ function renderLetterlandSpriteLoadedPanel(sheet, rows, cols) {
   }
   return `<div class="letterland-sheet-status" data-letterland-sheet-status>
     <button type="button" class="letterland-sheet-thumb-button" data-open-letterland-sheet-preview title="Preview sprite sheet and cells"><img src="${sheet}" alt="Loaded Letterland sprite sheet" /></button>
-    <div><strong>Sprite sheet loaded</strong><span>${c} columns × ${r} rows</span><small>${String(getLetterlandSpriteSheetRefFromForm()).startsWith(LETTERLAND_SPRITE_LOCAL_PREFIX) ? "Full-res sheet stored locally to avoid Firebase size limit." : ""}</small><button type="button" class="secondary small" data-open-letterland-sheet-preview>Preview / adjust cells</button> <button type="button" class="secondary small danger" data-remove-letterland-sheet>Remove sprite sheet</button></div>
+    <div><strong>Sprite sheet loaded</strong><span>${c} columns × ${r} rows</span><small>${String(getLetterlandSpriteSheetRefFromForm()).startsWith(LETTERLAND_SPRITE_FIRESTORE_PREFIX) ? "Full-res sheet synced across computers." : (String(getLetterlandSpriteSheetRefFromForm()).startsWith(LETTERLAND_SPRITE_LOCAL_PREFIX) ? "Full-res sheet stored locally to avoid Firebase size limit." : "")}</small><button type="button" class="secondary small" data-open-letterland-sheet-preview>Preview / adjust cells</button> <button type="button" class="secondary small danger" data-remove-letterland-sheet>Remove sprite sheet</button></div>
   </div>`;
 }
 
@@ -2875,7 +3321,7 @@ function setLetterlandSpriteSheetOnForm(form, value) {
   const realForm = form || getWeeklyThemesForm();
   const field = realForm?.querySelector('[name="letterlandSpriteSheet"]');
   const resolved = resolveLetterlandSpriteSheet(value) || value || "";
-  const storedValue = resolved && resolved.length > LETTERLAND_FIRESTORE_SAFE_IMAGE_BYTES ? storeLetterlandSpriteLocally(resolved) : (value || "");
+  const storedValue = value || "";
   if (field) field.value = storedValue || "";
   window.__vvLetterlandSpriteSheet = resolved || "";
 }
@@ -2976,6 +3422,7 @@ async function applyLetterlandSpriteTileToWeek(form, week, tile) {
       button?.insertAdjacentHTML("afterend", `${renderLetterlandSpritePreview(sheet, rows, cols, tileValue, getLetterlandSpriteMetaFromForm(realForm))}<button type="button" class="secondary small" data-clear-letterland-image="${weekKey}">Remove image</button>`);
     }
   }
+  showWeeklyThemesFloatingSave(realForm);
 }
 
 
@@ -3560,6 +4007,7 @@ function normalizeVillageVoiceBlocks(draft = {}) {
       textColor: found.textColor || "#1f2f2a",
       borderStyle: found.borderStyle || "none",
       borderColor: found.borderColor || "#2f6f63",
+      columnMode: ["auto", "1", "2"].includes(String(found.columnMode || "auto")) ? String(found.columnMode || "auto") : "auto",
       functionType: found.functionType || ({ coreChampion: "coreChampion", monthlyThemes: "monthlyThemes", letterLand: "letterLand", saveTheDate: "saveTheDate" }[preset.id] || "manual"),
       textStyle: normalizeVillageVoiceTextStyle(found.textStyle)
     };
@@ -3581,6 +4029,7 @@ function normalizeVillageVoiceBlocks(draft = {}) {
       textColor: b.textColor || "#1f2f2a",
       borderStyle: b.borderStyle || "none",
       borderColor: b.borderColor || "#2f6f63",
+      columnMode: ["auto", "1", "2"].includes(String(b.columnMode || "auto")) ? String(b.columnMode || "auto") : "auto",
       functionType: b.functionType || "manual",
       textStyle: normalizeVillageVoiceTextStyle(b.textStyle)
     }));
@@ -3599,10 +4048,12 @@ function normalizeVillageVoiceLayout(draft = {}) {
   const clean = [];
   const used = new Set();
   rows.forEach(row => {
-    const rowIds = (Array.isArray(row) ? row : [row]).filter(id => ids.has(id) && !used.has(id)).slice(0, 2);
-    if (rowIds.length) {
-      rowIds.forEach(id => used.add(id));
-      clean.push(rowIds);
+    const source = (Array.isArray(row) ? row : [row]).slice(0, 2);
+    const rowIds = source.map(id => id === VILLAGE_VOICE_EMPTY_SLOT ? VILLAGE_VOICE_EMPTY_SLOT : (ids.has(id) && !used.has(id) ? id : ""));
+    const hasReal = rowIds.some(id => id && id !== VILLAGE_VOICE_EMPTY_SLOT);
+    if (hasReal) {
+      rowIds.forEach(id => { if (id && id !== VILLAGE_VOICE_EMPTY_SLOT) used.add(id); });
+      clean.push(rowIds.length > 1 ? rowIds : rowIds.filter(Boolean));
     }
   });
   blocks.forEach(block => { if (!used.has(block.id)) clean.push([block.id]); });
@@ -3672,6 +4123,10 @@ function villageVoiceChampionOptions(selectedUid) {
 }
 
 function getVillageVoiceChampion(draft = currentVillageVoiceDraft()) {
+  const monthKey = `${draft.year || new Date().getFullYear()}-${String(draft.month || state.villageVoiceSelectedMonth || "01").padStart(2,"0")}`;
+  const round = getCoreRound(monthKey);
+  const winner = round?.winnerUid ? getCoreUser(round.winnerUid) : null;
+  if (winner) return winner;
   const users = getVillageVoiceChampionUsers();
   return users.find(u => u.uid === draft.coreChampionUid) || users[0] || null;
 }
@@ -3897,14 +4352,14 @@ function renderVillageVoiceBlockPreview(block, draft, rowIndex = 0, colIndex = 0
   const titleTextStyle = villageVoiceInlineTextStyle(block.textStyle, "title");
   const bodyTextStyle = villageVoiceInlineTextStyle(block.textStyle, "body");
   const functionType = block.functionType || (block.kind === "champion" ? "coreChampion" : "manual");
-  const isSelected = state.expandedVillageVoiceEditorId === block.id;
+  const isSelected = state.expandedVillageVoiceEditorId === block.id || (state.villageVoiceRearrangeMode && state.villageVoicePickedBlock === block.id);
   const normalizedStyle = normalizeVillageVoiceTextStyle(block.textStyle);
   const commonClass = `voice-block voice-kind-${escapeHtml(block.kind || "textarea")} voice-title-size-${escapeHtml(normalizedStyle.titleSize)} voice-body-size-${escapeHtml(normalizedStyle.bodySize)} ${functionType === "coreChampion" ? "voice-champion-block" : ""} ${isSelected ? "voice-preview-selected" : ""}`;
   const clipArt = renderVillageVoiceClipArt(block);
   if (functionType === "coreChampion") {
     const champion = getVillageVoiceChampion(draft);
     return `
-      <section class="${commonClass}" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}>
+      <section class="${commonClass}" data-preview-block="${block.id}" draggable="false" data-voice-row="${rowIndex}" data-voice-col="${colIndex}"${blockStyle}>
         <div class="voice-ribbon">${title}</div>
         <div class="voice-champion-inner">
           <div class="voice-photo-ring"><div class="voice-photo">${champion?.profileImageData ? `<img src="${champion.profileImageData}" alt="${escapeHtml(getUserUsedName(champion))}" />` : `<span>No Photo</span>`}</div></div>
@@ -3921,7 +4376,7 @@ function renderVillageVoiceBlockPreview(block, draft, rowIndex = 0, colIndex = 0
     : getVillageVoiceFunctionLines(functionType, draft);
   if (functionType === "letterLand") {
     const items = getVillageVoiceLetterLandItems(draft.month);
-    return `<section class="${commonClass} voice-letterland-block" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2>${items.length ? `<div class="voice-letterland-grid">${items.map(item => {
+    return `<section class="${commonClass} voice-letterland-block" data-preview-block="${block.id}" draggable="false" data-voice-row="${rowIndex}" data-voice-col="${colIndex}"${blockStyle}><h2${titleTextStyle}>${title}</h2>${items.length ? `<div class="voice-letterland-grid">${items.map(item => {
       const visual = item.spriteTile && item.spriteSheet
         ? renderLetterlandSpriteForVoice(item.spriteSheet, item.spriteRows, item.spriteCols, item.spriteTile, `Letterland week ${item.week}`, { width: item.spriteWidth, height: item.spriteHeight, marginX: item.spriteMarginX, marginY: item.spriteMarginY, gapX: item.spriteGapX, gapY: item.spriteGapY, cellW: item.spriteCellW, cellH: item.spriteCellH })
         : item.image
@@ -3932,52 +4387,29 @@ function renderVillageVoiceBlockPreview(block, draft, rowIndex = 0, colIndex = 0
   }
   if (["importantDates", "weeklyThemes", "monthlyThemes", "saveTheDate"].includes(functionType)) {
     const emptyText = functionType === "saveTheDate" ? "No Village Voice dates marked for this month yet." : functionType === "monthlyThemes" ? "No monthly themes found for this month yet." : functionType === "importantDates" ? "No important dates found for this month yet." : "No weekly themes found for this month yet.";
-    return `<section class="${commonClass} voice-dates-block ${functionType === "saveTheDate" ? "voice-save-date-block" : ""} ${functionType === "monthlyThemes" ? "voice-monthly-themes-block" : ""}" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2>${functionLines.length ? `<ul${bodyTextStyle}>${functionLines.map(d => `<li${bodyTextStyle}>${escapeHtml(d)}</li>`).join("")}</ul>` : `<p${bodyTextStyle}>${emptyText}</p>`}${clipArt}</section>`;
+    return `<section class="${commonClass} voice-dates-block ${functionType === "saveTheDate" ? "voice-save-date-block" : ""} ${functionType === "monthlyThemes" ? "voice-monthly-themes-block" : ""}" data-preview-block="${block.id}" draggable="false" data-voice-row="${rowIndex}" data-voice-col="${colIndex}"${blockStyle}><h2${titleTextStyle}>${title}</h2>${functionLines.length ? `<ul${bodyTextStyle}>${functionLines.map(d => `<li${bodyTextStyle}>${escapeHtml(d)}</li>`).join("")}</ul>` : `<p${bodyTextStyle}>${emptyText}</p>`}${clipArt}</section>`;
   }
   if (block.kind === "dates") {
     const dates = splitVillageVoiceDates(block.content);
-    return `<section class="${commonClass} voice-dates-block" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2>${dates.length ? `<ul${bodyTextStyle}>${dates.map(d => `<li${bodyTextStyle}>${escapeHtml(d)}</li>`).join("")}</ul>` : `<p${bodyTextStyle}>Add dates and reminders here.</p>`}${clipArt}</section>`;
+    return `<section class="${commonClass} voice-dates-block" data-preview-block="${block.id}" draggable="false" data-voice-row="${rowIndex}" data-voice-col="${colIndex}"${blockStyle}><h2${titleTextStyle}>${title}</h2>${dates.length ? `<ul${bodyTextStyle}>${dates.map(d => `<li${bodyTextStyle}>${escapeHtml(d)}</li>`).join("")}</ul>` : `<p${bodyTextStyle}>Add dates and reminders here.</p>`}${clipArt}</section>`;
   }
-  return `<section class="${commonClass}" data-preview-block="${block.id}" data-voice-row="${rowIndex}" data-voice-col="${colIndex}" draggable="true"${blockStyle}><h2${titleTextStyle}>${title}</h2><p${bodyTextStyle}>${escapeHtml(block.content || block.placeholder || "").replace(/\n/g,"<br>")}</p>${clipArt}</section>`;
+  return `<section class="${commonClass}" data-preview-block="${block.id}" draggable="false" data-voice-row="${rowIndex}" data-voice-col="${colIndex}"${blockStyle}><h2${titleTextStyle}>${title}</h2><p${bodyTextStyle}>${escapeHtml(block.content || block.placeholder || "").replace(/\n/g,"<br>")}</p>${clipArt}</section>`;
 }
 
 
 function renderVillageVoicePreviewRow(row, draft, rowIndex) {
-  const ids = (Array.isArray(row) ? row : [row]).filter(Boolean).slice(0, 2);
-  const hasTwo = ids.length > 1;
-  const blockHtml = ids.map((id, colIndex) => `
-    <div class="voice-layout-slot ${hasTwo ? "" : "slot-full"}" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="${colIndex}">
-      ${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, id), draft, rowIndex, colIndex)}
-    </div>`).join("");
-  const emptySlot = !hasTwo ? `<div class="voice-layout-slot voice-empty-side-slot" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="1" data-empty-side-for="${escapeHtml(ids[0] || "")}"><span>Drop here to make 2 columns</span></div>` : "";
+  const raw = (Array.isArray(row) ? row : [row]).slice(0, 2);
+  const realCount = raw.filter(id => id && id !== VILLAGE_VOICE_EMPTY_SLOT).length;
+  const hasTwo = raw.length > 1 || realCount > 1;
+  const blockHtml = (hasTwo ? [raw[0] || VILLAGE_VOICE_EMPTY_SLOT, raw[1] || VILLAGE_VOICE_EMPTY_SLOT] : raw).map((id, colIndex) => {
+    const realId = id && id !== VILLAGE_VOICE_EMPTY_SLOT ? id : "";
+    const emptyFor = realId ? "" : (raw.find(x => x && x !== VILLAGE_VOICE_EMPTY_SLOT) || "");
+    return `<div class="voice-layout-slot ${hasTwo ? "" : "slot-full"} ${realId ? "" : "voice-empty-side-slot voice-open-column-slot"}" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="${colIndex}" ${realId ? "" : `data-empty-column-row="${rowIndex}" data-empty-column-col="${colIndex}" data-empty-side-for="${escapeHtml(emptyFor)}"`}>
+      ${realId ? renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, realId), draft, rowIndex, colIndex) : `<span>Drop here</span>`}
+    </div>`;
+  }).join("");
+  const emptySlot = !hasTwo ? `<div class="voice-layout-slot voice-empty-side-slot" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="1" data-empty-side-for="${escapeHtml(raw[0] || "")}"><span>Drop here to make 2 columns</span></div>` : "";
   return `<div class="voice-preview-row ${hasTwo ? "two-col" : "full-col"}" data-voice-preview-row="${rowIndex}">${blockHtml}${emptySlot}</div>`;
-}
-
-function renderVillageVoicePreviewRowsMasonry(rows, draft) {
-  let html = "";
-  for (let i = 0; i < rows.length; i++) {
-    const row = (Array.isArray(rows[i]) ? rows[i] : [rows[i]]).filter(Boolean).slice(0, 2);
-    if (row.length > 1) {
-      const left = [];
-      const right = [];
-      const start = i;
-      while (i < rows.length) {
-        const two = (Array.isArray(rows[i]) ? rows[i] : [rows[i]]).filter(Boolean).slice(0, 2);
-        if (two.length <= 1) break;
-        left.push({ id: two[0], rowIndex: i });
-        right.push({ id: two[1], rowIndex: i });
-        i++;
-      }
-      i--;
-      html += `<div class="voice-preview-row two-col voice-masonry-row" data-voice-preview-row="${start}">
-        <div class="voice-masonry-col" data-voice-masonry-col="0">${left.map(item => `<div class="voice-layout-slot" data-voice-drop-slot data-voice-row="${item.rowIndex}" data-voice-col="0">${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, item.id), draft, item.rowIndex, 0)}</div>`).join("")}</div>
-        <div class="voice-masonry-col" data-voice-masonry-col="1">${right.map(item => `<div class="voice-layout-slot" data-voice-drop-slot data-voice-row="${item.rowIndex}" data-voice-col="1">${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, item.id), draft, item.rowIndex, 1)}</div>`).join("")}</div>
-      </div>`;
-    } else {
-      html += renderVillageVoicePreviewRow(row, draft, i);
-    }
-  }
-  return html;
 }
 
 
@@ -4011,19 +4443,16 @@ function getVillageVoiceFooterLocations() {
 }
 
 function renderVillageVoiceTopBar(draft) {
+  const canArrange = hasToolPermission(state.session, "villageVoice", "arrangeFlyer") || hasFullDevAccess(state.session);
   return `
-    <div class="voice-top-settings-bar">
+    <div class="voice-top-settings-bar rearrange-on voice-natural-editing">
       <label>Month
         <select name="month" data-village-live data-village-month>
           ${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${draft.month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}
         </select>
       </label>
       <label>Year<input name="year" data-village-live value="${escapeHtml(draft.year || new Date().getFullYear())}" /></label>
-      <label>Season Background
-        <select name="theme" data-village-live>
-          ${["winter","spring","summer","fall"].map(t => `<option value="${t}" ${draft.theme === t ? "selected" : ""}>${t[0].toUpperCase()+t.slice(1)}</option>`).join("")}
-        </select>
-      </label>
+      <input type="hidden" name="theme" value="${escapeHtml(draft.theme || getSeasonTheme(draft.month))}" />
       <div class="voice-top-title-lock"><strong>The Village Voice</strong><span>Footer uses System Admin school locations</span></div>
       <input type="hidden" name="title" value="${escapeHtml(draft.title || "The Village Voice")}" />
       <input type="hidden" name="headline" value="" />
@@ -4070,6 +4499,7 @@ function renderVillageVoiceSelectedBlockEditor(draft) {
     <input type="hidden" data-block-title="${block.id}" value="${escapeHtml(block.title || block.label || "New Block")}" />
     <input type="hidden" data-block-content="${block.id}" value="${escapeHtml(block.content || "")}" />
     <input type="hidden" data-block-function="${block.id}" value="${escapeHtml(block.functionType || "manual")}" />
+    <input type="hidden" data-block-column-mode="${block.id}" value="${escapeHtml(block.columnMode || "auto")}" />
     <input type="hidden" data-block-show-next-month="${block.id}" value="${block.showNextMonthDates ? "1" : ""}" />`;
   return `
     <div class="voice-left-block-editor" data-left-block-editor="${block.id}">
@@ -4093,6 +4523,11 @@ function renderVillageVoiceSelectedBlockEditor(draft) {
               <option value="letterLand" ${(block.functionType || "") === "letterLand" ? "selected" : ""}>Letter Land images</option>
               <option value="importantDates" ${(block.functionType || "") === "importantDates" ? "selected" : ""}>Pull Important Dates for selected month</option>
               <option value="weeklyThemes" ${(block.functionType || "") === "weeklyThemes" ? "selected" : ""}>Pull Weekly Themes for selected month</option>
+            </select>
+          </label>
+          <label>Column Lock
+            <select data-village-live data-block-column-mode="${block.id}">
+              ${[["auto","Auto"],["1","Stay 1 Column / Full Width"],["2","Stay in 2 Columns"]].map(([v,l]) => `<option value="${v}" ${(block.columnMode || "auto") === v ? "selected" : ""}>${l}</option>`).join("")}
             </select>
           </label>
           ${(block.functionType || "manual") === "saveTheDate" ? `<label class="voice-check-row"><input type="checkbox" data-village-live data-block-show-next-month="${block.id}" ${block.showNextMonthDates ? "checked" : ""} /> Show next month&apos;s dates also</label>` : `<input type="hidden" data-block-show-next-month="${block.id}" value="${block.showNextMonthDates ? "1" : ""}" />`}
@@ -4154,10 +4589,11 @@ function renderVillageVoiceControlsPanel(draft, canArrange) {
       <div class="actions"><button type="button" class="secondary" data-reset-village-voice>Reset to Default</button><button type="button" class="secondary" data-export-village-pdf>Export PDF</button><button type="submit">Save Village Voice</button></div>
     </div>`;
   return `
-    <div class="card subtle-card voice-controls">
-      <h3>Content Blocks</h3>
-      ${!canArrange ? `<div class="voice-layout-hint muted">You can edit content, but layout arranging requires the Arrange Printable Layouts permission.</div>` : ""}
-      <div class="voice-block-list" data-voice-block-list>
+    <div class="card subtle-card voice-controls voice-controls-clean-menu">
+      <div class="voice-controls-head"><h3>Content Blocks</h3></div>
+      <div class="voice-layout-hint voice-rearrange-hint">Drag blocks on the preview. Double-click a preview block to edit it.</div>
+      ${!canArrange ? `<div class="voice-layout-hint muted">Layout arranging requires the Arrange Printable Layouts permission.</div>` : ""}
+      <div class="voice-block-list voice-block-list-clean" data-voice-block-list>
         ${renderVillageVoiceEditorRows(draft, canArrange)}
       </div>
       <div class="actions"><button type="button" class="secondary" data-add-village-block>Add Content Block</button><button type="button" class="secondary" data-reset-village-voice>Reset to Default</button><button type="button" class="secondary" data-export-village-pdf>Export PDF</button><button type="submit">Save Village Voice</button></div>
@@ -4167,7 +4603,7 @@ function renderVillageVoiceControlsPanel(draft, canArrange) {
 function renderVillageVoiceEditorBlock(block, canArrange) {
   const expanded = state.expandedVillageVoiceEditorId === block.id;
   return `
-    <div class="voice-edit-block ${expanded ? "" : "collapsed"}" draggable="${canArrange ? "true" : "false"}" data-voice-block="${block.id}">
+    <div class="voice-edit-block ${expanded ? "" : "collapsed"}" draggable="false" data-voice-block="${block.id}">
       <div class="voice-edit-block-head" data-voice-toggle="${block.id}">
         <span class="drag-handle" title="Drag to rearrange">${canArrange ? "☰" : "•"}</span>
         <input class="voice-block-title-input" data-village-live data-block-title="${block.id}" value="${escapeHtml(block.title || block.label)}" />
@@ -4195,6 +4631,7 @@ function renderVillageVoiceEditorBlock(block, canArrange) {
         <label>${block.kind === "dates" ? "Dates / Lines" : "Content"}
           <textarea data-village-live data-block-content="${block.id}" rows="${block.kind === "dates" ? 5 : 4}" placeholder="${escapeHtml(block.placeholder || "")}">${escapeHtml(block.content || "")}</textarea>
         </label>
+        <input type="hidden" data-block-column-mode="${block.id}" value="${escapeHtml(block.columnMode || "auto")}" />
         <input type="hidden" data-block-bg-color="${block.id}" value="${escapeHtml(block.backgroundColor || "#ffffff")}" />
         <input type="hidden" data-block-text-color="${block.id}" value="${escapeHtml(block.textColor || "#1f2f2a")}" />
         <input type="hidden" data-block-bg-data="${block.id}" value="${block.backgroundImageData || ""}" />
@@ -4221,11 +4658,7 @@ function renderVillageVoiceSettingsBlock(draft) {
             ${Array.from({length:12},(_,i)=>String(i+1).padStart(2,"0")).map(m => `<option value="${m}" ${draft.month === m ? "selected" : ""}>${new Date(2026, Number(m)-1, 1).toLocaleString("en-US", { month: "long" })}</option>`).join("")}
           </select>
         </label>
-        <label>Season Background
-          <select name="theme" data-village-live>
-            ${["winter","spring","summer","fall"].map(t => `<option value="${t}" ${draft.theme === t ? "selected" : ""}>${t[0].toUpperCase()+t.slice(1)}</option>`).join("")}
-          </select>
-        </label>
+        <input type="hidden" name="theme" value="${escapeHtml(draft.theme || getSeasonTheme(draft.month))}" />
         <label>Year<input name="year" data-village-live value="${escapeHtml(draft.year || new Date().getFullYear())}" /></label>
         <label>Flyer Title<input name="title" data-village-live value="${escapeHtml(draft.title)}" /></label>
         <label>Main Headline<input name="headline" data-village-live value="${escapeHtml(draft.headline)}" /></label>
@@ -4266,21 +4699,29 @@ function renderVillageVoiceSettingsBlock(draft) {
 }
 
 function renderVillageVoiceEditorRows(draft, canArrange) {
-  const rows = normalizeVillageVoiceLayout(draft);
-  const expandedId = state.expandedVillageVoiceEditorId;
-  return rows.map((row, rowIndex) => {
-    const ids = (Array.isArray(row) ? row : [row]).filter(Boolean).slice(0, 2);
-    const isEditingInRow = expandedId && ids.includes(expandedId) && ids.length > 1;
-    const visibleRow = isEditingInRow ? [expandedId] : ids;
-    const hasTwo = visibleRow.length > 1;
-    return `
-    <div class="voice-editor-row ${isEditingInRow ? "editing-single" : (hasTwo ? "two-col" : "full-col")}" data-voice-editor-row="${rowIndex}">
-      ${visibleRow.map((id, colIndex) => `<div class="voice-layout-slot ${hasTwo ? "" : "slot-full"}" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="${colIndex}">${renderVillageVoiceEditorBlock(getVillageVoiceBlock(draft, id), canArrange)}</div>`).join("")}
-      ${(!hasTwo && !isEditingInRow && canArrange) ? `<div class="voice-layout-slot voice-empty-side-slot" data-voice-drop-slot data-voice-row="${rowIndex}" data-voice-col="1" data-empty-side-for="${escapeHtml(visibleRow[0] || "")}"><span>Drop here to make 2 columns</span></div>` : ""}
-    </div>`;
-  }).join("");
+  const blocks = normalizeVillageVoiceBlocks(draft);
+  if (!blocks.length) return `<div class="voice-clean-empty">No content blocks yet.</div>`;
+  return blocks.map(block => renderVillageVoiceEditorBlockSummary(block)).join("");
 }
 
+function renderVillageVoiceEditorBlockSummary(block) {
+  const functionType = block.functionType || (block.kind === "champion" ? "coreChampion" : "manual");
+  const functionLabel = ({
+    manual: "Manual",
+    coreChampion: "CORE Counts",
+    saveTheDate: "Save the Date",
+    monthlyThemes: "Monthly Themes",
+    letterLand: "Letter Land",
+    importantDates: "Important Dates",
+    weeklyThemes: "Weekly Themes"
+  })[functionType] || "Manual";
+  const title = block.title || block.label || "New Block";
+  return `
+    <div class="voice-clean-block-card" data-voice-menu-block="${escapeHtml(block.id)}">
+      <div class="voice-clean-block-title">${escapeHtml(title)}</div>
+      <div class="voice-clean-block-meta">${escapeHtml(functionLabel)}</div>
+    </div>`;
+}
 
 function renderPrintablesTabs() {
   const tabs = [
@@ -4565,27 +5006,39 @@ function renderVillageVoiceTool() {
   const draft = currentVillageVoiceDraft();
   const canArrange = hasToolPermission(state.session, "villageVoice", "arrangeFlyer") || hasFullDevAccess(state.session);
   const active = state.printableTab || "villageVoice";
-  $app.innerHTML = pageShell(`
-    <section class="card village-voice-editor printables-editor">
-      <div class="section-head">
-        <div><h2>Printables</h2><p class="helper">Create printable items used throughout the year.</p></div>
-        <button type="button" class="secondary" data-action="home">Back Home</button>
-      </div>
-      ${renderPrintablesTabs()}
-      ${active === "villageVoice" ? `
-        <form id="villageVoiceForm" class="village-voice-layout">
+  const villageIsEditing = active === "villageVoice" && state.villageVoiceEditorOpen === true;
+  state.villageVoiceRearrangeMode = false;
+  const villageVoiceTabHtml = villageIsEditing ? `
+        <form id="villageVoiceForm" class="village-voice-layout village-voice-focus-mode voice-natural-drag-enabled">
+          <button type="button" class="voice-close-focus-editor" data-close-village-editor>Close editor</button>
           ${renderVillageVoiceTopBar(draft)}
           ${renderVillageVoiceControlsPanel(draft, canArrange)}
           <div class="voice-preview-side">
             <div class="voice-page-wrap" data-village-preview>${renderVillageVoicePreviewHtml(draft)}</div>
           </div>
-        </form>` : renderSimplePrintableTab(active)}
+        </form>` : `
+        <div class="village-voice-start-screen">
+          <div class="village-voice-start-actions">
+            <div><h3>The Village Voice</h3><p class="helper">Open the focused editor when you are ready to make changes.</p></div>
+            <button type="button" data-start-village-editor>Start editing</button>
+          </div>
+          <div class="voice-page-wrap village-voice-start-preview" data-village-preview>${renderVillageVoicePreviewHtml(draft)}</div>
+        </div>`;
+  $app.innerHTML = pageShell(`
+    <section class="card village-voice-editor printables-editor ${villageIsEditing ? "voice-editor-fullscreen" : ""}">
+      ${villageIsEditing ? "" : `<div class="section-head">
+        <div><h2>Printables</h2><p class="helper">Create printable items used throughout the year.</p></div>
+        <button type="button" class="secondary" data-action="home">Back Home</button>
+      </div>
+      ${renderPrintablesTabs()}`}
+      ${active === "villageVoice" ? villageVoiceTabHtml : renderSimplePrintableTab(active)}
     </section>
     ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
 }
-
 
 function getLastFormFieldValue(form, selector, fallback = "") {
   const matches = Array.from(form?.querySelectorAll(selector) || []);
@@ -4685,12 +5138,14 @@ function scrollElementInsideContainer(el, container) {
 function focusVillageVoiceEditingSection(id) {
   if (!id) return;
   requestAnimationFrame(() => {
-    const editEl = document.querySelector(`[data-voice-block="${id}"]`);
-    const previewEl = id === "flyerHeader" ? document.querySelector(".voice-cover-header") : (id === "flyerFooter" ? document.querySelector(".voice-footer") : document.querySelector(`[data-preview-block="${id}"]`));
+    const safeId = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : String(id).replace(/"/g, '\"');
+    const editEl = document.querySelector(`[data-left-block-editor="${safeId}"], [data-voice-block="${safeId}"]`);
+    const previewEl = id === "flyerHeader" ? document.querySelector(".voice-cover-header") : (id === "flyerFooter" ? document.querySelector(".voice-footer") : document.querySelector(`[data-preview-block="${safeId}"]`));
     const editScroller = editEl?.closest(".voice-controls");
     const previewScroller = previewEl?.closest(".voice-page-wrap");
     scrollElementInsideContainer(editEl, editScroller);
-    scrollElementInsideContainer(previewEl, previewScroller);
+    // Keep the visible preview stable; only center it if the page wrap itself is scrollable.
+    if (previewScroller && previewScroller.scrollHeight > previewScroller.clientHeight + 8) scrollElementInsideContainer(previewEl, previewScroller);
   });
 }
 
@@ -4702,13 +5157,33 @@ function cleanVillageVoiceLayoutRows(rows) {
   const clean = [];
   const used = new Set();
   (rows || []).forEach(row => {
-    const nextRow = (Array.isArray(row) ? row : [row]).filter(id => id && !used.has(id)).slice(0, 2);
-    if (nextRow.length) {
-      nextRow.forEach(id => used.add(id));
-      clean.push(nextRow);
+    const source = (Array.isArray(row) ? row : [row]).slice(0, 2);
+    const nextRow = source.map(id => id === VILLAGE_VOICE_EMPTY_SLOT ? VILLAGE_VOICE_EMPTY_SLOT : (id && !used.has(id) ? id : ""));
+    if (nextRow.some(id => id && id !== VILLAGE_VOICE_EMPTY_SLOT)) {
+      nextRow.forEach(id => { if (id && id !== VILLAGE_VOICE_EMPTY_SLOT) used.add(id); });
+      clean.push(nextRow.length > 1 ? nextRow : nextRow.filter(Boolean));
     }
   });
   return clean;
+}
+
+
+function applyVillageVoiceColumnLocks(draft) {
+  const blocks = normalizeVillageVoiceBlocks(draft);
+  const byId = new Map(blocks.map(b => [b.id, b]));
+  let rows = normalizeVillageVoiceLayout(draft).map(row => [...row]);
+  rows = rows.flatMap(row => {
+    const real = row.filter(id => id && id !== VILLAGE_VOICE_EMPTY_SLOT);
+    if (real.some(id => byId.get(id)?.columnMode === "1")) {
+      const out = [];
+      row.forEach(id => { if (id && id !== VILLAGE_VOICE_EMPTY_SLOT) out.push([id]); });
+      return out;
+    }
+    if (row.length === 1 && byId.get(row[0])?.columnMode === "2") return [[row[0], VILLAGE_VOICE_EMPTY_SLOT]];
+    return [row];
+  });
+  draft.layout = cleanVillageVoiceLayoutRows(rows);
+  return draft;
 }
 
 function persistVillageVoiceExplicitLayout(cleanRows) {
@@ -4733,136 +5208,463 @@ function setVillageVoiceLayoutAfterDrop(draft, rows) {
     explicitOverrideRows: overrideRows
   });
   console.info("[Village Voice DND] APPLIED LAYOUT", clean.map((row, i) => ({ row: i, left: row[0] || "", right: row[1] || "", renders: row.length > 1 ? "2 columns" : "full width" })));
-  renderVillageVoiceTool();
+  // v150: do not rebuild the whole app after a drop. Rebuilding $app caused
+  // the browser to jump back to the top every time a block was moved.
+  const form = document.getElementById("villageVoiceForm");
+  const preview = form?.querySelector("[data-village-preview]");
+  if (form && preview) {
+    const draftNow = currentVillageVoiceDraft();
+    preview.innerHTML = renderVillageVoicePreviewHtml(draftNow);
+  } else {
+    renderVillageVoiceTool();
+  }
 }
 
-function moveVillageVoiceBlock(dragId, targetId, placement) {
-  villageVoiceDndLog("move-request", { dragId, targetId, placement, beforeLayout: villageVoiceLayoutSnapshot() });
-  if (!dragId || !targetId || dragId === targetId) {
-    villageVoiceDndLog("move-rejected", { reason: "missing id or same block", dragId, targetId, placement });
-    return false;
-  }
+function computeVillageVoiceRowsForMove(dragId, targetId, placement) {
+  if (!dragId || !targetId || dragId === targetId) return null;
   const draft = currentVillageVoiceDraft();
   const originalRows = normalizeVillageVoiceLayout(draft).map(row => [...row]);
   const rows = removeVoiceBlockFromLayout(originalRows, dragId).map(row => row.filter(Boolean));
   const targetRowIndex = rows.findIndex(row => row.includes(targetId));
-  if (targetRowIndex < 0) {
-    villageVoiceDndLog("move-rejected", { reason: "target not found after removing dragged block", dragId, targetId, rows });
-    return false;
-  }
-
+  if (targetRowIndex < 0) return null;
   const targetRow = rows[targetRowIndex];
 
-  if (placement === "left" || placement === "right") {
-    // Important: dropping left/right should ALWAYS pair the dragged block with the target.
-    // The earlier splice/slice method failed when the target row already had 2 blocks;
-    // the dragged block could become the overflow item and the visible row looked unchanged.
+  const insertColumnRow = (index, side) => rows.splice(index, 0, side === "right" ? [VILLAGE_VOICE_EMPTY_SLOT, dragId] : [dragId, VILLAGE_VOICE_EMPTY_SLOT]);
+
+  if (placement === "slotFullBefore") {
+    rows.splice(targetRowIndex, 0, [dragId]);
+  } else if (placement === "slotLeftBefore") {
+    insertColumnRow(targetRowIndex, "left");
+  } else if (placement === "slotRightBefore") {
+    insertColumnRow(targetRowIndex, "right");
+  } else if (placement === "slotFullAfter") {
+    rows.splice(targetRowIndex + 1, 0, [dragId]);
+  } else if (placement === "slotLeftAfter") {
+    insertColumnRow(targetRowIndex + 1, "left");
+  } else if (placement === "slotRightAfter") {
+    insertColumnRow(targetRowIndex + 1, "right");
+  } else if (placement === "left" || placement === "right") {
     const pairedRow = placement === "left" ? [dragId, targetId] : [targetId, dragId];
     const displaced = targetRow.filter(id => id !== targetId && id !== dragId);
     rows[targetRowIndex] = pairedRow;
     if (displaced.length) rows.splice(targetRowIndex + 1, 0, ...displaced.map(id => [id]));
-  } else if (placement === "above") {
+  } else if (placement === "aboveFull") {
     rows.splice(targetRowIndex, 0, [dragId]);
-  } else {
+  } else if (placement === "belowFull") {
     rows.splice(targetRowIndex + 1, 0, [dragId]);
+  } else if (placement === "above") {
+    const colIndex = targetRow.indexOf(targetId);
+    if (targetRow.length > 1 && colIndex >= 0) rows.splice(targetRowIndex, 0, colIndex === 0 ? [dragId, VILLAGE_VOICE_EMPTY_SLOT] : [VILLAGE_VOICE_EMPTY_SLOT, dragId]);
+    else rows.splice(targetRowIndex, 0, [dragId]);
+  } else {
+    const colIndex = targetRow.indexOf(targetId);
+    if (targetRow.length > 1 && colIndex >= 0) rows.splice(targetRowIndex + 1, 0, colIndex === 0 ? [dragId, VILLAGE_VOICE_EMPTY_SLOT] : [VILLAGE_VOICE_EMPTY_SLOT, dragId]);
+    else rows.splice(targetRowIndex + 1, 0, [dragId]);
   }
-
-  const changed = JSON.stringify(cleanVillageVoiceLayoutRows(originalRows)) !== JSON.stringify(cleanVillageVoiceLayoutRows(rows));
-  villageVoiceDndLog("move-result", { changed, afterRows: cleanVillageVoiceLayoutRows(rows) });
-  if (!changed) {
-    showToast("That block is already in that position.");
-    return false;
-  }
-  setVillageVoiceLayoutAfterDrop(draft, rows);
-  return true;
+  return { draft, originalRows, rows: cleanVillageVoiceLayoutRows(rows) };
 }
 
-function getVillageVoiceTargetId(target) {
-  if (!target) return "";
-  return target.dataset?.voiceBlock || target.dataset?.previewBlock || target.querySelector?.(".voice-edit-block,[data-preview-block]")?.dataset?.voiceBlock || target.querySelector?.(".voice-edit-block,[data-preview-block]")?.dataset?.previewBlock || target.dataset?.emptySideFor || "";
+
+function findVillageVoiceBlockElementById(id) {
+  if (!id) return null;
+  return Array.from(document.querySelectorAll('[data-preview-block], [data-voice-block]')).find(el => (el.dataset.previewBlock || el.dataset.voiceBlock) === id) || null;
 }
 
-function villageVoiceDropPlacement(e, target) {
-  const slot = target?.closest?.("[data-voice-drop-slot]") || (target?.matches?.("[data-voice-drop-slot]") ? target : null);
-  if (slot?.dataset?.emptySideFor) {
-    villageVoiceDndLog("placement", { xPercent: 1, yPercent: 0.5, placement: "right", explicitEmptySlot: true });
-    return "right";
+// v143: Natural Village Voice rearrange system ported from the standalone prototype.
+// Uses frozen drop zones + live preview. No L/C/R dot anchors.
+function villageVoiceRowsToNaturalSegments(rows) {
+  const segs = [];
+  const normalized = (rows || []).map(row => (Array.isArray(row) ? row : [row]).slice(0, 2));
+  for (let i = 0; i < normalized.length; i++) {
+    const row = normalized[i];
+    const isColumn = row.length > 1 || row.includes(VILLAGE_VOICE_EMPTY_SLOT);
+    if (!isColumn) {
+      const id = row.find(x => x && x !== VILLAGE_VOICE_EMPTY_SLOT);
+      if (id) segs.push({ type: "full", id });
+      continue;
+    }
+    const seg = { type: "columns", left: [], right: [] };
+    while (i < normalized.length) {
+      const two = normalized[i];
+      const twoCol = two.length > 1 || two.includes(VILLAGE_VOICE_EMPTY_SLOT);
+      if (!twoCol) break;
+      if (two[0] && two[0] !== VILLAGE_VOICE_EMPTY_SLOT) seg.left.push(two[0]);
+      if (two[1] && two[1] !== VILLAGE_VOICE_EMPTY_SLOT) seg.right.push(two[1]);
+      i++;
+    }
+    i--;
+    if (seg.left.length || seg.right.length) segs.push(seg);
   }
-  const r = target.getBoundingClientRect();
-  const x = (e.clientX - r.left) / Math.max(r.width, 1);
-  const y = (e.clientY - r.top) / Math.max(r.height, 1);
-  let placement;
+  return segs;
+}
 
-  // Thin top/bottom bands are for vertical rearranging. The large middle area
-  // intentionally means left/right = make a column beside this block.
-  if (y < 0.16) placement = "above";
-  else if (y > 0.84) placement = "below";
-  else placement = x < 0.5 ? "left" : "right";
-  villageVoiceDndLog("placement", {
-    targetId: target?.dataset.voiceBlock || target?.dataset.previewBlock,
-    clientX: e.clientX, clientY: e.clientY,
-    targetRect: { left: r.left, top: r.top, width: r.width, height: r.height },
-    xPercent: Number(x.toFixed(3)), yPercent: Number(y.toFixed(3)), placement
+function villageVoiceNaturalSegmentsToRows(segs) {
+  const rows = [];
+  (segs || []).forEach(seg => {
+    if (!seg) return;
+    if (seg.type === "full" && seg.id) rows.push([seg.id]);
+    if (seg.type === "columns") {
+      const max = Math.max(seg.left?.length || 0, seg.right?.length || 0);
+      for (let i = 0; i < max; i++) {
+        rows.push([seg.left?.[i] || VILLAGE_VOICE_EMPTY_SLOT, seg.right?.[i] || VILLAGE_VOICE_EMPTY_SLOT]);
+      }
+    }
   });
-  return placement;
+  return cleanVillageVoiceLayoutRows(rows);
 }
 
+function renderVillageVoicePreviewRowsMasonry(rows, draft) {
+  const segments = villageVoiceRowsToNaturalSegments(rows);
+  return segments.map((seg, segIndex) => {
+    if (seg.type === "full") {
+      return `<div class="voice-preview-row full-col voice-natural-full-row" data-voice-preview-row="${segIndex}" data-vv-natural-full-seg="${segIndex}"><div class="voice-layout-slot slot-full" data-voice-drop-slot>${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, seg.id), draft, segIndex, 0)}</div></div>`;
+    }
+    const renderSide = (side, colIndex) => {
+      const items = (seg[side] || []).map((id, index) => `<div class="voice-layout-slot voice-natural-slot" data-vv-natural-seg="${segIndex}" data-vv-natural-side="${side}" data-vv-natural-index="${index}" data-voice-drop-slot>${renderVillageVoiceBlockPreview(getVillageVoiceBlock(draft, id), draft, segIndex, colIndex)}</div>`).join("");
+      return `<div class="voice-masonry-col voice-natural-stack" data-vv-natural-stack data-vv-natural-seg="${segIndex}" data-vv-natural-side="${side}">${items}</div>`;
+    };
+    return `<div class="voice-preview-row two-col voice-masonry-row voice-natural-column-row" data-voice-preview-row="${segIndex}" data-vv-natural-col-seg="${segIndex}">${renderSide("left", 0)}${renderSide("right", 1)}</div>`;
+  }).join("");
+}
+
+function vvNaturalClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+function vvNaturalFindBlock(segs, id) {
+  for (let si = 0; si < (segs || []).length; si++) {
+    const s = segs[si];
+    if (s?.type === "full" && s.id === id) return { kind: "full", seg: si };
+    if (s?.type === "columns") {
+      for (const side of ["left", "right"]) {
+        const index = (s[side] || []).indexOf(id);
+        if (index > -1) return { kind: "col", seg: si, side, index };
+      }
+    }
+  }
+  return null;
+}
+function vvNaturalRemoveBlock(segs, id) {
+  const p = vvNaturalFindBlock(segs, id);
+  if (!p) return null;
+  if (p.kind === "full") segs.splice(p.seg, 1);
+  else {
+    segs[p.seg][p.side].splice(p.index, 1);
+    if (!segs[p.seg].left.length && !segs[p.seg].right.length) segs.splice(p.seg, 1);
+  }
+  return p;
+}
+function vvNaturalEnsureColumnSeg(segs, segIndex) {
+  if (!segs[segIndex] || segs[segIndex].type !== "columns") {
+    segs.splice(Math.min(segIndex, segs.length), 0, { type: "columns", left: [], right: [] });
+  }
+  return segs[Math.min(segIndex, segs.length - 1)];
+}
+function vvNaturalAdjustedSegAfterRemove(target, source, segs) {
+  let seg = Number(target.seg || 0);
+  if (source?.kind === "full" && source.seg < seg) seg--;
+  if (source?.kind === "col" && source.seg < seg && !segs[source.seg]) seg--;
+  return Math.max(0, Math.min(seg, segs.length));
+}
+function vvNaturalInsertFullAtColumnRow(segs, id, target) {
+  const seg = segs[target.seg];
+  if (!seg || seg.type !== "columns") { segs.splice(Math.min(target.seg, segs.length), 0, { type: "full", id }); return segs; }
+  const row = Math.max(0, Math.min(Number(target.index || 0), Math.max(seg.left.length, seg.right.length)));
+  const above = { type: "columns", left: seg.left.slice(0, row), right: seg.right.slice(0, row) };
+  const below = { type: "columns", left: seg.left.slice(row), right: seg.right.slice(row) };
+  const repl = [];
+  if (above.left.length || above.right.length) repl.push(above);
+  repl.push({ type: "full", id });
+  if (below.left.length || below.right.length) repl.push(below);
+  segs.splice(target.seg, 1, ...repl);
+  return segs;
+}
+function vvNaturalApplyMove(segsIn, id, target) {
+  const segs = vvNaturalClone(segsIn || []);
+  const source = vvNaturalFindBlock(segs, id);
+  if (!source || !target) return segs;
+  const sameFullTarget = target.kind === "fullRow" && source.kind === "full" && source.seg === target.seg;
+  vvNaturalRemoveBlock(segs, id);
+  if (target.kind === "end") { segs.push({ type: "full", id }); return segs; }
+  if (target.kind === "fullRow") {
+    const segIndex = sameFullTarget ? source.seg : vvNaturalAdjustedSegAfterRemove(target, source, segs);
+    if (target.slot === "c") {
+      const existing = segs[segIndex];
+      if (existing?.type === "full") {
+        const displaced = existing.id;
+        existing.id = id;
+        if (source.kind === "col") {
+          const s = vvNaturalEnsureColumnSeg(segs, Math.min(source.seg, segs.length));
+          s[source.side].splice(Math.min(source.index, s[source.side].length), 0, displaced);
+        } else segs.splice(Math.min(source.seg, segs.length), 0, { type: "full", id: displaced });
+      } else segs.splice(segIndex, 0, { type: "full", id });
+      return segs;
+    }
+    const existing = sameFullTarget ? null : segs[segIndex];
+    if (existing?.type === "full") {
+      const other = existing.id;
+      segs.splice(segIndex, 1, target.slot === "l" ? { type: "columns", left: [id], right: [other] } : { type: "columns", left: [other], right: [id] });
+    } else {
+      segs.splice(segIndex, 0, target.slot === "l" ? { type: "columns", left: [id], right: [] } : { type: "columns", left: [], right: [id] });
+    }
+    return segs;
+  }
+  if (target.slot === "c") {
+    return vvNaturalInsertFullAtColumnRow(segs, id, { ...target, seg: vvNaturalAdjustedSegAfterRemove(target, source, segs) });
+  }
+  const targetSeg = vvNaturalAdjustedSegAfterRemove(target, source, segs);
+  const seg = vvNaturalEnsureColumnSeg(segs, targetSeg);
+  const side = target.slot === "l" ? "left" : "right";
+  let idx = Math.min(Number(target.index || 0), seg[side].length);
+  if (source.kind === "col" && source.seg === targetSeg && source.side === side && source.index < target.index) idx = Math.max(0, idx - 1);
+  seg[side].splice(idx, 0, id);
+  return segs;
+}
+
+function vvNaturalBaseSegments() {
+  return villageVoiceRowsToNaturalSegments(normalizeVillageVoiceLayout(currentVillageVoiceDraft()));
+}
+function vvNaturalRowsAfterMove(dragId, target) {
+  return villageVoiceNaturalSegmentsToRows(vvNaturalApplyMove(window.__vvNaturalBaseSegments || vvNaturalBaseSegments(), dragId, target));
+}
+function vvNaturalTargetKey(t) { return t ? `${t.kind}:${t.slot}:${t.seg}:${t.index}` : ""; }
+function vvNaturalEncode(t) { try { return encodeURIComponent(JSON.stringify({ kind: t.kind, slot: t.slot, seg: t.seg, index: t.index })); } catch (_) { return ""; } }
+function vvNaturalDecode(value) { try { return JSON.parse(decodeURIComponent(String(value || "").replace(/^natural:/, ""))); } catch (_) { return null; } }
+
+
+// v146: compatibility helpers for the natural Village Voice rearrange system.
+// These replace the old dot-anchor helpers that were removed during the merge.
 function getVillageVoiceDraggedId(e) {
-  return state.villageVoiceDraggedBlock || e.dataTransfer?.getData("application/x-village-voice-block") || e.dataTransfer?.getData("text/plain") || "";
+  return state.villageVoiceDraggedBlock || state.villageVoicePickedBlock || e?.dataTransfer?.getData?.("application/x-village-voice-block") || e?.dataTransfer?.getData?.("text/plain") || "";
 }
 
 function getVoiceDropTarget(e) {
   const form = document.getElementById("villageVoiceForm");
-  if (!form) { villageVoiceDndLog("target-rejected", { reason: "villageVoiceForm not found" }); return null; }
-  if (!form.contains(e.target)) { villageVoiceDndLog("target-rejected", { reason: "event target outside villageVoiceForm", eventTarget: e.target }); return null; }
-  const draggedId = getVillageVoiceDraggedId(e);
-
-  const slot = e.target.closest("[data-voice-drop-slot]");
-  if (slot && form.contains(slot)) {
-    const emptyFor = slot.dataset.emptySideFor || "";
-    const directBlock = slot.querySelector(".voice-edit-block,[data-preview-block]");
-    const slotBlockId = directBlock?.dataset.voiceBlock || directBlock?.dataset.previewBlock || emptyFor;
-    if (slotBlockId && slotBlockId !== draggedId) {
-      villageVoiceDndLog("target-slot", { draggedId, targetId: slotBlockId, row: slot.dataset.voiceRow, col: slot.dataset.voiceCol, empty: !!emptyFor });
-      return directBlock || slot;
-    }
-  }
-
-  const direct = e.target.closest(".voice-edit-block,[data-preview-block]");
-  const directId = direct?.dataset.voiceBlock || direct?.dataset.previewBlock;
-  if (direct && directId && directId !== draggedId) {
-    villageVoiceDndLog("target-direct", { draggedId, targetId: directId, targetClass: direct.className });
-    return direct;
-  }
-  if (direct && directId === draggedId) {
-    villageVoiceDndLog("target-skip-self", { draggedId, directId });
-  }
-
-  const candidates = Array.from(form.querySelectorAll(".voice-edit-block,[data-preview-block]")).filter(el => {
-    const id = el.dataset.voiceBlock || el.dataset.previewBlock;
-    const r = el.getBoundingClientRect();
-    return id && id !== draggedId && r.width > 0 && r.height > 0;
-  });
-  let best = null;
-  let bestDistance = Infinity;
-  candidates.forEach(el => {
-    const r = el.getBoundingClientRect();
-    const cx = Math.max(r.left, Math.min(e.clientX, r.right));
-    const cy = Math.max(r.top, Math.min(e.clientY, r.bottom));
-    const d = Math.hypot(e.clientX - cx, e.clientY - cy);
-    if (d < bestDistance) { best = el; bestDistance = d; }
-  });
-  const bestId = best?.dataset.voiceBlock || best?.dataset.previewBlock;
-  if (bestDistance < 420) {
-    villageVoiceDndLog("target-nearest", { draggedId, targetId: bestId, distance: Math.round(bestDistance), candidateCount: candidates.length });
-    return best;
-  }
-  villageVoiceDndLog("target-rejected", { reason: "no target within 420px", draggedId, nearestTargetId: bestId, nearestDistance: Math.round(bestDistance), candidateCount: candidates.length });
-  return null;
+  if (!form || !e?.target || !form.contains(e.target)) return null;
+  return e.target.closest?.("[data-preview-block], [data-voice-block], [data-voice-drop-slot]") || null;
 }
 
-function clearVillageVoiceDropMarkers() {
-  document.querySelectorAll(".voice-edit-block.drop-left,.voice-edit-block.drop-right,.voice-edit-block.drop-above,.voice-edit-block.drop-below,.voice-block.drop-left,.voice-block.drop-right,.voice-block.drop-above,.voice-block.drop-below,.voice-layout-slot.drop-left,.voice-layout-slot.drop-right,.voice-layout-slot.drop-above,.voice-layout-slot.drop-below").forEach(el => el.classList.remove("drop-left","drop-right","drop-above","drop-below"));
+function getVillageVoiceDndChoice(e) {
+  const direct = e?.target?.closest?.("[data-voice-dnd-choice]");
+  if (direct) return direct;
+  if (!state.villageVoiceRearrangeMode) return null;
+  if (!state.villageVoicePickedBlock && !state.villageVoiceDraggedBlock && !window.__vvPointerRearrange) return null;
+  if (!Number.isFinite(e?.clientX) || !Number.isFinite(e?.clientY)) return null;
+  return getVillageVoiceChoiceAtPoint(e.clientX, e.clientY);
+}
+
+function ensureVillageVoiceCursorRing() {
+  let ring = document.querySelector("[data-voice-dnd-cursor-ring]");
+  if (!ring) {
+    ring = document.createElement("div");
+    ring.className = "voice-dnd-cursor-ring";
+    ring.dataset.voiceDndCursorRing = "1";
+    ring.innerHTML = `<span></span>`;
+    document.body.appendChild(ring);
+  }
+  return ring;
+}
+
+function updateVillageVoiceCursorRing(e) {
+  if (!state.villageVoiceRearrangeMode) return;
+  if (!state.villageVoicePickedBlock && !state.villageVoiceDraggedBlock && !window.__vvPointerRearrange) return;
+  if (!e || !Number.isFinite(e.clientX) || !Number.isFinite(e.clientY) || (e.clientX === 0 && e.clientY === 0)) return;
+  const ring = ensureVillageVoiceCursorRing();
+  ring.style.left = `${Math.round(e.clientX)}px`;
+  ring.style.top = `${Math.round(e.clientY)}px`;
+  ring.classList.add("visible");
+}
+
+function hideVillageVoiceCursorRing() {
+  document.querySelector("[data-voice-dnd-cursor-ring]")?.remove();
+}
+
+function selectVillageVoiceBlockForRearrange(blockId, pointerEvent = null) {
+  if (!state.villageVoiceRearrangeMode || !blockId) return false;
+  state.villageVoicePickedBlock = blockId;
+  state.villageVoiceDraggedBlock = blockId;
+  document.querySelectorAll("[data-preview-block]").forEach(el => {
+    el.classList.toggle("voice-preview-selected", el.dataset.previewBlock === blockId);
+    el.setAttribute("draggable", "false");
+  });
+  clearVillageVoiceDropMarkers(true);
+  renderVillageVoiceDropChoices(null, blockId);
+  if (pointerEvent) updateVillageVoiceCursorRing(pointerEvent);
+  return true;
+}
+
+function clearVillageVoicePickedBlock() {
+  state.villageVoiceRearrangeMode = false;
+  state.villageVoicePickedBlock = "";
+  state.villageVoiceDraggedBlock = "";
+  window.__vvPointerRearrange = null;
+  window.__vvNaturalTargets = [];
+  window.__vvNaturalBaseSegments = null;
+  document.querySelectorAll("[data-preview-block]").forEach(el => {
+    el.classList.remove("voice-preview-selected", "voice-drop-preview-moving");
+    el.setAttribute("draggable", "false");
+  });
+  hideVillageVoiceCursorRing();
+  document.querySelector("[data-vv-natural-drop-hint]")?.remove();
+  document.querySelector("[data-voice-dnd-choice-layer]")?.remove();
+  try { vvNaturalRestoreCurrentPreview(); } catch (_) {}
+  clearVillageVoiceDropMarkers();
+}
+
+function renderVillageVoiceDropChoices(target, draggedId) {
+  if (!draggedId || !state.villageVoiceRearrangeMode) return;
+  window.__vvNaturalBaseSegments = vvNaturalBaseSegments();
+  window.__vvNaturalTargets = [];
+  document.querySelector("[data-voice-dnd-choice-layer]")?.remove();
+  vvNaturalEnsureDropHint();
+  const preview = document.querySelector(".voice-flyer-preview");
+  if (!preview) return;
+  preview.querySelectorAll("[data-vv-natural-full-seg]").forEach(full => {
+    const seg = Number(full.dataset.vvNaturalFullSeg);
+    const r = full.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const gap = 12;
+    const colW = (r.width - gap) / 2;
+    const y = r.top + r.height / 2;
+    window.__vvNaturalTargets.push({ kind: "fullRow", slot: "l", seg, index: 0, y, box: { left: r.left, top: r.top, width: colW, height: r.height } });
+    window.__vvNaturalTargets.push({ kind: "fullRow", slot: "c", seg, index: 0, y, box: { left: r.left, top: r.top, width: r.width, height: r.height } });
+    window.__vvNaturalTargets.push({ kind: "fullRow", slot: "r", seg, index: 0, y, box: { left: r.left + colW + gap, top: r.top, width: colW, height: r.height } });
+  });
+  preview.querySelectorAll("[data-vv-natural-col-seg]").forEach(col => {
+    const seg = Number(col.dataset.vvNaturalColSeg);
+    const baseSeg = (window.__vvNaturalBaseSegments || [])[seg] || { left: [], right: [] };
+    const r = col.getBoundingClientRect();
+    const leftStack = col.querySelector('[data-vv-natural-stack][data-vv-natural-side="left"]')?.getBoundingClientRect();
+    const rightStack = col.querySelector('[data-vv-natural-stack][data-vv-natural-side="right"]')?.getBoundingClientRect();
+    if (!leftStack || !rightStack || !r.width) return;
+    const maxRows = Math.max(baseSeg.left?.length || 0, baseSeg.right?.length || 0);
+    const rowBoundaryY = (i) => {
+      const prev = Array.from(col.querySelectorAll(`[data-vv-natural-index="${i - 1}"]`)).map(el => el.getBoundingClientRect());
+      const next = Array.from(col.querySelectorAll(`[data-vv-natural-index="${i}"]`)).map(el => el.getBoundingClientRect());
+      if (prev.length && next.length) return (Math.max(...prev.map(x => x.bottom)) + Math.min(...next.map(x => x.top))) / 2;
+      if (next.length) return Math.max(r.top + 18, Math.min(...next.map(x => x.top)) - 12);
+      if (prev.length) return Math.min(r.bottom + 28, Math.max(...prev.map(x => x.bottom)) + 18);
+      return r.top + 42;
+    };
+    for (let i = 0; i <= maxRows; i++) {
+      const y = rowBoundaryY(i);
+      window.__vvNaturalTargets.push({ kind: "columnRow", slot: "l", seg, index: i, y, box: { left: leftStack.left, top: y - 34, width: leftStack.width, height: 68 } });
+      window.__vvNaturalTargets.push({ kind: "columnRow", slot: "c", seg, index: i, y, box: { left: leftStack.left, top: y - 28, width: rightStack.right - leftStack.left, height: 56 } });
+      window.__vvNaturalTargets.push({ kind: "columnRow", slot: "r", seg, index: i, y, box: { left: rightStack.left, top: y - 34, width: rightStack.width, height: 68 } });
+    }
+  });
+  const pr = preview.getBoundingClientRect();
+  const last = Array.from(window.__vvNaturalTargets).sort((a, b) => (b.box?.top || 0) - (a.box?.top || 0))[0];
+  const endTop = last ? Math.max(last.box.top + last.box.height + 12, pr.bottom - 32) : pr.top + 80;
+  window.__vvNaturalTargets.push({ kind: "end", slot: "c", seg: (window.__vvNaturalBaseSegments || []).length, index: 0, y: endTop + 35, box: { left: pr.left + 18, top: endTop, width: Math.max(120, pr.width - 36), height: 70 } });
+}
+
+function vvNaturalChooseTarget(x, y) {
+  const preview = document.querySelector(".voice-flyer-preview");
+  const pr = preview?.getBoundingClientRect();
+  if (!pr || x < pr.left || x > pr.right || y < pr.top || y > pr.bottom + 160) return null;
+  const targets = window.__vvNaturalTargets || [];
+  const rows = targets.filter(t => t.slot === "c").sort((a, b) => Math.abs(y - a.y) - Math.abs(y - b.y));
+  const row = rows[0];
+  if (!row || Math.abs(y - row.y) > 130) return null;
+  const center = targets.find(t => t.kind === row.kind && t.seg === row.seg && t.index === row.index && t.slot === "c") || row;
+  const rel = (x - center.box.left) / Math.max(center.box.width, 1);
+  const slot = rel < 0.36 ? "l" : (rel > 0.64 ? "r" : "c");
+  const picked = targets.find(t => t.kind === row.kind && t.seg === row.seg && t.index === row.index && t.slot === slot) || center;
+  return picked;
+}
+
+function getVillageVoiceChoiceAtPoint(x, y) {
+  const t = vvNaturalChooseTarget(x, y);
+  vvNaturalShowDropHint(t);
+  if (!t) return null;
+  const placement = `natural:${vvNaturalEncode(t)}`;
+  return { dataset: { targetId: "__natural", placement }, __vvNaturalTarget: t };
+}
+
+function makeVillageVoiceNaturalChoice(target) {
+  if (!target) return null;
+  return { dataset: { targetId: "__natural", placement: `natural:${vvNaturalEncode(target)}` }, __vvNaturalTarget: target };
+}
+
+function vvNaturalEnsureDropHint() {
+  let hint = document.querySelector("[data-vv-natural-drop-hint]");
+  if (!hint) {
+    hint = document.createElement("div");
+    hint.className = "vv-natural-drop-hint";
+    hint.dataset.vvNaturalDropHint = "1";
+    document.body.appendChild(hint);
+  }
+  return hint;
+}
+function vvNaturalShowDropHint(t) {
+  // v155: natural dragging uses the live preview only; no extra visual drop indicators.
+  document.querySelector("[data-vv-natural-drop-hint]")?.remove();
+}
+function vvNaturalRestoreCurrentPreview() {
+  const grid = document.querySelector(".voice-dynamic-grid");
+  if (!grid) return;
+  const draft = currentVillageVoiceDraft();
+  grid.classList.remove("vv-natural-previewing");
+  grid.innerHTML = renderVillageVoicePreviewRowsMasonry(normalizeVillageVoiceLayout(draft), draft);
+}
+
+function previewVillageVoiceDropLayout(dragId, targetId, placement) {
+  if (!dragId || !placement || !String(placement).startsWith("natural:")) return;
+  const target = vvNaturalDecode(placement);
+  if (!target) return;
+  const grid = document.querySelector(".voice-dynamic-grid");
+  if (!grid) return;
+  const draft = currentVillageVoiceDraft();
+  grid.classList.add("vv-natural-previewing");
+  const rows = vvNaturalRowsAfterMove(dragId, target);
+  grid.innerHTML = renderVillageVoicePreviewRowsMasonry(rows, draft);
+  grid.querySelector(`[data-preview-block="${CSS.escape(dragId)}"]`)?.classList.add("voice-drop-preview-moving");
+}
+
+function restoreVillageVoicePreviewAfterDropHover() {
+  document.querySelector("[data-vv-natural-drop-hint]")?.classList.remove("on", "left", "right", "center");
+  if (window.__vvPointerRearrange || state.villageVoiceDraggedBlock) vvNaturalRestoreCurrentPreview();
+  document.querySelectorAll(".voice-drop-preview-moving").forEach(el => el.classList.remove("voice-drop-preview-moving"));
+}
+
+function applyVillageVoiceChoiceDrop(choice, explicitDraggedId = "") {
+  if (!choice || !state.villageVoiceRearrangeMode) return false;
+  const draggedId = explicitDraggedId || state.villageVoicePickedBlock || state.villageVoiceDraggedBlock || "";
+  const place = choice.dataset?.placement || "";
+  const target = choice.__vvNaturalTarget || (place.startsWith("natural:") ? vvNaturalDecode(place) : null);
+  if (!draggedId || !target) return false;
+  let moved = false;
+  try {
+    const form = document.getElementById("villageVoiceForm");
+    if (form) {
+      try { updateVillageVoiceDraftFromForm(form); }
+      catch (formErr) { console.warn("Village Voice form sync skipped during natural rearrange drop", formErr); }
+    }
+    const draft = currentVillageVoiceDraft();
+    const before = normalizeVillageVoiceLayout(draft);
+    const rows = vvNaturalRowsAfterMove(draggedId, target);
+    moved = JSON.stringify(cleanVillageVoiceLayoutRows(before)) !== JSON.stringify(rows);
+    if (moved) setVillageVoiceLayoutAfterDrop(draft, rows);
+    else showToast("That block is already in that position.");
+  } catch (err) {
+    console.error("Village Voice natural rearrange drop failed", err, { draggedId, target });
+    showToast("That drop did not work. Try again.");
+  } finally {
+    window.__vvPointerRearrange = null;
+    window.__vvNaturalTargets = [];
+    window.__vvNaturalBaseSegments = null;
+    state.villageVoiceRearrangeMode = false;
+    state.villageVoicePickedBlock = "";
+    state.villageVoiceDraggedBlock = "";
+    hideVillageVoiceCursorRing();
+    document.querySelector("[data-vv-natural-drop-hint]")?.remove();
+    document.querySelector("[data-voice-dnd-choice-layer]")?.remove();
+  }
+  return moved;
+}
+
+function clearVillageVoiceDropMarkers(removeChoices = true) {
+  document.querySelectorAll(".voice-edit-block.drop-left,.voice-edit-block.drop-right,.voice-edit-block.drop-above,.voice-edit-block.drop-below,.voice-block.drop-left,.voice-block.drop-right,.voice-block.drop-above,.voice-block.drop-below,.voice-layout-slot.drop-left,.voice-layout-slot.drop-right,.voice-layout-slot.drop-above,.voice-layout-slot.drop-below,.voice-drop-preview-moving").forEach(el => el.classList.remove("drop-left", "drop-right", "drop-above", "drop-below", "voice-drop-preview-moving"));
+  document.querySelector("[data-vv-natural-drop-hint]")?.remove();
+  if (removeChoices) document.querySelector("[data-voice-dnd-choice-layer]")?.remove();
 }
 
 function getHomeDropCard(e) {
@@ -4984,6 +5786,7 @@ function updatePrintableDraftFromForm(kind, form) {
     textColor: getLastFormFieldValue(form, `[data-block-text-color="${block.id}"]`, block.textColor || "#1f2f2a"),
     borderStyle: getLastFormFieldValue(form, `[data-block-border-style="${block.id}"]`, block.borderStyle || "none"),
     borderColor: getLastFormFieldValue(form, `[data-block-border-color="${block.id}"]`, block.borderColor || "#2f6f63"),
+    columnMode: getLastFormFieldValue(form, `[data-block-column-mode="${block.id}"]`, block.columnMode || "auto") || "auto",
     functionType: form.querySelector(`[data-block-function="${block.id}"]`)?.value || block.functionType || "manual",
     textStyle: normalizeVillageVoiceTextStyle({
       fontFamily: form.querySelector(`[data-block-${block.id}-font-family]`)?.value || block.textStyle?.fontFamily,
@@ -5228,7 +6031,7 @@ async function saveWeeklyThemes(form) {
     letterlands,
     seedlingsValues,
     ideasEvents,
-    letterlandSpriteSheet: getLetterlandSpriteSheetRefFromForm(form),
+    letterlandSpriteSheet: await getLetterlandSpriteSheetRefForSave(form),
     letterlandSpriteRows: form.letterlandSpriteRows?.value || "5",
     letterlandSpriteCols: form.letterlandSpriteCols?.value || "6",
     letterlandSpriteWidth: form.letterlandSpriteWidth?.value || "",
@@ -5273,24 +6076,218 @@ function applyWeeklyThemeImportToForm(form, payload) {
 
 async function updateSelfProfile(form) {
   if (!state.session?.uid) throw new Error("No user is logged in.");
-  const payload = {
-    usedName: form.usedName?.value?.trim() || state.session.usedName || "",
-    profileImageData: form.profileImageData?.value || state.session.profileImageData || "",
-    educationList: collectEducationEntries(form),
-    education: collectEducationEntries(form).map(educationDisplayText).join("; "),
-    earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
-    whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
-    birthday: form.birthday?.value || "",
-    updatedAt: serverTimestamp()
-  };
+  const section = form.dataset.profileSection || state.modal?.section || "details";
+  const payload = { updatedAt: serverTimestamp() };
+  if (section === "education") {
+    const educationList = collectEducationEntries(form);
+    payload.educationList = educationList;
+    payload.education = educationList.map(educationDisplayText).join("; ");
+  } else if (section === "story") {
+    payload.whyEarlyEducation = form.whyEarlyEducation?.value?.trim() || "";
+  } else if (section === "likes") {
+    payload.whatILike = collectWhatILike(form);
+  } else {
+    payload.usedName = form.usedName?.value?.trim() || state.session.usedName || "";
+    payload.profileImageData = form.profileImageData?.value || state.session.profileImageData || "";
+    payload.earlyEducationStart = form.earlyEducationStart?.value?.trim() || "";
+    payload.birthday = collectBirthdayFromForm(form);
+  }
+  const wasOnboarding = isOnboardingRequired(state.session);
   await updateDoc(doc(db, "users", state.session.uid), payload);
-  state.session = { ...state.session, ...payload };
-  state.users = state.users.map(u => u.uid === state.session.uid ? { ...u, ...payload } : u);
+  state.session = await readUser(state.session.uid);
+  state.users = state.users.map(u => u.uid === state.session.uid ? { ...u, ...state.session } : u);
   state.modal = null;
+  if (wasOnboarding && isOnboardingComplete(state.session)) {
+    await updateDoc(doc(db, "users", state.session.uid), { onboardingRequired: false, pinResetRequired: false, updatedAt: serverTimestamp() });
+    state.session = await readUser(state.session.uid);
+    state.users = state.users.map(u => u.uid === state.session.uid ? { ...u, ...state.session } : u);
+    showToast("Onboarding complete.");
+    renderHome();
+    return;
+  }
   showToast("Profile updated.");
-  renderCurrentView();
+  if (wasOnboarding) renderProfileHome(); else renderCurrentView();
 }
 
+
+
+
+function renderOnboardingPage() {
+  state.currentView = "onboarding";
+  const u = state.session || {};
+  const step = Math.max(0, Math.min(Number(state.onboardingStep || 0), 3));
+  const stepLabels = ["Confirm Info", "Birthday", "Education + Story", "What I Like"];
+  const schools = (u.schoolIds || (u.schoolId ? [u.schoolId] : []));
+  const schoolNames = schools.map(id => state.schools.find(s => s.id === id)?.name || id).filter(Boolean);
+  let body = "";
+  if (step === 0) {
+    body = `<div class="grid two"><label>First Name<input name="firstName" required value="${escapeHtml(u.firstName || "")}"></label><label>Last Name<input name="lastName" required value="${escapeHtml(u.lastName || "")}"></label></div><label>Used Name<input name="usedName" required placeholder="What should people call you?" value="${escapeHtml(u.usedName || "")}"></label><div><strong>School / Location</strong><p class="helper">Current: ${escapeHtml(schoolNames.join(", ") || "Not set")}</p><div class="grid two" style="margin-top:.5rem;">${state.schools.map(school => `<label style="display:flex;align-items:center;gap:.5rem;"><input style="width:auto;" type="checkbox" name="schoolIds" value="${school.id}" ${schools.includes(school.id) ? "checked" : ""}> ${escapeHtml(school.name)} (${escapeHtml(school.code || "")})</label>`).join("")}</div></div>`;
+  } else if (step === 1) {
+    body = `<p class="helper">Choose your birthday from dropdowns. The year starts near age 18 so it is quicker to scroll.</p>${renderBirthdayDropdowns(u.birthday || "")}`;
+  } else if (step === 2) {
+    body = `${renderEducationBuilder(u)}<label>Why I Chose Childcare<textarea name="whyEarlyEducation" rows="5" placeholder="What made you choose childcare?">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>`;
+  } else {
+    body = `<p class="helper">Add the favorites families and leaders may need for your What I Like page.</p>${renderWhatILikeFields(u)}`;
+  }
+  const missing = getOnboardingMissingItems(u);
+  $app.innerHTML = pageShell(`
+    <section class="onboarding-page onboarding-slider-page">
+      <div class="card onboarding-hero-card">
+        <p class="eyebrow">Onboarding</p>
+        <h1>Welcome to OVA!</h1>
+        <p>Complete each step to finish setting up your profile.</p>
+      </div>
+      <div class="onboarding-slide-dots">${stepLabels.map((label, i) => `<button type="button" class="${i === step ? "active" : i < step ? "done" : ""}" data-onboarding-go-step="${i}">${i < step ? "✓" : i + 1} ${escapeHtml(label)}</button>`).join("")}</div>
+      <form class="card onboarding-step-card onboarding-slide-card" id="onboardingStepForm" data-onboarding-step="${step}">
+        <div class="onboarding-step-head"><span class="onboarding-check">${step + 1}</span><div><h2>${escapeHtml(stepLabels[step])}</h2><p class="helper">${step === 0 ? "Confirm this information or edit it before moving on." : "Save this step to continue."}</p></div></div>
+        ${body}
+        ${modalErrorHtml()}
+        <div class="actions sticky-modal-actions">
+          ${step > 0 ? `<button type="button" class="secondary" data-onboarding-prev>Back</button>` : ""}
+          <button>${step === 3 ? "Finish Onboarding" : step === 0 ? "Confirm & Continue" : "Save & Continue"}</button>
+        </div>
+      </form>
+      ${missing.length ? `<div class="card missing-box"><strong>Still needed:</strong><ul>${missing.map(m => `<li>${escapeHtml(m)}</li>`).join("")}</ul></div>` : ""}
+    </section>
+    ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
+    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+  `);
+}
+
+async function saveOnboardingStep(form) {
+  if (!state.session?.uid) throw new Error("No user is logged in.");
+  const step = Number(form.dataset.onboardingStep || 0);
+  const payload = { updatedAt: serverTimestamp() };
+  if (step === 0) {
+    const firstName = form.firstName.value.trim();
+    const lastName = form.lastName.value.trim();
+    const usedName = form.usedName.value.trim();
+    const schoolIds = getFormSchoolIds(form);
+    if (!firstName || !lastName || !usedName) throw new Error("First name, last name, and used name are required.");
+    if (!schoolIds.length) throw new Error("Select at least one location.");
+    payload.firstName = firstName;
+    payload.lastName = lastName;
+    payload.displayName = `${firstName} ${lastName.slice(0, 1)}.`;
+    payload.usedName = usedName;
+    payload.schoolIds = schoolIds;
+  } else if (step === 1) {
+    const birthday = collectBirthdayFromForm(form);
+    if (!birthday) throw new Error("Choose your full birthday.");
+    payload.birthday = birthday;
+  } else if (step === 2) {
+    const educationList = collectEducationEntries(form);
+    const why = form.whyEarlyEducation?.value?.trim() || "";
+    if (!educationList.length) throw new Error("Add at least one education item.");
+    if (!why) throw new Error("Add why you chose childcare.");
+    payload.educationList = educationList;
+    payload.education = educationList.map(educationDisplayText).join("; ");
+    payload.whyEarlyEducation = why;
+  } else {
+    const likes = collectWhatILike(form);
+    if (!Object.values(likes).some(v => Array.isArray(v) ? v.length : String(v || "").trim())) throw new Error("Add at least one What I Like item.");
+    payload.whatILike = likes;
+  }
+  await updateDoc(doc(db, "users", state.session.uid), payload);
+  state.session = await readUser(state.session.uid);
+  state.users = state.users.map(u => u.uid === state.session.uid ? { ...u, ...state.session } : u);
+  if (step < 3) {
+    state.onboardingStep = step + 1;
+    renderOnboardingPage();
+    return;
+  }
+  if (isOnboardingComplete(state.session)) {
+    await updateDoc(doc(db, "users", state.session.uid), { onboardingRequired: false, pinResetRequired: false, updatedAt: serverTimestamp() });
+    state.session = await readUser(state.session.uid);
+    showToast("Onboarding complete.");
+    renderHome();
+  } else {
+    showToast("Saved. Finish the remaining items to complete onboarding.");
+    renderOnboardingPage();
+  }
+}
+
+async function completeOnboardingIfReady() {
+  const fresh = await readUser(state.session.uid);
+  state.session = fresh;
+  if (!isOnboardingComplete(fresh)) {
+    showToast("Finish the missing onboarding items first.");
+    renderOnboardingPage();
+    return;
+  }
+  await updateDoc(doc(db, "users", fresh.uid), { onboardingRequired: false, pinResetRequired: false, updatedAt: serverTimestamp() });
+  state.session = await readUser(fresh.uid);
+  showToast("Onboarding complete.");
+  renderHome();
+}
+
+function renderProfileHome() {
+  state.currentView = "profile";
+  const u = state.session || {};
+  const displayName = makeDisplayName(u);
+  const schools = (u.schoolIds || (u.schoolId ? [u.schoolId] : []))
+    .map(id => state.schools.find(s => s.id === id)?.name || state.schools.find(s => s.id === id)?.schoolName || id)
+    .filter(Boolean);
+  const education = normalizeEducationList(u.educationList || u.education);
+  const eduHtml = education.length
+    ? education.map(ed => `<div class="profile-mini-row"><strong>${escapeHtml(educationDisplayText(ed) || "Education")}</strong><span>${escapeHtml(ed.certificate || ed.field || "")}</span></div>`).join("")
+    : `<p class="empty">No education added yet.</p>`;
+
+  $app.innerHTML = pageShell(`
+    <section class="profile-homepage">
+      <div class="profile-hero-card card">
+        <div class="profile-hero-photo">
+          ${u.profileImageData ? `<img src="${u.profileImageData}" alt="${escapeHtml(displayName)}" />` : `<span>${escapeHtml((u.firstName || "?").slice(0,1))}</span>`}
+        </div>
+        <div class="profile-hero-copy">
+          <p class="eyebrow">My Profile</p>
+          <h2>${escapeHtml(displayName)}</h2>
+          <p>${escapeHtml(u.teamPosition || getPrimaryRole(u) || "Village Vibes user")}</p>
+          <div class="profile-chip-row">
+            <span>${escapeHtml(getPrimaryRole(u))}</span>
+            ${schools.map(school => `<span>${escapeHtml(school)}</span>`).join("")}
+          </div>
+        </div>
+        <div class="profile-hero-actions">
+          <button type="button" data-open-self-profile-editor data-profile-section="details">Update Profile</button>
+          <button type="button" class="secondary" data-action="home">Back Home</button>
+        </div>
+      </div>
+
+      ${isOnboardingRequired(u) ? `<div class="card onboarding-profile-progress"><div class="tool-heading-row"><div><p class="eyebrow">Onboarding</p><h2>Finish setting up your profile</h2><p class="helper">Update each section below. Checks update as soon as each section is saved.</p></div><button type="button" class="secondary small" data-action="onboarding">Back to Onboarding</button></div>${getOnboardingStatusHtml(u)}</div>` : ""}
+
+      <div class="profile-card-grid">
+        <article class="card profile-info-card">
+          <div class="profile-card-title"><h3>Profile Details</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="details">Edit</button></div>
+          <div class="profile-detail-list">
+            <div><small>Used Name</small><strong>${escapeHtml(u.usedName || "Not set")}</strong></div>
+            <div><small>Birthday</small><strong>${escapeHtml(u.birthday || "Not set")}</strong></div>
+            <div><small>Early Education Start</small><strong>${escapeHtml(u.earlyEducationStart || "Not set")}</strong></div>
+          </div>
+        </article>
+
+        <article class="card profile-info-card">
+          <div class="profile-card-title"><h3>Education</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="education">Edit</button></div>
+          <div class="profile-mini-list">${eduHtml}</div>
+        </article>
+
+        <article class="card profile-info-card wide-profile-card">
+          <div class="profile-card-title"><h3>Why I Chose Early Education</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="story">Edit</button></div>
+          <p class="profile-long-text">${escapeHtml(u.whyEarlyEducation || "Add a short answer here so printables and leader tools can use it later.")}</p>
+        </article>
+        <article class="card profile-info-card wide-profile-card">
+          <div class="profile-card-title"><h3>What I Like</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="likes">Edit</button></div>
+          ${renderWhatILikeDisplay(u)}
+        </article>
+      </div>
+    </section>
+    ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
+    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+  `);
+}
 
 function renderBrandingSettingsTab() {
   const logo = state.appSettings?.ovaLogoData || "";
@@ -5602,6 +6599,8 @@ function renderSystemAdmin() {
 
     </section>
     ${state.modal ? renderModal() : ""}
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
   `);
 }
@@ -5677,13 +6676,13 @@ function renderModal() {
   if (state.modal.type === "denyMoneyRequest") {
     return `
       <div class="modal-backdrop"><form class="modal card" id="denyMoneyRequestForm">
-        <h2>${state.modal.stage === "pendingOwner" ? "Return PO to DOSO" : "Deny request"}</h2>
-        <p class="helper">${state.modal.stage === "pendingOwner" ? "Add a reason so the DOSO knows what to change before sending it back to owners." : "Add a note so the requester knows what to change before resubmitting."}</p>
+        <h2>Deny request</h2>
+        <p class="helper">Add a note so the leader knows what to change before resubmitting.</p>
         <label>Reason
           <textarea name="denialNote" required placeholder="What needs to be fixed?"></textarea>
         </label>
         ${modalErrorHtml()}
-        <div class="actions"><button class="danger">${state.modal.stage === "pendingOwner" ? "Return to DOSO" : "Deny Request"}</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+        <div class="actions"><button class="danger">Deny Request</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
       </form></div>`;
   }
 
@@ -5812,7 +6811,7 @@ function renderModal() {
 
           <div class="actions">
             <button>${isEdit ? "Save Changes" : "Create Budget Code"}</button>
-            ${isEdit ? `<button type="button" class="danger" data-delete-budget-code="${budgetCode.id}">Delete Budget Code</button>` : ""}
+            ${isEdit ? `<button type="button" class="danger" data-delete-budget-code="${budgetCode.id}">Hide</button>` : ""}
             <button type="button" class="secondary" data-close-modal>Cancel</button>
           </div>
         </form>
@@ -5916,14 +6915,43 @@ if (state.modal.type === "addMoneyRequestType" || state.modal.type === "editMone
     return `<div class="modal-backdrop"><form class="modal card" id="nukeCampusCareRequestsForm" autocomplete="off"><h2>Nuke all Campus Cares requests?</h2><p class="helper">This will delete every Campus Cares request. Enter your password to confirm.</p>${passwordFieldHtml("password", "Password")}${modalErrorHtml()}<div class="actions"><button class="danger">Delete All Campus Cares Requests</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
   }
 
+if (state.modal.type === "publicWhatILike") {
+    const u = state.modal.user || {};
+    return `<div class="modal-backdrop"><div class="modal card profile-edit-modal public-likes-modal">
+      <div class="tool-heading-row"><h2>${escapeHtml(getUserUsedName(u))}</h2><button type="button" class="secondary small" data-close-modal>Close</button></div>
+      <p class="helper">${escapeHtml(u.teamPosition || "Oak Village Academy Team Member")}</p>
+      ${renderWhatILikeDisplay(u, true)}
+    </div></div>`;
+  }
+
+if (state.modal.type === "coreVoteRound") {
+  return renderCoreVoteRoundModal(state.modal.monthKey);
+}
+
+if (state.modal.type === "coreNominate") {
+  const u = getCoreUser(state.modal.uid);
+  return `<div class="modal-backdrop"><form class="modal card wide-modal" id="coreNominationForm"><h2>Nominate ${escapeHtml(getUserUsedName(u)||"Team Member")}</h2><input type="hidden" name="monthKey" value="${escapeHtml(state.modal.monthKey)}" /><input type="hidden" name="candidateUid" value="${escapeHtml(state.modal.uid)}" /><label>Reason<textarea name="reason" required placeholder="Why should this person be Core Count Champion?"></textarea></label><div class="actions"><button>Lock In Nominee</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+}
+if (state.modal.type === "coreVote") {
+  const u = getCoreUser(state.modal.uid);
+  return `<div class="modal-backdrop"><form class="modal card wide-modal" id="coreVoteForm"><h2>Vote for ${escapeHtml(getUserUsedName(u)||"Team Member")}</h2><input type="hidden" name="monthKey" value="${escapeHtml(state.modal.monthKey)}" /><input type="hidden" name="candidateUid" value="${escapeHtml(state.modal.uid)}" /><label>Reason<textarea name="reason" required placeholder="Add your reason for supporting this nominee."></textarea></label><div class="actions"><button>Save Vote</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+}
+
 if (state.modal.type === "selfProfile") {
     const u = state.modal.user || state.session || {};
-    return `
-      <div class="modal-backdrop"><form class="modal card" id="selfProfileForm">
-        <h2>My Profile</h2>
-        <p class="helper">This profile information can be used for Printables like Teacher Bio.</p>
+    const section = state.modal.section || "details";
+    const title = section === "education" ? "Edit Education" : section === "story" ? "Edit Early Education Story" : section === "likes" ? "Edit What I Like" : "Edit Profile Details";
+    let body = "";
+    if (section === "education") {
+      body = `${renderEducationBuilder(u)}`;
+    } else if (section === "story") {
+      body = `<label>Why I Chose Early Education <textarea name="whyEarlyEducation" rows="6">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>`;
+    } else if (section === "likes") {
+      body = renderWhatILikeFields(u);
+    } else {
+      body = `
         <div class="grid two">
-          <label>Used Name <input name="usedName" placeholder="Ms. Peggy" value="${escapeHtml(u.usedName || "")}" /></label>
+          <label>Used Name <input name="usedName" placeholder="What should people call you?" value="${escapeHtml(u.usedName || "")}" /></label>
           <label>Profile Picture
             <input name="profilePicture" type="file" accept="image/*" data-user-profile-image-input />
             <input type="hidden" name="profileImageData" value="${u.profileImageData || ""}" />
@@ -5942,93 +6970,86 @@ if (state.modal.type === "selfProfile") {
             </div>
             <div class="actions"><button type="button" data-apply-profile-crop>Use This Crop</button><button type="button" class="secondary" data-cancel-profile-crop>Cancel Crop</button></div>
           </div>` : ""}
-        ${renderEducationBuilder(u)}
         <div class="grid two">
           <label>Started Working In Early Childhood Education <input name="earlyEducationStart" value="${escapeHtml(u.earlyEducationStart || "")}" placeholder="2018 / August 2018" /></label>
-          <label>Birthday <input type="date" name="birthday" value="${escapeHtml(u.birthday || "")}" /></label>
         </div>
-        <label>Why I Chose Early Education <textarea name="whyEarlyEducation" rows="5">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>
-        <div class="actions"><button>Save My Profile</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+        ${renderBirthdayDropdowns(u.birthday || "")}`;
+    }
+    return `
+      <div class="modal-backdrop"><form class="modal card profile-edit-modal wide-profile-modal" id="selfProfileForm" data-profile-section="${escapeHtml(section)}">
+        <h2>${title}</h2>
+        <p class="helper">Update this section of your profile.</p>
+        ${body}
+        <div class="actions sticky-modal-actions"><button>Save Changes</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
       </form></div>`;
   }
 
 if (state.modal.type === "addUser" || state.modal.type === "editUser") {
     const u = state.modal.user || { roles: ["teacher"], schoolIds: [] };
     const isEdit = state.modal.type === "editUser";
-    const roleText = (u.roles || ["teacher"]).join(", ");
     const selectedSchools = u.schoolIds || [];
-    return `
-      <div class="modal-backdrop"><form class="modal card" id="${isEdit ? "editUserForm" : "userForm"}">
-        <h2>${isEdit ? "Edit User" : "Add User"}</h2>
+    const roleKey = getPrimaryRole(u);
+    const isLeaderChecked = roleRequiresPassword(roleKey) || getRosterGroup(u) === "leaders";
+    const positionOptions = ["Unassigned", ...state.positions.map(p => p.name).filter(Boolean).filter(name => name !== "Unassigned")];
+    if (isEdit) {
+      return `
+      <div class="modal-backdrop"><form class="modal card profile-edit-modal" id="editUserForm">
+        <h2>Edit User</h2>
         <div class="grid two">
           <label>First Name <input name="firstName" required value="${u.firstName || ""}" /></label>
           <label>Last Name <input name="lastName" required value="${u.lastName || ""}" /></label>
         </div>
-        <div class="grid two">
-          <label>Used Name <input name="usedName" placeholder="Ms. Peggy" value="${u.usedName || ""}" /></label>
-          <label>Profile Picture
-            <input name="profilePicture" type="file" accept="image/*" data-user-profile-image-input />
-            <input type="hidden" name="profileImageData" value="${u.profileImageData || ""}" />
-          </label>
-        </div>
-        <div class="profile-preview-row">
-          ${u.profileImageData ? `<img class="user-profile-preview" src="${u.profileImageData}" alt="Profile preview" />` : `<div class="user-profile-preview empty">No Photo</div>`}
-          <span class="helper">Used Name is what flyer shortcuts will use, like “Ms. Peggy”.</span>
-        </div>
-        ${u.rawProfileImageData ? `
-          <div class="profile-crop-panel" data-profile-crop-panel>
-            <div class="profile-crop-stage">
-              <img src="${u.rawProfileImageData}" alt="Crop preview" data-profile-crop-img />
-              <div class="profile-crop-circle"></div>
-            </div>
-            <div class="grid three">
-              <label>Zoom<input type="range" min="1" max="3" step="0.05" value="${u.cropZoom || 1.2}" data-profile-crop-zoom /></label>
-              <label>Move Left/Right<input type="range" min="0" max="100" step="1" value="${u.cropX || 50}" data-profile-crop-x /></label>
-              <label>Move Up/Down<input type="range" min="0" max="100" step="1" value="${u.cropY || 50}" data-profile-crop-y /></label>
-            </div>
-            <div class="actions"><button type="button" data-apply-profile-crop>Use This Crop</button><button type="button" class="secondary" data-cancel-profile-crop>Cancel Crop</button></div>
-            <p class="helper">Center the circle around the person. This is what will show in The Village Voice.</p>
-          </div>` : ""}
-        ${renderEducationBuilder(u)}
-        <div class="grid two">
-          <label>Started Working In Early Childhood Education <input name="earlyEducationStart" value="${escapeHtml(u.earlyEducationStart || "")}" placeholder="2018 / August 2018" /></label>
-          <label>Birthday <input type="date" name="birthday" value="${escapeHtml(u.birthday || "")}" /></label>
-        </div>
-        <label>Why I Chose Early Education <textarea name="whyEarlyEducation" rows="4" placeholder="Teacher writes their own answer here.">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>
-        <label>Printable Bio Summary <textarea name="leaderSummary" rows="4" placeholder="Leader-only summary that appears at the bottom of the printable bio without a label.">${escapeHtml(u.leaderSummary || "")}</textarea></label>
-        <div class="grid two">
-          <label>4-Digit PIN <input name="pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" required value="${u.pin || ""}" /></label>
-          <label>Team Position
-            <select name="teamPosition" required>
-              <option value="">Select position...</option>
-              ${state.positions.map(p => `<option value="${p.name}" ${u.teamPosition === p.name ? "selected" : ""}>${p.name}</option>`).join("")}
-            </select>
-          </label>
-        </div>
-        <div class="grid two">
-          <label>Default Campus Cares Building
-            <select name="defaultCampusCareBuildingId">
-              <option value="">No default</option>
-              ${state.campusCareLocations.map(l => `<option value="${l.id}" ${u.defaultCampusCareBuildingId === l.id ? "selected" : ""}>${escapeHtml(l.building)}</option>`).join("")}
-            </select>
-          </label>
-          <label>Default Campus Cares Sublocation <input name="defaultCampusCareSublocation" value="${escapeHtml(u.defaultCampusCareSublocation || "")}" placeholder="Classroom / office" /></label>
-        </div>
+        <label>Used Name <input name="usedName" placeholder="What should people call this person?" value="${u.usedName || ""}" /></label>
+        <label>Team Position
+          <select name="teamPosition" required>
+            ${positionOptions.map(name => `<option value="${escapeHtml(name)}" ${(u.teamPosition || "Unassigned") === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}
+            ${u.teamPosition && !positionOptions.includes(u.teamPosition) ? `<option value="${escapeHtml(u.teamPosition)}" selected>${escapeHtml(u.teamPosition)}</option>` : ""}
+          </select>
+        </label>
         <label>Role
           <select name="role" required>
-            ${state.roles.length ? state.roles.map(r => `<option value="${r.key}" ${getPrimaryRole(u) === r.key ? "selected" : ""}>${r.name}</option>`).join("") : `<option value="teacher">Teacher</option>`}
+            ${state.roles.length ? state.roles.map(r => `<option value="${r.key}" ${roleKey === r.key ? "selected" : ""}>${r.name}</option>`).join("") : `<option value="teacher">Teacher</option><option value="leader">Leader</option>`}
           </select>
         </label>
         <div>
-          <strong>Schools</strong>
+          <strong>Locations</strong>
           <div class="grid two" style="margin-top:.5rem;">
-            ${state.schools.map(s => `<label style="display:flex;align-items:center;gap:.5rem;"><input style="width:auto;" type="checkbox" name="schoolIds" value="${s.id}" ${selectedSchools.includes(s.id) ? "checked" : ""} /> ${s.name} (${s.code})</label>`).join("")}
+            ${state.schools.map(school => `<label style="display:flex;align-items:center;gap:.5rem;"><input style="width:auto;" type="checkbox" name="schoolIds" value="${school.id}" ${selectedSchools.includes(school.id) ? "checked" : ""} /> ${school.name} (${school.code})</label>`).join("")}
           </div>
         </div>
-        <p class="helper">${isEdit ? "Reset PIN sets this user to 0000 and forces them to choose a new PIN next login." : "This uses a secondary Firebase app instance so the admin stays logged in while the new Auth account is created."}</p>
+        <input type="hidden" name="pin" value="${u.pin || "0000"}" />
         <div class="actions">
-          <button>${isEdit ? "Save Changes" : "Save User"}</button>
-          ${isEdit ? `<button type="button" class="secondary" data-reset-pin="${u.uid}">Reset PIN</button><button type="button" class="danger" data-delete-user="${u.uid}">Delete</button>` : ""}
+          <button>Save Changes</button>
+          <button type="button" class="secondary" data-reset-pin="${u.uid}">Reset PIN</button>
+          <button type="button" class="secondary" data-reset-user-onboarding="${u.uid}">Reset User</button>
+          <button type="button" class="danger" data-delete-user="${u.uid}">Delete</button>
+          <button type="button" class="secondary" data-close-modal>Cancel</button>
+        </div>
+      </form></div>`;
+    }
+    return `
+      <div class="modal-backdrop"><form class="modal card profile-edit-modal" id="userForm" autocomplete="off">
+        <h2>Add New Teacher</h2>
+        <p class="helper">Only enter the basics here. The rest of the profile will be completed during onboarding.</p>
+        <div class="grid two">
+          <label>First Name <input name="firstName" required /></label>
+          <label>Last Name <input name="lastName" required /></label>
+        </div>
+        <label>Used Name <input name="usedName" placeholder="What should people call this person?" /></label>
+        <div>
+          <strong>Locations</strong>
+          <div class="grid two" style="margin-top:.5rem;">
+            ${state.schools.map(school => `<label style="display:flex;align-items:center;gap:.5rem;"><input style="width:auto;" type="checkbox" name="schoolIds" value="${school.id}" /> ${school.name} (${school.code})</label>`).join("")}
+          </div>
+        </div>
+        <label class="check-row"><input type="checkbox" name="isLeader" data-new-user-leader-checkbox /> Mark this person as a leader</label>
+        <div class="leader-password-box" data-new-user-leader-password hidden>
+          <p class="helper">Because this creates a leader account, please re-enter your password.</p>
+          ${passwordFieldHtml("leaderPassword", "Your Password", { autocomplete: "new-password" })}
+        </div>
+        ${modalErrorHtml()}
+        <div class="actions">
+          <button>Save User</button>
           <button type="button" class="secondary" data-close-modal>Cancel</button>
         </div>
       </form></div>`;
@@ -6093,9 +7114,1357 @@ async function saveNotificationSettings(form){
   renderNotificationSettings();
 }
 
+
+// Photo Print and Edit — local-only workspace, no Firebase image storage.
+const PHOTO_PRINT_DB_NAME = "ovaPhotoPrintEditLocal";
+const PHOTO_PRINT_STORE = "workspace";
+const PHOTO_PRINT_KEY = "current";
+const PHOTO_PRINT_PAPER_PORTRAIT_W = 816;
+const PHOTO_PRINT_PAPER_PORTRAIT_H = 1056;
+function getPhotoPrintPaperW() { return state.photoPrint?.orientation === "landscape" ? PHOTO_PRINT_PAPER_PORTRAIT_H : PHOTO_PRINT_PAPER_PORTRAIT_W; }
+function getPhotoPrintPaperH() { return state.photoPrint?.orientation === "landscape" ? PHOTO_PRINT_PAPER_PORTRAIT_W : PHOTO_PRINT_PAPER_PORTRAIT_H; }
+const PHOTO_PRINT_DEFAULT_UPLOAD_W = 260;
+const PHOTO_PRINT_DEFAULT_UPLOAD_H = 220;
+
+function defaultPhotoPrintState() {
+  return { photos: [], texts: [], selectedId: "", selectedIds: [], selectedType: "photo", nextZ: 1, loaded: false, zoom: 0.75, orientation: "portrait", guideRows: 1, guideCols: 1, snapGuides: true, textDefaults: { color: "#111111", size: 32, font: "Arial", align: "center", outlineColor: "#000000", outlineWidth: 0 }, textRibbonPos: { x: 330, y: 92 }, duplicatePrompt: null, snapHint: null, history: [], redo: [], clipboard: null };
+}
+
+function openPhotoPrintDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(PHOTO_PRINT_DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(PHOTO_PRINT_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function savePhotoPrintWorkspaceLocal() {
+  try {
+    const dbi = await openPhotoPrintDb();
+    await new Promise((resolve, reject) => {
+      const tx = dbi.transaction(PHOTO_PRINT_STORE, "readwrite");
+      tx.objectStore(PHOTO_PRINT_STORE).put({ photos: state.photoPrint.photos || [], texts: state.photoPrint.texts || [], selectedType: state.photoPrint.selectedType || "photo", nextZ: state.photoPrint.nextZ || 1, zoom: Number(state.photoPrint.zoom || 0.75), orientation: state.photoPrint.orientation || "portrait", guideRows: Number(state.photoPrint.guideRows || 1), guideCols: Number(state.photoPrint.guideCols || 1), snapGuides: state.photoPrint.snapGuides !== false, textDefaults: state.photoPrint.textDefaults || {}, textRibbonPos: state.photoPrint.textRibbonPos || { x: 330, y: 92 }, savedAt: Date.now() }, PHOTO_PRINT_KEY);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    dbi.close();
+  } catch (err) {
+    console.warn("Photo Print local save skipped", err);
+  }
+}
+
+async function loadPhotoPrintWorkspace() {
+  if (state.photoPrint?.loaded) return;
+  state.photoPrint = state.photoPrint || defaultPhotoPrintState();
+  try {
+    const dbi = await openPhotoPrintDb();
+    const data = await new Promise((resolve, reject) => {
+      const tx = dbi.transaction(PHOTO_PRINT_STORE, "readonly");
+      const req = tx.objectStore(PHOTO_PRINT_STORE).get(PHOTO_PRINT_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    dbi.close();
+    if (data?.photos) state.photoPrint = { photos: data.photos || [], texts: data.texts || [], selectedId: "", selectedIds: [], selectedType: "photo", nextZ: data.nextZ || (((data.photos || []).length + (data.texts || []).length || 0) + 1), loaded: true, zoom: Number(data.zoom || state.photoPrint.zoom || 0.75), orientation: data.orientation || "portrait", guideRows: Math.max(1, Math.min(8, Number(data.guideRows || 1))), guideCols: Math.max(1, Math.min(8, Number(data.guideCols || 1))), snapGuides: data.snapGuides !== false, textDefaults: data.textDefaults || { color: "#111111", size: 32, font: "Arial", align: "center", outlineColor: "#000000", outlineWidth: 0 }, textRibbonPos: data.textRibbonPos || { x: 330, y: 92 }, duplicatePrompt: null, snapHint: null, history: [], redo: [], clipboard: null };
+    else state.photoPrint.loaded = true;
+  } catch (err) {
+    console.warn("Photo Print local load skipped", err);
+    state.photoPrint.loaded = true;
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function getSelectedPhotoPrintItem() {
+  return (state.photoPrint.photos || []).find(p => p.id === state.photoPrint.selectedId) || null;
+}
+
+function getSelectedPhotoPrintText() {
+  return (state.photoPrint.texts || []).find(t => t.id === state.photoPrint.selectedId) || null;
+}
+
+function getSelectedPhotoPrintObject() {
+  return getSelectedPhotoPrintItem() || getSelectedPhotoPrintText();
+}
+
+function getAllPhotoPrintObjects() {
+  return [...(state.photoPrint.photos || []), ...(state.photoPrint.texts || [])];
+}
+
+function normalizePhotoPrintZLayers() {
+  const ordered = getAllPhotoPrintObjects().sort((a,b)=>(a.z||0)-(b.z||0));
+  ordered.forEach((item, i) => { item.z = i + 1; });
+  state.photoPrint.nextZ = ordered.length + 1;
+}
+
+function addPhotoPrintTextBox() {
+  const defaults = state.photoPrint.textDefaults || {};
+  const id = crypto.randomUUID();
+  const text = {
+    id,
+    text: "Double click to edit",
+    x: 90,
+    y: 90,
+    w: 320,
+    h: 90,
+    z: ++state.photoPrint.nextZ,
+    rotate: 0,
+    font: defaults.font || "Arial",
+    size: Number(defaults.size || 32),
+    color: defaults.color || "#111111",
+    background: "transparent",
+    align: defaults.align || "center",
+    bold: false,
+    italic: false,
+    underline: false,
+    opacity: 1,
+    lineHeight: 1.15,
+    letterSpacing: 0,
+    outlineColor: defaults.outlineColor || "#000000",
+    outlineWidth: Number(defaults.outlineWidth || 0)
+  };
+  state.photoPrint.texts = state.photoPrint.texts || [];
+  state.photoPrint.texts.push(text);
+  setTimeout(() => { autoSizePhotoTextBox(text); savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); }, 0);
+  setPhotoPrintSelection([id], id);
+  return text;
+}
+
+function renderPhotoTextStyle(t) {
+  const fontFamily = String(t.font || "Arial").replace(/[^a-zA-Z0-9 ,'-]/g, "");
+  return [
+    `font-family:${fontFamily}, sans-serif`,
+    `font-size:${Math.max(8, Number(t.size || 32))}px`,
+    `color:${t.color || "#111111"}`,
+    `background:${t.background || "transparent"}`,
+    `text-align:${t.align || "center"}`,
+    `font-weight:${t.bold ? 800 : 400}`,
+    `font-style:${t.italic ? "italic" : "normal"}`,
+    `text-decoration:${t.underline ? "underline" : "none"}`,
+    `opacity:${Math.max(0.05, Math.min(1, Number(t.opacity || 1)))}`,
+    `line-height:${Math.max(0.75, Number(t.lineHeight || 1.15))}`,
+    `letter-spacing:${Number(t.letterSpacing || 0)}px`,
+    `-webkit-text-stroke:${Math.max(0, Number(t.outlineWidth || 0))}px ${t.outlineColor || "#000000"}`,
+    `text-shadow:${Number(t.outlineWidth || 0) > 0 ? `0 0 ${Math.max(1, Number(t.outlineWidth || 0))}px ${t.outlineColor || "#000000"}` : "none"}`
+  ].join(";");
+}
+
+function renderPhotoTextToolbar(t) {
+  if (!t) return "";
+  return `<div class="photo-float-toolbar photo-text-mini-toolbar" style="left:8px;top:-44px;transform:none;">
+    <button type="button" title="Bring forward" data-photo-text-layer="up">↑</button>
+    <button type="button" title="Send backward" data-photo-text-layer="down">↓</button>
+    <button type="button" title="Duplicate" data-photo-text-duplicate>⧉</button>
+    <button type="button" title="Delete" data-photo-text-delete>×</button>
+  </div>`;
+}
+
+function renderPhotoTextRibbon(t) {
+  if (!t) return "";
+  const fonts = ["Arial", "Georgia", "Times New Roman", "Verdana", "Trebuchet MS", "Comic Sans MS", "Courier New", "Impact"];
+  const sizes = [8,10,12,14,16,18,20,24,28,32,36,44,52,64,72,96,120,160];
+  const pos = state.photoPrint.textRibbonPos || { x: 330, y: 92 };
+  return `<div class="photo-text-ribbon" data-photo-text-ribbon style="left:${Math.max(8, Number(pos.x || 330))}px;top:${Math.max(8, Number(pos.y || 92))}px;">
+    <div class="photo-text-ribbon-drag" data-photo-text-ribbon-drag>Text Options <span>drag</span></div>
+    <div class="photo-text-ribbon-row">
+      <label class="photo-ribbon-text-field">Text <input type="text" value="${escapeHtml(t.text || "")}" data-photo-text-prop="text" /></label>
+      <label>Font <select data-photo-text-prop="font">${fonts.map(f => `<option value="${escapeHtml(f)}" ${t.font===f?'selected':''}>${escapeHtml(f)}</option>`).join("")}</select></label>
+      <label>Size <select data-photo-text-prop="size">${sizes.map(sz => `<option value="${sz}" ${Number(t.size||32)===sz?'selected':''}>${sz}</option>`).join("")}</select></label>
+      <label class="photo-ribbon-color">Color <input type="color" value="${escapeHtml(t.color || '#111111')}" data-photo-text-prop="color"></label>
+      <label class="photo-ribbon-color">Highlight <input type="color" value="${String(t.background || '').startsWith('#') ? escapeHtml(t.background) : '#ffffff'}" data-photo-text-prop="background"></label>
+      <label class="photo-ribbon-color">Outline <input type="color" value="${escapeHtml(t.outlineColor || '#000000')}" data-photo-text-prop="outlineColor"></label>
+      <label>Outline Size <input type="number" min="0" max="20" step="1" value="${Number(t.outlineWidth || 0)}" data-photo-text-prop="outlineWidth"></label>
+      <button type="button" class="${t.bold ? 'primary' : 'secondary'} photo-ribbon-icon" title="Bold" data-photo-text-toggle="bold">B</button>
+      <button type="button" class="${t.italic ? 'primary' : 'secondary'} photo-ribbon-icon italic" title="Italic" data-photo-text-toggle="italic">I</button>
+      <button type="button" class="${t.underline ? 'primary' : 'secondary'} photo-ribbon-icon underline" title="Underline" data-photo-text-toggle="underline">U</button>
+      <div class="photo-ribbon-align">
+        <button type="button" class="${t.align==='left' ? 'primary' : 'secondary'}" title="Align left" data-photo-text-prop="align" value="left">☰</button>
+        <button type="button" class="${t.align==='center' ? 'primary' : 'secondary'}" title="Align center" data-photo-text-prop="align" value="center">☷</button>
+        <button type="button" class="${t.align==='right' ? 'primary' : 'secondary'}" title="Align right" data-photo-text-prop="align" value="right">☰</button>
+      </div>
+      <label>Opacity <input type="range" min="0.05" max="1" step="0.05" value="${Math.max(0.05, Math.min(1, Number(t.opacity || 1)))}" data-photo-text-prop="opacity"></label>
+      <label>Line <input type="number" min="0.75" max="3" step="0.05" value="${Number(t.lineHeight || 1.15)}" data-photo-text-prop="lineHeight"></label>
+      <label>Spacing <input type="number" min="-10" max="30" step="1" value="${Number(t.letterSpacing || 0)}" data-photo-text-prop="letterSpacing"></label>
+      <button type="button" class="secondary" data-photo-text-clear-bg>No Fill</button>
+      <button type="button" class="secondary" data-photo-text-duplicate>Duplicate</button>
+      <button type="button" class="danger" data-photo-text-delete>Delete</button>
+    </div>
+  </div>`;
+}
+
+function renderPhotoTextEditor(t) {
+  if (!t) return "";
+  return `<div class="photo-text-settings">
+    <label>Text<textarea data-photo-text-prop="text" rows="3">${escapeHtml(t.text || "")}</textarea></label>
+    <div class="photo-text-grid">
+      <label>Font<select data-photo-text-prop="font"><option ${t.font==='Arial'?'selected':''}>Arial</option><option ${t.font==='Georgia'?'selected':''}>Georgia</option><option ${t.font==='Times New Roman'?'selected':''}>Times New Roman</option><option ${t.font==='Verdana'?'selected':''}>Verdana</option><option ${t.font==='Trebuchet MS'?'selected':''}>Trebuchet MS</option><option ${t.font==='Comic Sans MS'?'selected':''}>Comic Sans MS</option></select></label>
+      <label>Size<input type="number" min="8" max="180" step="1" value="${Number(t.size || 32)}" data-photo-text-prop="size"></label>
+      <label>Color<input type="color" value="${escapeHtml(t.color || '#111111')}" data-photo-text-prop="color"></label>
+      <label>Background<input type="color" value="${String(t.background || '').startsWith('#') ? escapeHtml(t.background) : '#ffffff'}" data-photo-text-prop="background"></label>
+      <label>Opacity<input type="range" min="0.05" max="1" step="0.05" value="${Math.max(0.05, Math.min(1, Number(t.opacity || 1)))}" data-photo-text-prop="opacity"></label>
+      <label>Align<select data-photo-text-prop="align"><option value="left" ${t.align==='left'?'selected':''}>Left</option><option value="center" ${t.align==='center'?'selected':''}>Center</option><option value="right" ${t.align==='right'?'selected':''}>Right</option></select></label>
+      <label>Line Height<input type="number" min="0.75" max="3" step="0.05" value="${Number(t.lineHeight || 1.15)}" data-photo-text-prop="lineHeight"></label>
+      <label>Spacing<input type="number" min="-10" max="30" step="1" value="${Number(t.letterSpacing || 0)}" data-photo-text-prop="letterSpacing"></label>
+      <label>Outline<input type="color" value="${escapeHtml(t.outlineColor || '#000000')}" data-photo-text-prop="outlineColor"></label>
+      <label>Outline Size<input type="number" min="0" max="20" step="1" value="${Number(t.outlineWidth || 0)}" data-photo-text-prop="outlineWidth"></label>
+    </div>
+    <div class="photo-text-button-row">
+      <button type="button" class="${t.bold ? 'primary' : 'secondary'}" data-photo-text-toggle="bold">Bold</button>
+      <button type="button" class="${t.italic ? 'primary' : 'secondary'}" data-photo-text-toggle="italic">Italic</button>
+      <button type="button" class="${t.underline ? 'primary' : 'secondary'}" data-photo-text-toggle="underline">Underline</button>
+      <button type="button" class="secondary" data-photo-text-clear-bg>No Background</button>
+    </div>
+  </div>`;
+}
+
+function movePhotoPrintAnyLayer(id, direction) {
+  normalizePhotoPrintZLayers();
+  const ordered = getAllPhotoPrintObjects().sort((a,b)=>(a.z||0)-(b.z||0));
+  const idx = ordered.findIndex(x => x.id === id);
+  if (idx < 0) return;
+  const swapIdx = direction === "up" ? Math.min(ordered.length - 1, idx + 1) : Math.max(0, idx - 1);
+  if (swapIdx === idx) return;
+  const a = ordered[idx], b = ordered[swapIdx], z = a.z;
+  a.z = b.z; b.z = z;
+  normalizePhotoPrintZLayers();
+}
+
+function renderPhotoFilterEditor(p) {
+  if (!p) return "";
+  return `<div class="photo-filter-panel">
+    <h4>Filters</h4>
+    <p class="helper">Right-click this image in the image list for Add Filter, or use chroma key here.</p>
+    <div class="photo-text-grid">
+      <label>Key Color<input type="color" value="${escapeHtml(p.chromaKeyColor || '#00ff00')}" data-photo-filter-color></label>
+      <label>Tolerance<input type="range" min="1" max="180" step="1" value="${Number(p.chromaKeyTolerance || 70)}" data-photo-filter-tolerance></label>
+    </div>
+    <div class="photo-text-button-row"><button type="button" data-photo-apply-chroma>Apply Chroma Key</button>${p.originalSrc ? `<button type="button" class="secondary" data-photo-reset-filter>Reset Filter</button>` : ""}</div>
+  </div>`;
+}
+
+async function applyPhotoChromaKey(p, color = '#00ff00', tolerance = 70) {
+  if (!p) return;
+  const src = p.originalSrc || p.src;
+  const img = await new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = reject;
+    im.src = src;
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth || img.width;
+  canvas.height = img.naturalHeight || img.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const hex = String(color || '#00ff00').replace('#','');
+  const r = parseInt(hex.slice(0,2), 16), g = parseInt(hex.slice(2,4), 16), b = parseInt(hex.slice(4,6), 16);
+  const tol = Number(tolerance || 70);
+  for (let i = 0; i < data.data.length; i += 4) {
+    const dr = data.data[i] - r, dg = data.data[i+1] - g, db = data.data[i+2] - b;
+    if (Math.sqrt(dr*dr + dg*dg + db*db) <= tol) data.data[i+3] = 0;
+  }
+  ctx.putImageData(data, 0, 0);
+  p.originalSrc = p.originalSrc || p.src;
+  p.src = canvas.toDataURL('image/png');
+  p.chromaKeyColor = color;
+  p.chromaKeyTolerance = tol;
+}
+
+function normalizePhotoPrintLayers() {
+  const ordered = [...(state.photoPrint.photos || [])].sort((a,b)=>(a.z||0)-(b.z||0));
+  ordered.forEach((p, i) => { p.z = i + 1; });
+  state.photoPrint.nextZ = ordered.length + 1;
+}
+
+function movePhotoPrintLayer(id, direction) {
+  const photos = state.photoPrint.photos || [];
+  normalizePhotoPrintLayers();
+  const ordered = [...photos].sort((a,b)=>(a.z||0)-(b.z||0));
+  const idx = ordered.findIndex(p => p.id === id);
+  if (idx < 0) return;
+  const swapIdx = direction === "up" ? Math.min(ordered.length - 1, idx + 1) : Math.max(0, idx - 1);
+  if (swapIdx === idx) return;
+  const a = ordered[idx];
+  const b = ordered[swapIdx];
+  const az = a.z;
+  a.z = b.z;
+  b.z = az;
+  normalizePhotoPrintLayers();
+}
+
+function movePhotoPrintLayerTo(id, topIndex) {
+  const photos = state.photoPrint.photos || [];
+  normalizePhotoPrintLayers();
+  const topOrdered = [...photos].sort((a,b)=>(b.z||0)-(a.z||0));
+  const item = topOrdered.find(p => p.id === id);
+  if (!item) return;
+  const remaining = topOrdered.filter(p => p.id !== id);
+  const idx = Math.max(0, Math.min(remaining.length, Number(topIndex || 0)));
+  remaining.splice(idx, 0, item);
+  remaining.slice().reverse().forEach((p, i) => { p.z = i + 1; });
+  state.photoPrint.nextZ = photos.length + 1;
+}
+
+function getPhotoPrintBaseDims(p) {
+  const nativeW = Number(p.nativeW || 0);
+  const nativeH = Number(p.nativeH || 0);
+  if (!nativeW || !nativeH) return { w: Number(p.w || 220), h: Number(p.h || 160) };
+  const maxW = 260, maxH = 220;
+  const scale = Math.min(maxW / nativeW, maxH / nativeH, 1);
+  return { w: Math.max(40, Math.round(nativeW * scale)), h: Math.max(40, Math.round(nativeH * scale)) };
+}
+
+function photoPrintHasCrop(p) {
+  return !!(Number(p.cropL || 0) || Number(p.cropT || 0) || Number(p.cropR || 0) || Number(p.cropB || 0));
+}
+
+function clampPhotoPrintNumber(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value || 0)));
+}
+
+function renderPhotoPrintResetButtons(p) {
+  if (!p || state.photoPrint.cropMode) return "";
+  const base = getPhotoPrintBaseDims(p);
+  const buttons = [];
+  if (photoPrintHasCrop(p)) buttons.push(`<button type="button" data-photo-reset="crop">Reset Crop</button>`);
+  if (Math.abs(Number(p.rotate || 0)) % 360) buttons.push(`<button type="button" data-photo-reset="rotation">Reset Rotation</button>`);
+  if (Math.abs(Number(p.w || 0) - base.w) > 1 || Math.abs(Number(p.h || 0) - base.h) > 1) buttons.push(`<button type="button" data-photo-reset="size">Reset Size</button>`);
+  if (getPhotoPrintSelectedGuideCell(p)) {
+    buttons.push(`<button type="button" data-photo-fit="width">Fit to Width</button>`);
+    buttons.push(`<button type="button" data-photo-fit="height">Fit to Height</button>`);
+  }
+  if (!buttons.length) return "";
+  const paperW = getPhotoPrintPaperW();
+  const paperH = getPhotoPrintPaperH();
+  const margin = 8;
+  const estimatedW = 138;
+  const estimatedH = Math.max(38, buttons.length * 40);
+  let absLeft = Number(p.x || 0) + Number(p.w || 0) + 42;
+  let absTop = Number(p.y || 0) + 32;
+  absLeft = clampPhotoPrintNumber(absLeft, margin, paperW - estimatedW - margin);
+  absTop = clampPhotoPrintNumber(absTop, margin, paperH - estimatedH - margin);
+  const relLeft = Math.round(absLeft - Number(p.x || 0));
+  const relTop = Math.round(absTop - Number(p.y || 0));
+  return `<div class="photo-reset-float" style="left:${relLeft}px;top:${relTop}px;">${buttons.join("")}</div>`;
+}
+
+function renderPhotoPrintFloatToolbar(p) {
+  if (!p) return "";
+  const buttons = state.photoPrint.cropMode
+    ? `<button type="button" data-photo-crop-toggle>Done</button>`
+    : `<button type="button" data-photo-crop-toggle>Crop</button><button type="button" title="Bring forward" data-photo-layer="up">↑</button><button type="button" title="Send backward" data-photo-layer="down">↓</button><button type="button" title="Duplicate" data-photo-duplicate>⧉</button><button type="button" title="Delete" data-photo-delete>×</button>`;
+  const paperW = getPhotoPrintPaperW();
+  const margin = 8;
+  const estimatedW = state.photoPrint.cropMode ? 76 : 224;
+  let absLeft = Number(p.x || 0) + Number(p.w || 0) / 2 - estimatedW / 2;
+  absLeft = clampPhotoPrintNumber(absLeft, margin, paperW - estimatedW - margin);
+  const relLeft = Math.round(absLeft - Number(p.x || 0));
+  const relTop = Number(p.y || 0) < 54 ? Math.round(Number(p.h || 0) + 10) : -44;
+  return `<div class="photo-float-toolbar" style="left:${relLeft}px;top:${relTop}px;transform:none;">${buttons}</div>`;
+}
+
+function getPhotoPrintDisplayName(p, index = 0) {
+  return `Image ${Number(index || 0) + 1}`;
+}
+
+function getPhotoPrintSelectedGuideCell(item) {
+  if (!item) return null;
+  const rows = Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)));
+  const cols = Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)));
+  if (rows <= 1 && cols <= 1) return null;
+  const paperW = getPhotoPrintPaperW();
+  const paperH = getPhotoPrintPaperH();
+  const centerX = Number(item.x || 0) + Number(item.w || 0) / 2;
+  const centerY = Number(item.y || 0) + Number(item.h || 0) / 2;
+  if (centerX < 0 || centerY < 0 || centerX > paperW || centerY > paperH) return null;
+  const cellW = paperW / cols;
+  const cellH = paperH / rows;
+  const col = Math.max(0, Math.min(cols - 1, Math.floor(centerX / cellW)));
+  const row = Math.max(0, Math.min(rows - 1, Math.floor(centerY / cellH)));
+  return { x: col * cellW, y: row * cellH, w: cellW, h: cellH, row, col };
+}
+
+function fitPhotoPrintSelectedToGuide(kind) {
+  const item = getSelectedPhotoPrintItem();
+  const cell = getPhotoPrintSelectedGuideCell(item);
+  if (!item || !cell) return false;
+  const ratio = Math.max(0.05, Number(item.h || 1) / Math.max(1, Number(item.w || 1)));
+  if (kind === "width") {
+    item.w = Math.max(30, cell.w);
+    item.h = Math.max(30, item.w * ratio);
+  } else {
+    item.h = Math.max(30, cell.h);
+    item.w = Math.max(30, item.h / ratio);
+  }
+  item.x = cell.x + (cell.w - item.w) / 2;
+  item.y = cell.y + (cell.h - item.h) / 2;
+  return true;
+}
+
+function getPhotoPrintCropBounds(p) {
+  const l = Math.max(0, Math.min(90, Number(p.cropL || 0)));
+  const t = Math.max(0, Math.min(90, Number(p.cropT || 0)));
+  const r = Math.max(0, Math.min(90 - l, Number(p.cropR || 0)));
+  const b = Math.max(0, Math.min(90 - t, Number(p.cropB || 0)));
+  return { l, t, r, b, visibleW: Math.max(5, 100 - l - r), visibleH: Math.max(5, 100 - t - b) };
+}
+
+function getPhotoPrintImgStyle(p, showFull = false) {
+  if (showFull) return `width:100%;height:100%;left:0;top:0;object-fit:fill;background:rgba(255,255,255,.68);opacity:.78;`;
+  const { l, t, visibleW, visibleH } = getPhotoPrintCropBounds(p);
+  if (l === 0 && t === 0 && Number(p.cropR || 0) === 0 && Number(p.cropB || 0) === 0) return `width:100%;height:100%;left:0;top:0;object-fit:fill;`;
+  return `width:${10000 / visibleW}%;height:${10000 / visibleH}%;left:${-(l * 100 / visibleW)}%;top:${-(t * 100 / visibleH)}%;object-fit:fill;`;
+}
+
+function renderPhotoPrintCropBox(p) {
+  const { l, t, visibleW, visibleH } = getPhotoPrintCropBounds(p);
+  return `<div class="photo-crop-keep-box" data-photo-crop-box style="left:${l}%;top:${t}%;width:${visibleW}%;height:${visibleH}%;">
+    <span class="photo-crop-handle crop-n" data-photo-crop-handle="n"></span><span class="photo-crop-handle crop-s" data-photo-crop-handle="s"></span><span class="photo-crop-handle crop-e" data-photo-crop-handle="e"></span><span class="photo-crop-handle crop-w" data-photo-crop-handle="w"></span><span class="photo-crop-handle crop-nw" data-photo-crop-handle="nw"></span><span class="photo-crop-handle crop-ne" data-photo-crop-handle="ne"></span><span class="photo-crop-handle crop-sw" data-photo-crop-handle="sw"></span><span class="photo-crop-handle crop-se" data-photo-crop-handle="se"></span>
+  </div>`;
+}
+
+function renderPhotoPrintLayerList() {
+  const photos = [...(state.photoPrint.photos || [])].sort((a,b)=>(b.z||0)-(a.z||0));
+  if (!photos.length) return `<div class="empty small-empty">Upload photos to start.</div>`;
+  return photos.map((p, i) => {
+    const displayName = getPhotoPrintDisplayName(p, i);
+    return `<div class="photo-layer-row ${p.id === state.photoPrint.selectedId ? "active" : ""}" data-photo-select="${p.id}" data-photo-context-filter="${p.id}" title="Right-click to add a filter">
+      <img src="${p.src}" alt="" />
+      ${p.originalSrc ? `<span class="photo-filter-badge" title="Filter applied">◐</span>` : ""}
+      <button type="button" class="photo-layer-name" data-photo-select="${p.id}"><span>${escapeHtml(displayName)}</span><small>${p.originalSrc ? 'Filtered • ' : ''}Layer ${p.z || 1}</small></button>
+    </div>`;
+  }).join("");
+}
+
+
+function renderPhotoContextMenu() {
+  const menu = state.photoPrint?.contextMenu;
+  if (!menu || state.currentView !== "photoPrint") return "";
+  const item = (state.photoPrint.photos || []).find(p => p.id === menu.id);
+  return `<div class="photo-custom-context-menu" style="left:${Math.max(8, Number(menu.x || 8))}px;top:${Math.max(8, Number(menu.y || 8))}px;" data-photo-context-menu>
+    <button type="button" class="photo-context-parent">Add filter <span>›</span></button>
+    <div class="photo-context-submenu">
+      <button type="button" data-photo-context-chroma="${escapeHtml(menu.id || "")}">Chroma key</button>
+    </div>
+    ${item?.originalSrc ? `<button type="button" data-photo-context-remove-filter="${escapeHtml(menu.id || "")}">Remove filter</button>` : ""}
+  </div>`;
+}
+
+function renderPhotoPrintGuides() {
+  const rows = Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)));
+  const cols = Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)));
+  const parts = [];
+  for (let i = 1; i < cols; i++) parts.push(`<span class="photo-guide-line photo-guide-v" style="left:${(i / cols) * 100}%"></span>`);
+  for (let i = 1; i < rows; i++) parts.push(`<span class="photo-guide-line photo-guide-h" style="top:${(i / rows) * 100}%"></span>`);
+  return parts.length ? `<div class="photo-guide-layer" aria-hidden="true">${parts.join("")}</div>` : "";
+}
+
+
+function photoPrintSnapshot() {
+  return JSON.stringify({ photos: state.photoPrint.photos || [], texts: state.photoPrint.texts || [], nextZ: state.photoPrint.nextZ || 1 });
+}
+function restorePhotoPrintSnapshot(raw) {
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    state.photoPrint.photos = data.photos || [];
+    state.photoPrint.texts = data.texts || [];
+    state.photoPrint.nextZ = data.nextZ || (((data.photos||[]).length + (data.texts||[]).length) + 1);
+    setPhotoPrintSelection([]);
+    state.photoPrint.snapHint = null;
+    return true;
+  } catch (err) { console.warn("Photo history restore failed", err); return false; }
+}
+function pushPhotoPrintHistory() {
+  if (!state.photoPrint) return;
+  const snap = photoPrintSnapshot();
+  state.photoPrint.history = state.photoPrint.history || [];
+  if (state.photoPrint.history.at(-1) !== snap) state.photoPrint.history.push(snap);
+  if (state.photoPrint.history.length > 60) state.photoPrint.history.shift();
+  state.photoPrint.redo = [];
+}
+function undoPhotoPrint() {
+  const stack = state.photoPrint.history || [];
+  if (!stack.length) return false;
+  state.photoPrint.redo = state.photoPrint.redo || [];
+  state.photoPrint.redo.push(photoPrintSnapshot());
+  return restorePhotoPrintSnapshot(stack.pop());
+}
+function redoPhotoPrint() {
+  const stack = state.photoPrint.redo || [];
+  if (!stack.length) return false;
+  state.photoPrint.history = state.photoPrint.history || [];
+  state.photoPrint.history.push(photoPrintSnapshot());
+  return restorePhotoPrintSnapshot(stack.pop());
+}
+function autoSizePhotoTextBox(t) {
+  if (!t) return;
+  const meas = document.createElement('div');
+  meas.style.position = 'fixed';
+  meas.style.left = '-10000px';
+  meas.style.top = '-10000px';
+  meas.style.visibility = 'hidden';
+  meas.style.whiteSpace = 'pre';
+  meas.style.wordBreak = 'normal';
+  meas.style.boxSizing = 'border-box';
+  meas.style.padding = '6px';
+  meas.style.fontFamily = `${String(t.font || 'Arial').replace(/[^a-zA-Z0-9 ,'-]/g, '')}, sans-serif`;
+  meas.style.fontSize = `${Math.max(8, Number(t.size || 32))}px`;
+  meas.style.fontWeight = t.bold ? '800' : '400';
+  meas.style.fontStyle = t.italic ? 'italic' : 'normal';
+  meas.style.lineHeight = String(Math.max(0.75, Number(t.lineHeight || 1.15)));
+  meas.style.letterSpacing = `${Number(t.letterSpacing || 0)}px`;
+  meas.textContent = t.text || 'Text';
+  document.body.appendChild(meas);
+  const pad = Math.max(14, Math.ceil(Number(t.size || 32) * 0.35));
+  t.w = Math.ceil(Math.max(28, Math.min(760, meas.scrollWidth + pad)));
+  t.h = Math.ceil(Math.max(22, Math.min(760, meas.scrollHeight + 8)));
+  meas.remove();
+}
+function deletePhotoPrintSelection() {
+  const ids = new Set(getPhotoPrintSelectedIds());
+  if (!ids.size) return false;
+  pushPhotoPrintHistory();
+  state.photoPrint.photos = (state.photoPrint.photos || []).filter(p => !ids.has(p.id));
+  state.photoPrint.texts = (state.photoPrint.texts || []).filter(t => !ids.has(t.id));
+  setPhotoPrintSelection([]);
+  return true;
+}
+function copyPhotoPrintSelectionToClipboard(cut = false) {
+  const items = getPhotoPrintSelectionItems();
+  if (!items.length) return false;
+  const bounds = getPhotoPrintSelectionBounds(items);
+  state.photoPrint.clipboard = { items: items.map(({kind,item}) => ({ kind, item: JSON.parse(JSON.stringify(item)) })), bounds };
+  if (cut) deletePhotoPrintSelection();
+  return true;
+}
+function pastePhotoPrintClipboard() {
+  const clip = state.photoPrint.clipboard;
+  if (!clip?.items?.length) return false;
+  pushPhotoPrintHistory();
+  const newIds = [];
+  clip.items.forEach(({kind,item}) => {
+    const copy = { ...JSON.parse(JSON.stringify(item)), id: crypto.randomUUID(), x: Number(item.x||0) + 24, y: Number(item.y||0) + 24, z: ++state.photoPrint.nextZ, isEditing: false };
+    if (kind === 'photo') { copy.name = `${getPhotoPrintDisplayName(item,0)} copy`; state.photoPrint.photos.push(copy); }
+    else state.photoPrint.texts.push(copy);
+    newIds.push(copy.id);
+  });
+  setPhotoPrintSelection(newIds);
+  return true;
+}
+function getPhotoPrintObjectSnapTargets(skipIds = new Set()) {
+  const xTargets = [], yTargets = [];
+  [...(state.photoPrint.photos||[]), ...(state.photoPrint.texts||[])].forEach(item => {
+    if (skipIds.has(item.id)) return;
+    const x = Number(item.x||0), y = Number(item.y||0), w = Number(item.w||1), h = Number(item.h||1);
+    xTargets.push(x, x + w/2, x + w);
+    yTargets.push(y, y + h/2, y + h);
+  });
+  return { xTargets, yTargets };
+}
+function snapPhotoPrintAxisWithTargets(pos, size, targets, threshold = 14) {
+  const anchors = [0, size/2, size];
+  let best = { pos, d: Infinity, target: null, anchor: null };
+  targets.forEach(target => anchors.forEach(anchor => {
+    const candidate = target - anchor;
+    const d = Math.abs(pos - candidate);
+    if (d < best.d) best = { pos: candidate, d, target, anchor };
+  }));
+  return best.d <= threshold ? best : { pos, d: Infinity, target: null, anchor: null };
+}
+
+function getPhotoPrintSnapTargets(total, count) {
+  count = Math.max(1, Math.min(8, Number(count || 1)));
+  const targets = [0, total / 2, total];
+  for (let i = 1; i < count; i++) targets.push(total * i / count);      // guide lines / cell edges
+  for (let i = 0; i < count; i++) targets.push(total * (i + 0.5) / count); // cell centers
+  return Array.from(new Set(targets.map(x => Math.round(x * 1000) / 1000)));
+}
+
+function snapPhotoPrintAxis(pos, size, total, count, threshold = 14) {
+  const targets = getPhotoPrintSnapTargets(total, count);
+  const anchors = [0, size / 2, size]; // left/center/right or top/center/bottom of the photo
+  let best = { pos, d: Infinity };
+  targets.forEach(target => {
+    anchors.forEach(anchor => {
+      const candidate = target - anchor;
+      const d = Math.abs(pos - candidate);
+      if (d < best.d) best = { pos: candidate, d };
+    });
+  });
+  return best.d <= threshold ? best.pos : pos;
+}
+
+function snapPhotoPrintPosition(item, x, y) {
+  if (state.photoPrint.snapGuides === false) { state.photoPrint.snapHint = null; return { x, y }; }
+  const rows = Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)));
+  const cols = Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)));
+  const itemW = Number(item.w || 0);
+  const itemH = Number(item.h || 0);
+  const skip = new Set(getPhotoPrintSelectedIds());
+  const obj = getPhotoPrintObjectSnapTargets(skip);
+  const xTargets = [...getPhotoPrintSnapTargets(getPhotoPrintPaperW(), cols), ...obj.xTargets];
+  const yTargets = [...getPhotoPrintSnapTargets(getPhotoPrintPaperH(), rows), ...obj.yTargets];
+  const sx = snapPhotoPrintAxisWithTargets(x, itemW, xTargets);
+  const sy = snapPhotoPrintAxisWithTargets(y, itemH, yTargets);
+  state.photoPrint.snapHint = (sx.target !== null || sy.target !== null) ? {
+    x: sx.target !== null ? sx.target : null,
+    y: sy.target !== null ? sy.target : null,
+    itemX: sx.pos,
+    itemY: sy.pos
+  } : null;
+  return { x: sx.pos, y: sy.pos };
+}
+
+
+function getPhotoPrintSelectedIds() {
+  const ids = Array.isArray(state.photoPrint.selectedIds) ? state.photoPrint.selectedIds.filter(Boolean) : [];
+  if (!ids.length && state.photoPrint.selectedId) ids.push(state.photoPrint.selectedId);
+  const valid = new Set([...(state.photoPrint.photos || []).map(p => p.id), ...(state.photoPrint.texts || []).map(t => t.id)]);
+  return Array.from(new Set(ids.filter(id => valid.has(id))));
+}
+function setPhotoPrintSelection(ids, activeId = "") {
+  const clean = Array.from(new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean)));
+  state.photoPrint.selectedIds = clean;
+  state.photoPrint.selectedId = activeId || clean.at(-1) || "";
+  const active = getPhotoPrintAnyItem(state.photoPrint.selectedId);
+  state.photoPrint.selectedType = active?.kind || "";
+}
+function getPhotoPrintAnyItem(id) {
+  const photo = (state.photoPrint.photos || []).find(p => p.id === id);
+  if (photo) return { kind: "photo", item: photo };
+  const text = (state.photoPrint.texts || []).find(t => t.id === id);
+  if (text) return { kind: "text", item: text };
+  return null;
+}
+function getPhotoPrintSelectionItems() {
+  return getPhotoPrintSelectedIds().map(id => getPhotoPrintAnyItem(id)).filter(Boolean);
+}
+function getPhotoPrintSelectionBounds(items = getPhotoPrintSelectionItems()) {
+  if (!items.length) return null;
+  const boxes = items.map(({ item }) => ({ x:Number(item.x||0), y:Number(item.y||0), w:Number(item.w||1), h:Number(item.h||1) }));
+  const minX = Math.min(...boxes.map(b => b.x));
+  const minY = Math.min(...boxes.map(b => b.y));
+  const maxX = Math.max(...boxes.map(b => b.x + b.w));
+  const maxY = Math.max(...boxes.map(b => b.y + b.h));
+  return { x:minX, y:minY, w:Math.max(1, maxX-minX), h:Math.max(1, maxY-minY), cx:(minX+maxX)/2, cy:(minY+maxY)/2 };
+}
+function getPhotoPrintGridCells() {
+  const rows = Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)));
+  const cols = Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)));
+  const w = getPhotoPrintPaperW() / cols;
+  const h = getPhotoPrintPaperH() / rows;
+  const cells = [];
+  for (let r=0; r<rows; r++) for (let c=0; c<cols; c++) cells.push({ r, c, x:c*w, y:r*h, w, h, cx:c*w+w/2, cy:r*h+h/2 });
+  return cells;
+}
+function photoPrintCellForPoint(x, y) {
+  return getPhotoPrintGridCells().find(cell => x >= cell.x && x < cell.x + cell.w && y >= cell.y && y < cell.y + cell.h) || getPhotoPrintGridCells()[0];
+}
+function photoPrintCellHasItem(cell, ignoreIds = new Set()) {
+  return [...(state.photoPrint.photos||[]), ...(state.photoPrint.texts||[])].some(item => {
+    if (ignoreIds.has(item.id)) return false;
+    const cx = Number(item.x||0) + Number(item.w||1)/2;
+    const cy = Number(item.y||0) + Number(item.h||1)/2;
+    return cx >= cell.x && cx < cell.x + cell.w && cy >= cell.y && cy < cell.y + cell.h;
+  });
+}
+function copyPhotoPrintSelectionIntoCell(items, bounds, sourceCell, targetCell, suffix = "copy") {
+  const margin = 10;
+  const scale = Math.min((targetCell.w - margin*2) / Math.max(1, bounds.w), (targetCell.h - margin*2) / Math.max(1, bounds.h), 1);
+  const groupW = bounds.w * scale;
+  const groupH = bounds.h * scale;
+  const baseX = targetCell.x + (targetCell.w - groupW) / 2;
+  const baseY = targetCell.y + (targetCell.h - groupH) / 2;
+  const newIds = [];
+  items.forEach(({ kind, item }) => {
+    const copy = { ...item, id: crypto.randomUUID(), x: baseX + (Number(item.x||0) - bounds.x) * scale, y: baseY + (Number(item.y||0) - bounds.y) * scale, w: Math.max(kind === "text" ? 30 : 40, Number(item.w||1) * scale), h: Math.max(kind === "text" ? 20 : 40, Number(item.h||1) * scale), z: ++state.photoPrint.nextZ };
+    if (kind === "photo") { copy.name = `${getPhotoPrintDisplayName(item, 0)} ${suffix}`; state.photoPrint.photos.push(copy); }
+    else { copy.isEditing = false; state.photoPrint.texts.push(copy); }
+    newIds.push(copy.id);
+  });
+  return newIds;
+}
+function openPhotoPrintDuplicatePrompt() {
+  const items = getPhotoPrintSelectionItems();
+  if (!items.length) return;
+  const rows = Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)));
+  const cols = Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)));
+  if (rows > 1 || cols > 1) {
+    state.photoPrint.duplicatePrompt = { open: true };
+    renderPhotoPrintTool();
+  } else {
+    duplicatePhotoPrintSelectionSmart('once');
+  }
+}
+async function duplicatePhotoPrintSelectionSmart(mode = 'once') {
+  const items = getPhotoPrintSelectionItems();
+  if (!items.length) return;
+  pushPhotoPrintHistory();
+  const bounds = getPhotoPrintSelectionBounds(items);
+  if (!bounds) return;
+  const rows = Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)));
+  const cols = Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)));
+  const hasGrid = rows > 1 || cols > 1;
+  let newIds = [];
+  if (hasGrid) {
+    const sourceCell = photoPrintCellForPoint(bounds.cx, bounds.cy);
+    if (mode === 'fill') {
+      const removeIds = new Set(items.map(x => x.item.id));
+      state.photoPrint.photos = (state.photoPrint.photos || []).filter(p => !removeIds.has(p.id));
+      state.photoPrint.texts = (state.photoPrint.texts || []).filter(t => !removeIds.has(t.id));
+      getPhotoPrintGridCells().forEach((cell, i) => { newIds.push(...copyPhotoPrintSelectionIntoCell(items, bounds, sourceCell, cell, `copy ${i+1}`)); });
+    } else {
+      const ignore = new Set(items.map(x => x.item.id));
+      const firstEmpty = getPhotoPrintGridCells().find(cell => !photoPrintCellHasItem(cell, ignore) && !(cell.r === sourceCell.r && cell.c === sourceCell.c));
+      if (firstEmpty) newIds.push(...copyPhotoPrintSelectionIntoCell(items, bounds, sourceCell, firstEmpty, 'copy'));
+    }
+  }
+  if (!newIds.length) {
+    items.forEach(({ kind, item }) => {
+      const copy = { ...JSON.parse(JSON.stringify(item)), id: crypto.randomUUID(), x: Number(item.x||0) + 24, y: Number(item.y||0) + 24, z: ++state.photoPrint.nextZ, isEditing: false };
+      if (kind === 'photo') { copy.name = `${getPhotoPrintDisplayName(item, 0)} copy`; state.photoPrint.photos.push(copy); }
+      else state.photoPrint.texts.push(copy);
+      newIds.push(copy.id);
+    });
+  }
+  state.photoPrint.duplicatePrompt = null;
+  setPhotoPrintSelection(newIds);
+  await savePhotoPrintWorkspaceLocal();
+  renderPhotoPrintTool();
+}
+function renderPhotoPrintDuplicatePrompt() {
+  if (!state.photoPrint?.duplicatePrompt) return '';
+  return `<div class="modal-backdrop photo-duplicate-backdrop"><div class="modal card photo-duplicate-modal"><h2>Duplicate selected item${getPhotoPrintSelectedIds().length > 1 ? 's' : ''}</h2><p class="helper">Would you like to fill every grid section with this selection, or duplicate it once?</p><div class="actions"><button type="button" class="primary" data-photo-duplicate-choice="fill">Fill all sections</button><button type="button" class="secondary" data-photo-duplicate-choice="once">Duplicate once</button><button type="button" class="secondary" data-photo-duplicate-choice="cancel">Cancel</button></div></div></div>`;
+}
+
+function renderPhotoPrintSnapHint() {
+  const hint = state.photoPrint?.snapHint;
+  if (!hint) return '';
+  return `${hint.x !== null ? `<div class="photo-snap-line vertical" style="left:${hint.x}px"></div>` : ''}${hint.y !== null ? `<div class="photo-snap-line horizontal" style="top:${hint.y}px"></div>` : ''}${hint.x !== null && hint.y !== null ? `<div class="photo-snap-dot" style="left:${hint.x}px;top:${hint.y}px"></div>` : ''}`;
+}
+function renderPhotoPrintTool() {
+  state.currentView = "photoPrint";
+  const selected = getSelectedPhotoPrintItem();
+  const selectedText = getSelectedPhotoPrintText();
+  const photos = [...(state.photoPrint.photos || [])].sort((a,b)=>(a.z||0)-(b.z||0));
+  const texts = [...(state.photoPrint.texts || [])].sort((a,b)=>(a.z||0)-(b.z||0));
+  const selectedIds = getPhotoPrintSelectedIds();
+  $app.innerHTML = pageShell(`
+    <section class="tool-page photo-print-page">
+      <div class="tool-header">
+        <button class="secondary" type="button" data-action="home">← Home</button>
+        <div><h2>Photo Print and Edit</h2><p class="helper">Local-only photo workspace for 8.5×11 copy paper.</p></div>
+      </div>
+      <div class="photo-guide-controls card">
+        <div class="photo-guide-group"><strong>Paper</strong><button type="button" class="${state.photoPrint.orientation !== "landscape" ? "primary" : "secondary"}" data-photo-orientation="portrait">Portrait</button><button type="button" class="${state.photoPrint.orientation === "landscape" ? "primary" : "secondary"}" data-photo-orientation="landscape">Landscape</button></div>
+        <div class="photo-guide-group"><strong>Rows</strong><button type="button" data-photo-guide-step="rows:-1">−</button><span>${Math.max(1, Math.min(8, Number(state.photoPrint.guideRows || 1)))}</span><button type="button" data-photo-guide-step="rows:1">+</button></div>
+        <div class="photo-guide-group"><strong>Columns</strong><button type="button" data-photo-guide-step="cols:-1">−</button><span>${Math.max(1, Math.min(8, Number(state.photoPrint.guideCols || 1)))}</span><button type="button" data-photo-guide-step="cols:1">+</button></div>
+        <button type="button" class="${state.photoPrint.snapGuides === false ? "secondary" : "primary"}" data-photo-snap-toggle>${state.photoPrint.snapGuides === false ? "Snapping Off" : "Snapping On"}</button>
+        <input type="file" accept="image/*" multiple data-photo-print-upload hidden />
+        <button type="button" class="primary" data-photo-print-open-upload>Upload Images</button>
+        <button type="button" class="secondary" data-photo-add-text>Add Text</button>
+        <button type="button" class="secondary" data-photo-duplicate-selected>Duplicate Selected</button>
+        <button type="button" data-photo-print-print>Print / Save PDF</button>
+      </div>
+      <div class="photo-print-layout">
+        <aside class="card photo-print-leftbar">
+          <div class="photo-print-actions">
+            <button type="button" class="secondary" data-photo-zoom-reset>Reset View</button>
+            <button type="button" class="secondary" data-photo-print-clear>Clear Page</button>
+          </div>
+          <div class="photo-editor-panel ${(selected || selectedText) ? "" : "muted"}">
+            <h3>${selectedText ? "Selected Text" : "Selected Image"}</h3>
+            ${selected ? `
+              <div class="photo-selected-preview"><img src="${selected.src}" alt="${escapeHtml(getPhotoPrintDisplayName(selected, (state.photoPrint.photos || []).findIndex(x => x.id === selected.id)))}" /><span>${escapeHtml(getPhotoPrintDisplayName(selected, (state.photoPrint.photos || []).findIndex(x => x.id === selected.id)))}</span></div>
+              <p class="helper">Drag corners to resize evenly. Hold Shift to stretch. Use the bottom-right rotate handle to rotate.</p>
+              ${selected.originalSrc ? renderPhotoFilterEditor(selected) : `<p class="helper">Right-click this image in the image list to add a filter.</p>`}
+            ` : selectedText ? `<p class="helper">Use the floating text bar above the page to change font, size, color, style, alignment, opacity, spacing, layer, duplicate, or delete.</p>` : `<p class="helper">Tap a photo, text box, or image list item to edit it.</p>`}
+          </div>
+        </aside>
+        <main class="photo-print-stage-wrap" data-photo-print-stage>
+          ${selectedText ? renderPhotoTextRibbon(selectedText) : ""}
+          <div class="photo-print-zoom-surface" style="width:${Math.round(getPhotoPrintPaperW() * Number(state.photoPrint.zoom || 0.75))}px;height:${Math.round(getPhotoPrintPaperH() * Number(state.photoPrint.zoom || 0.75))}px;">
+            <div class="photo-print-paper" id="photoPrintPaper" aria-label="8.5 by 11 inch print area" style="width:${getPhotoPrintPaperW()}px;height:${getPhotoPrintPaperH()}px;transform:scale(${Number(state.photoPrint.zoom || 0.75)});">
+              ${renderPhotoPrintGuides()}
+              ${renderPhotoPrintSnapHint()}
+              ${photos.map(p => `<div class="photo-item ${((state.photoPrint.selectedIds || []).includes(p.id) || p.id === state.photoPrint.selectedId) ? "selected" : ""} ${p.id === state.photoPrint.selectedId && state.photoPrint.cropMode ? "crop-mode" : ""}" data-photo-id="${p.id}" style="left:${Number.isFinite(Number(p.x)) ? Number(p.x) : 40}px;top:${Number.isFinite(Number(p.y)) ? Number(p.y) : 40}px;width:${Number.isFinite(Number(p.w)) ? Number(p.w) : 220}px;height:${Number.isFinite(Number(p.h)) ? Number(p.h) : 160}px;transform:rotate(${Number(p.rotate || 0)}deg);z-index:${p.z || 1};">
+                <div class="photo-image-clip"><img src="${p.src}" alt="${escapeHtml(getPhotoPrintDisplayName(p, photos.findIndex(x => x.id === p.id)))}" style="${getPhotoPrintImgStyle(p, p.id === state.photoPrint.selectedId && state.photoPrint.cropMode)}" draggable="false" /></div>
+                ${p.id === state.photoPrint.selectedId ? `${renderPhotoPrintFloatToolbar(p)}
+                ${state.photoPrint.cropMode ? renderPhotoPrintCropBox(p) : `<span class="photo-resize-handle photo-resize-nw" data-photo-resize="nw"></span>
+                <span class="photo-resize-handle photo-resize-ne" data-photo-resize="ne"></span>
+                <span class="photo-resize-handle photo-resize-sw" data-photo-resize="sw"></span>
+                <span class="photo-resize-handle photo-resize-se" data-photo-resize="se"></span>
+                <span class="photo-rotate-handle photo-rotate-se" data-photo-rotate="se">↻</span>`}
+                ${renderPhotoPrintResetButtons(p)}` : ""}
+              </div>`).join("")}
+              ${texts.map(t => `<div class="photo-text-item ${((state.photoPrint.selectedIds || []).includes(t.id) || t.id === state.photoPrint.selectedId) ? "selected" : ""} ${t.isEditing ? "editing" : ""}" data-photo-text-id="${t.id}" title="Drag to move. Double-click to edit text." style="left:${Number.isFinite(Number(t.x)) ? Number(t.x) : 90}px;top:${Number.isFinite(Number(t.y)) ? Number(t.y) : 90}px;width:${Number.isFinite(Number(t.w)) ? Number(t.w) : 320}px;height:${Number.isFinite(Number(t.h)) ? Number(t.h) : 90}px;transform:rotate(${Number(t.rotate || 0)}deg);z-index:${t.z || 1};">
+                <div class="photo-text-content" contenteditable="${t.isEditing ? "true" : "false"}" spellcheck="false" data-photo-text-content="${t.id}" style="${renderPhotoTextStyle(t)}">${escapeHtml(t.text || "Text")}</div>
+                ${t.id === state.photoPrint.selectedId ? `${renderPhotoTextToolbar(t)}<span class="photo-resize-handle photo-resize-nw" data-photo-text-resize="nw"></span><span class="photo-resize-handle photo-resize-ne" data-photo-text-resize="ne"></span><span class="photo-resize-handle photo-resize-sw" data-photo-text-resize="sw"></span><span class="photo-resize-handle photo-resize-se" data-photo-text-resize="se"></span>` : ""}
+              </div>`).join("")}
+              <div class="photo-selection-box" data-photo-selection-box hidden></div>
+              ${(photos.length || texts.length) ? "" : `<div class="photo-paper-empty">Upload photos or add text, then drag them anywhere on the page.</div>`}
+            </div>
+          </div>
+        </main>
+        <aside class="card photo-print-sidebar">
+          <h3>Image List</h3>
+          <div class="photo-layer-list">${renderPhotoPrintLayerList()}</div>
+        </aside>
+      </div>
+    </section>
+    ${renderPhotoContextMenu()}
+    ${renderPhotoPrintDuplicatePrompt()}
+    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+  `);
+}
+
+function updatePhotoPrintSelected(updater, shouldRender = true) {
+  const item = getSelectedPhotoPrintItem();
+  if (!item) return;
+  updater(item);
+  savePhotoPrintWorkspaceLocal();
+  if (shouldRender) renderPhotoPrintTool();
+}
+
+async function addPhotoPrintFiles(files) {
+  const list = Array.from(files || []).filter(f => f.type?.startsWith("image/"));
+  if (!list.length) return;
+  const added = [];
+  for (const file of list) {
+    const src = await readFileAsDataUrl(file);
+    let dims = { width: 240, height: 180 };
+    try { dims = await getImageDimensionsFromDataUrl(src); } catch (err) { console.warn("Photo Print image dimensions unavailable", err); }
+    const nativeW = Math.max(40, Math.round(Number(dims.width || 240)));
+    const nativeH = Math.max(40, Math.round(Number(dims.height || 180)));
+    const fit = Math.min(PHOTO_PRINT_DEFAULT_UPLOAD_W / nativeW, PHOTO_PRINT_DEFAULT_UPLOAD_H / nativeH, 1);
+    const displayW = Math.max(60, Math.round(nativeW * fit));
+    const displayH = Math.max(60, Math.round(nativeH * fit));
+    const z = ++state.photoPrint.nextZ;
+    added.push({ id: crypto.randomUUID(), name: `Image ${state.photoPrint.photos.length + added.length + 1}`, originalName: file.name, src, x: 50 + ((state.photoPrint.photos.length + added.length) % 6) * 24, y: 50 + ((state.photoPrint.photos.length + added.length) % 6) * 24, w: displayW, h: displayH, nativeW, nativeH, rotate: 0, z, cropZoom: 1, cropX: 50, cropY: 50, cropL: 0, cropT: 0, cropR: 0, cropB: 0 });
+  }
+  state.photoPrint.photos.push(...added);
+  setPhotoPrintSelection([added.at(-1)?.id || ""], added.at(-1)?.id || "");
+  await savePhotoPrintWorkspaceLocal();
+  renderPhotoPrintTool();
+}
+
+function applyPhotoControl(control, value) {
+  updatePhotoPrintSelected(item => {
+    const n = Number(value);
+    if (control === "size") { const ratio = (item.h || 160) / Math.max(1, item.w || 220); item.w = n; item.h = Math.max(40, Math.round(n * ratio)); }
+    if (control === "rotate") item.rotate = n;
+  }, true);
+}
+
+function printPhotoPrintPage() {
+  const paper = document.getElementById("photoPrintPaper");
+  if (!paper) return;
+  const win = window.open("", "_blank");
+  if (!win) { alert("Popup blocked. Allow popups to print or save as PDF."); return; }
+  const clone = paper.cloneNode(true);
+  clone.style.transform = "";
+  clone.style.transformOrigin = "";
+  clone.querySelectorAll(".photo-item[data-photo-id]").forEach(el => {
+    const photo = (state.photoPrint.photos || []).find(p => p.id === el.dataset.photoId);
+    const img = el.querySelector("img");
+    if (photo && img) img.style.cssText = getPhotoPrintImgStyle(photo, false);
+    el.classList.remove("selected", "crop-mode");
+  });
+  win.document.write(`<!doctype html><html><head><title>Photo Print</title><style>
+    @page{size:${state.photoPrint.orientation === "landscape" ? "11in 8.5in" : "8.5in 11in"};margin:0;} html,body{margin:0;padding:0;background:white;} .photo-print-paper{width:${state.photoPrint.orientation === "landscape" ? "11in" : "8.5in"}!important;height:${state.photoPrint.orientation === "landscape" ? "8.5in" : "11in"}!important;position:relative;overflow:hidden;background:white;box-shadow:none!important;transform:none!important;} .photo-item{position:absolute;overflow:visible;box-sizing:border-box;} .photo-image-clip{position:absolute;inset:0;overflow:hidden;} .photo-image-clip img{position:absolute;object-fit:fill;max-width:none;user-select:none;} .photo-float-toolbar,.photo-reset-float,.photo-resize-handle,.photo-crop-handle,.photo-crop-keep-box,.photo-paper-empty{display:none!important;} .photo-text-item{position:absolute;box-sizing:border-box;overflow:visible;} .photo-text-content{width:100%;height:100%;white-space:pre-wrap;display:flex;align-items:center;justify-content:center;padding:6px;box-sizing:border-box;}
+  </style></head><body>${clone.outerHTML}<script>window.onload=()=>{setTimeout(()=>{window.print();},150)}<\/script></body></html>`);
+  win.document.close();
+}
+
+function setPhotoPrintZoom(nextZoom, anchorEvent = null) {
+  const stage = document.querySelector("[data-photo-print-stage]");
+  const oldZoom = Number(state.photoPrint.zoom || 0.75);
+  const zoom = Math.max(0.25, Math.min(2.5, Number(nextZoom || oldZoom)));
+  if (!Number.isFinite(zoom) || Math.abs(zoom - oldZoom) < 0.001) return;
+  let anchorX = 0.5;
+  let anchorY = 0.5;
+  if (stage && anchorEvent) {
+    const rect = stage.getBoundingClientRect();
+    anchorX = (anchorEvent.clientX - rect.left + stage.scrollLeft) / Math.max(1, getPhotoPrintPaperW() * oldZoom);
+    anchorY = (anchorEvent.clientY - rect.top + stage.scrollTop) / Math.max(1, getPhotoPrintPaperH() * oldZoom);
+  }
+  state.photoPrint.zoom = zoom;
+  const surface = document.querySelector(".photo-print-zoom-surface");
+  const paper = document.getElementById("photoPrintPaper");
+  if (surface && paper) {
+    surface.style.width = `${Math.round(getPhotoPrintPaperW() * zoom)}px`;
+    surface.style.height = `${Math.round(getPhotoPrintPaperH() * zoom)}px`;
+    paper.style.transform = `scale(${zoom})`;
+    const zoomBtn = document.querySelector("[data-photo-zoom-reset]");
+    if (zoomBtn) zoomBtn.textContent = `${Math.round(zoom * 100)}%`;
+    if (stage) {
+      stage.scrollLeft = Math.max(0, (getPhotoPrintPaperW() * zoom * anchorX) - (anchorEvent ? (anchorEvent.clientX - stage.getBoundingClientRect().left) : (stage.clientWidth / 2)));
+      stage.scrollTop = Math.max(0, (getPhotoPrintPaperH() * zoom * anchorY) - (anchorEvent ? (anchorEvent.clientY - stage.getBoundingClientRect().top) : (stage.clientHeight / 2)));
+    }
+    savePhotoPrintWorkspaceLocal();
+  } else {
+    savePhotoPrintWorkspaceLocal();
+    renderPhotoPrintTool();
+  }
+}
+
+let photoPrintDrag = null;
+let photoTextRibbonDrag = null;
+function clampPhotoTextRibbonPosition(x, y) {
+  const w = 760, h = 110;
+  return { x: Math.max(8, Math.min(window.innerWidth - w - 8, Number(x || 0))), y: Math.max(8, Math.min(window.innerHeight - h - 8, Number(y || 0))) };
+}
+document.addEventListener("pointerdown", (e) => {
+  const ribbonHandle = e.target.closest?.("[data-photo-text-ribbon-drag]");
+  if (state.currentView === "photoPrint" && ribbonHandle) {
+    const ribbon = ribbonHandle.closest("[data-photo-text-ribbon]");
+    const rect = ribbon?.getBoundingClientRect();
+    const pos = state.photoPrint.textRibbonPos || { x: rect?.left || 330, y: rect?.top || 92 };
+    photoTextRibbonDrag = { startX: e.clientX, startY: e.clientY, x: Number(pos.x || rect?.left || 330), y: Number(pos.y || rect?.top || 92) };
+    ribbonHandle.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+    return;
+  }
+  if (state.currentView !== "photoPrint") return;
+  // Let native dblclick enter edit mode instead of starting a second drag/render cycle.
+  if (e.detail >= 2 && e.target.closest?.(".photo-text-item[data-photo-text-id]")) return;
+  if (e.target.closest?.("[data-photo-text-ribbon]") || e.target.closest?.("[data-photo-context-menu]") || e.target.closest?.(".photo-float-toolbar") || e.target.closest?.(".photo-reset-float")) return;
+  const textContentEl = e.target.closest?.("[data-photo-text-content]");
+  const textEl = e.target.closest?.(".photo-text-item[data-photo-text-id]");
+  const itemEl = e.target.closest?.(".photo-item[data-photo-id]");
+  if (!itemEl && !textEl) {
+    const paper = e.target.closest?.("#photoPrintPaper");
+    if (paper) {
+      const rect = paper.getBoundingClientRect();
+      const zoom = Number(state.photoPrint.zoom || 1);
+      state.photoPrint.cropMode = false;
+      photoPrintDrag = { hadSelection: getPhotoPrintSelectedIds().length > 0, kind: "selectBox", startX: e.clientX, startY: e.clientY, zoom, paperLeft: rect.left, paperTop: rect.top, x: (e.clientX - rect.left) / zoom, y: (e.clientY - rect.top) / zoom };
+      paper.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    if (e.target.closest?.("[data-photo-print-stage]")) {
+      setPhotoPrintSelection([]);
+      state.photoPrint.cropMode = false;
+      renderPhotoPrintTool();
+    }
+    return;
+  }
+  if (textEl) {
+    const id = textEl.dataset.photoTextId;
+    const item = (state.photoPrint.texts || []).find(t => t.id === id);
+    if (!item) return;
+    if (e.ctrlKey || e.metaKey) {
+      const ids = new Set(getPhotoPrintSelectedIds());
+      ids.has(id) ? ids.delete(id) : ids.add(id);
+      setPhotoPrintSelection([...ids], id);
+    } else if (!getPhotoPrintSelectedIds().includes(id)) {
+      setPhotoPrintSelection([id], id);
+    } else {
+      setPhotoPrintSelection(getPhotoPrintSelectedIds(), id);
+    }
+    if (e.target.closest("button") || e.target.closest("textarea,input,select")) return;
+    if (item.isEditing && textContentEl) { textEl.classList.add("selected", "editing"); return; }
+    const rect = textEl.getBoundingClientRect();
+    const resizeDir = e.target.closest("[data-photo-text-resize]")?.dataset.photoTextResize || "";
+    const groupItems = !resizeDir ? getPhotoPrintSelectionItems().map(({kind,item}) => ({ kind, id:item.id, x:Number(item.x||0), y:Number(item.y||0), w:Number(item.w||1), h:Number(item.h||1) })) : [];
+    pushPhotoPrintHistory();
+    photoPrintDrag = { id, kind: "text", resizeDir, groupItems, startX: e.clientX, startY: e.clientY, zoom: Number(state.photoPrint.zoom || 1), x: item.x || 0, y: item.y || 0, w: item.w || (rect.width / Number(state.photoPrint.zoom || 1)), h: item.h || (rect.height / Number(state.photoPrint.zoom || 1)) };
+    textEl.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+    return;
+  }
+  const id = itemEl.dataset.photoId;
+  const item = (state.photoPrint.photos || []).find(p => p.id === id);
+  if (!item) return;
+  if (e.ctrlKey || e.metaKey) {
+    const ids = new Set(getPhotoPrintSelectedIds());
+    ids.has(id) ? ids.delete(id) : ids.add(id);
+    setPhotoPrintSelection([...ids], id);
+  } else if (!getPhotoPrintSelectedIds().includes(id)) {
+    setPhotoPrintSelection([id], id);
+  } else {
+    setPhotoPrintSelection(getPhotoPrintSelectedIds(), id);
+  }
+  const rect = itemEl.getBoundingClientRect();
+  const paperRect = document.getElementById("photoPrintPaper")?.getBoundingClientRect();
+  if (e.target.closest("button")) return;
+  const inCropMode = id === state.photoPrint.selectedId && !!state.photoPrint.cropMode;
+  const resizeDir = inCropMode ? "" : (e.target.closest("[data-photo-resize]")?.dataset.photoResize || "");
+  const rotateDir = inCropMode ? "" : (e.target.closest("[data-photo-rotate]")?.dataset.photoRotate || "");
+  const cropDir = inCropMode ? (e.target.closest("[data-photo-crop-handle]")?.dataset.photoCropHandle || "") : "";
+  const cropBoxMove = inCropMode && !cropDir && !!e.target.closest("[data-photo-crop-box]");
+  if (inCropMode && !cropDir && !cropBoxMove && !e.target.closest("[data-photo-crop-toggle]")) return;
+  const bounds = getPhotoPrintCropBounds(item);
+  const centerX = (paperRect?.left || 0) + ((item.x || 0) + ((item.w || rect.width) / 2)) * Number(state.photoPrint.zoom || 1);
+  const centerY = (paperRect?.top || 0) + ((item.y || 0) + ((item.h || rect.height) / 2)) * Number(state.photoPrint.zoom || 1);
+  const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * 180 / Math.PI;
+  const groupItems = (!resizeDir && !rotateDir && !cropDir && !cropBoxMove) ? getPhotoPrintSelectionItems().map(({kind,item}) => ({ kind, id:item.id, x:Number(item.x||0), y:Number(item.y||0), w:Number(item.w||1), h:Number(item.h||1) })) : [];
+  pushPhotoPrintHistory();
+  photoPrintDrag = { id, resizeDir, rotateDir, cropDir, cropBoxMove, groupItems, startX: e.clientX, startY: e.clientY, zoom: Number(state.photoPrint.zoom || 1), paperLeft: paperRect?.left || 0, paperTop: paperRect?.top || 0, centerX, centerY, startAngle, rotate: Number(item.rotate || 0), x: item.x || 0, y: item.y || 0, w: item.w || (rect.width / Number(state.photoPrint.zoom || 1)), h: item.h || (rect.height / Number(state.photoPrint.zoom || 1)), cropL: Number(item.cropL || 0), cropT: Number(item.cropT || 0), cropR: Number(item.cropR || 0), cropB: Number(item.cropB || 0), cropVisibleW: bounds.visibleW, cropVisibleH: bounds.visibleH };
+  itemEl.setPointerCapture?.(e.pointerId);
+  document.querySelectorAll(".photo-item.selected").forEach(el => el.classList.remove("selected"));
+  itemEl.classList.add("selected");
+  e.preventDefault();
+});
+
+document.addEventListener("pointermove", (e) => {
+  if (photoTextRibbonDrag && state.currentView === "photoPrint") {
+    const next = clampPhotoTextRibbonPosition(photoTextRibbonDrag.x + (e.clientX - photoTextRibbonDrag.startX), photoTextRibbonDrag.y + (e.clientY - photoTextRibbonDrag.startY));
+    state.photoPrint.textRibbonPos = next;
+    const ribbon = document.querySelector("[data-photo-text-ribbon]");
+    if (ribbon) { ribbon.style.left = `${next.x}px`; ribbon.style.top = `${next.y}px`; }
+    return;
+  }
+  if (!photoPrintDrag || state.currentView !== "photoPrint") return;
+  const dragZoom = Number(photoPrintDrag.zoom || state.photoPrint.zoom || 1);
+  const dx = (e.clientX - photoPrintDrag.startX) / dragZoom;
+  const dy = (e.clientY - photoPrintDrag.startY) / dragZoom;
+  if (photoPrintDrag.kind === "selectBox") {
+    const box = document.querySelector("[data-photo-selection-box]");
+    if (box) {
+      const x1 = photoPrintDrag.x, y1 = photoPrintDrag.y;
+      const x2 = (e.clientX - photoPrintDrag.paperLeft) / dragZoom;
+      const y2 = (e.clientY - photoPrintDrag.paperTop) / dragZoom;
+      box.hidden = false;
+      box.style.left = `${Math.min(x1,x2)}px`;
+      box.style.top = `${Math.min(y1,y2)}px`;
+      box.style.width = `${Math.abs(x2-x1)}px`;
+      box.style.height = `${Math.abs(y2-y1)}px`;
+    }
+    return;
+  }
+  const item = photoPrintDrag.kind === "text" ? (state.photoPrint.texts || []).find(t => t.id === photoPrintDrag.id) : (state.photoPrint.photos || []).find(p => p.id === photoPrintDrag.id);
+  if (!item) return;
+  if (photoPrintDrag.kind === "text") {
+    if (photoPrintDrag.resizeDir) {
+      let newX = photoPrintDrag.x, newY = photoPrintDrag.y, newW = photoPrintDrag.w, newH = photoPrintDrag.h;
+      if (photoPrintDrag.resizeDir.includes("e")) newW = photoPrintDrag.w + dx;
+      if (photoPrintDrag.resizeDir.includes("s")) newH = photoPrintDrag.h + dy;
+      if (photoPrintDrag.resizeDir.includes("w")) { newW = photoPrintDrag.w - dx; newX = photoPrintDrag.x + dx; }
+      if (photoPrintDrag.resizeDir.includes("n")) { newH = photoPrintDrag.h - dy; newY = photoPrintDrag.y + dy; }
+      item.w = Math.max(40, newW); item.h = Math.max(24, newH); item.x = newX; item.y = newY;
+    } else if (Array.isArray(photoPrintDrag.groupItems) && photoPrintDrag.groupItems.length > 1) {
+      const activeStart = photoPrintDrag.groupItems.find(g => g.id === item.id) || { x: photoPrintDrag.x, y: photoPrintDrag.y };
+      const snapped = snapPhotoPrintPosition(item, activeStart.x + dx, activeStart.y + dy);
+      const offX = snapped.x - activeStart.x;
+      const offY = snapped.y - activeStart.y;
+      photoPrintDrag.groupItems.forEach(g => {
+        const found = g.kind === "text" ? (state.photoPrint.texts || []).find(t => t.id === g.id) : (state.photoPrint.photos || []).find(p => p.id === g.id);
+        if (!found) return;
+        found.x = g.x + offX; found.y = g.y + offY;
+        const el = g.kind === "text" ? document.querySelector(`.photo-text-item[data-photo-text-id="${CSS.escape(g.id)}"]`) : document.querySelector(`.photo-item[data-photo-id="${CSS.escape(g.id)}"]`);
+        if (el) { el.style.left = `${found.x}px`; el.style.top = `${found.y}px`; el.classList.add("selected"); }
+      });
+    } else {
+      const snapped = snapPhotoPrintPosition(item, photoPrintDrag.x + dx, photoPrintDrag.y + dy);
+      item.x = snapped.x; item.y = snapped.y;
+    }
+    const textEl = document.querySelector(`.photo-text-item[data-photo-text-id="${CSS.escape(item.id)}"]`);
+    if (textEl) { textEl.style.left = `${item.x}px`; textEl.style.top = `${item.y}px`; textEl.style.width = `${item.w}px`; textEl.style.height = `${item.h}px`; textEl.classList.add("selected"); updatePhotoPrintSnapHintDom(); }
+    return;
+  }
+  if (photoPrintDrag.rotateDir) {
+    const ang = Math.atan2(e.clientY - photoPrintDrag.centerY, e.clientX - photoPrintDrag.centerX) * 180 / Math.PI;
+    item.rotate = Math.round(photoPrintDrag.rotate + (ang - photoPrintDrag.startAngle));
+  } else if (photoPrintDrag.cropDir) {
+    const cx = dx / Math.max(1, photoPrintDrag.w) * 100;
+    const cy = dy / Math.max(1, photoPrintDrag.h) * 100;
+    if (photoPrintDrag.cropDir.includes("w")) item.cropL = Math.max(0, Math.min(95 - Number(item.cropR || 0), photoPrintDrag.cropL + cx));
+    if (photoPrintDrag.cropDir.includes("e")) item.cropR = Math.max(0, Math.min(95 - Number(item.cropL || 0), photoPrintDrag.cropR - cx));
+    if (photoPrintDrag.cropDir.includes("n")) item.cropT = Math.max(0, Math.min(95 - Number(item.cropB || 0), photoPrintDrag.cropT + cy));
+    if (photoPrintDrag.cropDir.includes("s")) item.cropB = Math.max(0, Math.min(95 - Number(item.cropT || 0), photoPrintDrag.cropB - cy));
+  } else if (photoPrintDrag.cropBoxMove) {
+    const cx = dx / Math.max(1, photoPrintDrag.w) * 100;
+    const cy = dy / Math.max(1, photoPrintDrag.h) * 100;
+    const newL = Math.max(0, Math.min(100 - photoPrintDrag.cropVisibleW, photoPrintDrag.cropL + cx));
+    const newT = Math.max(0, Math.min(100 - photoPrintDrag.cropVisibleH, photoPrintDrag.cropT + cy));
+    item.cropL = newL;
+    item.cropT = newT;
+    item.cropR = Math.max(0, 100 - newL - photoPrintDrag.cropVisibleW);
+    item.cropB = Math.max(0, 100 - newT - photoPrintDrag.cropVisibleH);
+  } else if (photoPrintDrag.resizeDir) {
+    let newX = photoPrintDrag.x;
+    let newY = photoPrintDrag.y;
+    let newW = photoPrintDrag.w;
+    let newH = photoPrintDrag.h;
+    if (photoPrintDrag.resizeDir.includes("e")) newW = photoPrintDrag.w + dx;
+    if (photoPrintDrag.resizeDir.includes("s")) newH = photoPrintDrag.h + dy;
+    if (photoPrintDrag.resizeDir.includes("w")) { newW = photoPrintDrag.w - dx; newX = photoPrintDrag.x + dx; }
+    if (photoPrintDrag.resizeDir.includes("n")) { newH = photoPrintDrag.h - dy; newY = photoPrintDrag.y + dy; }
+    if (!e.shiftKey) {
+      const ratio = Math.max(0.05, photoPrintDrag.h / Math.max(1, photoPrintDrag.w));
+      const scale = Math.max(40 / photoPrintDrag.w, 40 / photoPrintDrag.h, Math.max(newW / photoPrintDrag.w, newH / photoPrintDrag.h));
+      newW = photoPrintDrag.w * scale;
+      newH = photoPrintDrag.h * scale;
+      if (photoPrintDrag.resizeDir.includes("w")) newX = photoPrintDrag.x + (photoPrintDrag.w - newW);
+      if (photoPrintDrag.resizeDir.includes("n")) newY = photoPrintDrag.y + (photoPrintDrag.h - newH);
+    }
+    item.w = Math.max(40, newW);
+    item.h = Math.max(40, newH);
+    item.x = Math.max(-item.w + 20, Math.min(getPhotoPrintPaperW() - 20, newX));
+    item.y = Math.max(-item.h + 20, Math.min(getPhotoPrintPaperH() - 20, newY));
+  } else if (Array.isArray(photoPrintDrag.groupItems) && photoPrintDrag.groupItems.length > 1) {
+    const activeStart = photoPrintDrag.groupItems.find(g => g.id === item.id) || { x: photoPrintDrag.x, y: photoPrintDrag.y };
+    let nextX = Math.max(-item.w + 20, Math.min(getPhotoPrintPaperW() - 20, activeStart.x + dx));
+    let nextY = Math.max(-item.h + 20, Math.min(getPhotoPrintPaperH() - 20, activeStart.y + dy));
+    const snapped = snapPhotoPrintPosition(item, nextX, nextY);
+    const offX = snapped.x - activeStart.x;
+    const offY = snapped.y - activeStart.y;
+    photoPrintDrag.groupItems.forEach(g => {
+      const found = g.kind === "text" ? (state.photoPrint.texts || []).find(t => t.id === g.id) : (state.photoPrint.photos || []).find(p => p.id === g.id);
+      if (!found) return;
+      found.x = g.x + offX; found.y = g.y + offY;
+      const el = g.kind === "text" ? document.querySelector(`.photo-text-item[data-photo-text-id="${CSS.escape(g.id)}"]`) : document.querySelector(`.photo-item[data-photo-id="${CSS.escape(g.id)}"]`);
+      if (el) { el.style.left = `${found.x}px`; el.style.top = `${found.y}px`; el.classList.add("selected"); }
+    });
+  } else {
+    let nextX = Math.max(-item.w + 20, Math.min(getPhotoPrintPaperW() - 20, photoPrintDrag.x + dx));
+    let nextY = Math.max(-item.h + 20, Math.min(getPhotoPrintPaperH() - 20, photoPrintDrag.y + dy));
+    const snapped = snapPhotoPrintPosition(item, nextX, nextY);
+    item.x = Math.max(-item.w + 20, Math.min(getPhotoPrintPaperW() - 20, snapped.x));
+    item.y = Math.max(-item.h + 20, Math.min(getPhotoPrintPaperH() - 20, snapped.y));
+  }
+  const el = document.querySelector(`.photo-item[data-photo-id="${CSS.escape(item.id)}"]`);
+  if (el) {
+    el.style.left = `${item.x}px`; el.style.top = `${item.y}px`; el.style.width = `${item.w}px`; el.style.height = `${item.h}px`; el.style.transform = `rotate(${item.rotate || 0}deg)`; el.classList.add("selected");
+    const img = el.querySelector("img");
+    if (img) img.style.cssText = getPhotoPrintImgStyle(item, item.id === state.photoPrint.selectedId && state.photoPrint.cropMode);
+    updatePhotoPrintSnapHintDom();
+    const cropBox = el.querySelector("[data-photo-crop-box]");
+    if (cropBox) { const b = getPhotoPrintCropBounds(item); cropBox.style.left = `${b.l}%`; cropBox.style.top = `${b.t}%`; cropBox.style.width = `${b.visibleW}%`; cropBox.style.height = `${b.visibleH}%`; }
+  }
+});
+
+function updatePhotoPrintSnapHintDom() {
+  const paper = document.getElementById('photoPrintPaper');
+  if (!paper) return;
+  paper.querySelectorAll('.photo-snap-line,.photo-snap-dot').forEach(el => el.remove());
+  const html = renderPhotoPrintSnapHint();
+  if (html) paper.insertAdjacentHTML('beforeend', html);
+}
+async function finishPhotoPrintPointerDrag() {
+  if (photoTextRibbonDrag) {
+    photoTextRibbonDrag = null;
+    await savePhotoPrintWorkspaceLocal();
+    return;
+  }
+  if (!photoPrintDrag) return;
+  if (photoPrintDrag.kind === "selectBox") {
+    const box = document.querySelector("[data-photo-selection-box]");
+    const rect = box?.getBoundingClientRect();
+    const paperRect = document.getElementById("photoPrintPaper")?.getBoundingClientRect();
+    const zoom = Number(photoPrintDrag.zoom || state.photoPrint.zoom || 1);
+    if (rect && paperRect && rect.width > 4 && rect.height > 4) {
+      const sel = { x:(rect.left-paperRect.left)/zoom, y:(rect.top-paperRect.top)/zoom, w:rect.width/zoom, h:rect.height/zoom };
+      const hits = [...(state.photoPrint.photos||[]), ...(state.photoPrint.texts||[])].filter(item => {
+        const b = { x:Number(item.x||0), y:Number(item.y||0), w:Number(item.w||1), h:Number(item.h||1) };
+        return b.x < sel.x + sel.w && b.x + b.w > sel.x && b.y < sel.y + sel.h && b.y + b.h > sel.y;
+      }).map(item => item.id);
+      setPhotoPrintSelection(hits);
+    } else {
+      setPhotoPrintSelection([]);
+    }
+    photoPrintDrag = null;
+    renderPhotoPrintTool();
+    return;
+  }
+  state.photoPrint.snapHint = null;
+  photoPrintDrag = null;
+  await savePhotoPrintWorkspaceLocal();
+  renderPhotoPrintTool();
+}
+
+document.addEventListener("pointerup", finishPhotoPrintPointerDrag);
+document.addEventListener("pointercancel", finishPhotoPrintPointerDrag);
+document.addEventListener("lostpointercapture", async () => {
+  if (photoTextRibbonDrag) {
+    photoTextRibbonDrag = null;
+    await savePhotoPrintWorkspaceLocal();
+  }
+});
+
+
+
+
+document.addEventListener("dblclick", async (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const textEl = e.target.closest?.(".photo-text-item[data-photo-text-id]");
+  if (!textEl) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+  const id = textEl.dataset.photoTextId;
+  const item = (state.photoPrint.texts || []).find(t => t.id === id);
+  if (!item) return;
+
+  // v180: enter edit mode immediately on the double-click and focus the actual
+  // contenteditable node in-place. Re-rendering here caused Chrome to show the
+  // text cursor mode but not place the caret until a third click.
+  (state.photoPrint.texts || []).forEach(t => { t.isEditing = t.id === id; });
+  state.photoPrint.selectedId = id;
+  state.photoPrint.selectedType = "text";
+  state.photoPrint.suppressTextBlurUntil = Date.now() + 900;
+
+  document.querySelectorAll(".photo-text-item").forEach(el => {
+    const active = el.dataset.photoTextId === id;
+    el.classList.toggle("selected", active);
+    el.classList.toggle("editing", active);
+    const c = el.querySelector("[data-photo-text-content]");
+    if (c) c.setAttribute("contenteditable", active ? "true" : "false");
+  });
+
+  const focusEditableText = () => {
+    const content = document.querySelector(`.photo-text-item[data-photo-text-id="${CSS.escape(id)}"] [data-photo-text-content]`);
+    if (!content) return false;
+    content.setAttribute("contenteditable", "true");
+    content.tabIndex = 0;
+    content.focus({ preventScroll: true });
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    return document.activeElement === content;
+  };
+
+  focusEditableText();
+  requestAnimationFrame(() => {
+    focusEditableText();
+    setTimeout(focusEditableText, 25);
+    setTimeout(focusEditableText, 75);
+  });
+});
+
+document.addEventListener("focusout", async (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const content = e.target.closest?.("[data-photo-text-content]");
+  if (!content) return;
+  if (Date.now() < Number(state.photoPrint.suppressTextBlurUntil || 0)) return;
+  const related = e.relatedTarget;
+  if (related?.closest?.("[data-photo-text-ribbon]")) return;
+  const id = content.dataset.photoTextContent;
+  const item = (state.photoPrint.texts || []).find(t => t.id === id);
+  if (!item) return;
+  item.text = content.innerText || "";
+  item.isEditing = false;
+  await savePhotoPrintWorkspaceLocal();
+  renderPhotoPrintTool();
+});
+
+document.addEventListener("wheel", (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const stage = e.target.closest?.("[data-photo-print-stage]");
+  if (!stage) return;
+  e.preventDefault();
+  const current = Number(state.photoPrint.zoom || 0.75);
+  const factor = e.deltaY < 0 ? 1.08 : 0.92;
+  setPhotoPrintZoom(current * factor, e);
+}, { passive: false });
+
+
+document.addEventListener("dragstart", (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const row = e.target.closest?.("[data-photo-layer-drag]");
+  if (!row) return;
+  state.photoPrint.layerDragId = row.dataset.photoLayerDrag || "";
+  e.dataTransfer.effectAllowed = "move";
+  try { e.dataTransfer.setData("text/plain", state.photoPrint.layerDragId); } catch (err) {}
+});
+
+document.addEventListener("dragover", (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const row = e.target.closest?.("[data-photo-layer-drag]");
+  if (!row || !state.photoPrint.layerDragId) return;
+  e.preventDefault();
+  row.classList.add("drag-over");
+});
+
+document.addEventListener("dragleave", (e) => {
+  e.target.closest?.("[data-photo-layer-drag]")?.classList.remove("drag-over");
+});
+
+document.addEventListener("drop", async (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const row = e.target.closest?.("[data-photo-layer-drag]");
+  const dragId = state.photoPrint.layerDragId;
+  if (!row || !dragId) return;
+  e.preventDefault();
+  document.querySelectorAll(".photo-layer-row.drag-over").forEach(el => el.classList.remove("drag-over"));
+  const rows = Array.from(document.querySelectorAll("[data-photo-layer-drag]"));
+  const targetIndex = Math.max(0, rows.indexOf(row));
+  movePhotoPrintLayerTo(dragId, targetIndex);
+  state.photoPrint.selectedId = dragId;
+  state.photoPrint.layerDragId = "";
+  await savePhotoPrintWorkspaceLocal();
+  renderPhotoPrintTool();
+});
+
+document.addEventListener("dragend", () => {
+  if (state.photoPrint) state.photoPrint.layerDragId = "";
+  document.querySelectorAll(".photo-layer-row.drag-over").forEach(el => el.classList.remove("drag-over"));
+});
+
+document.addEventListener("contextmenu", async (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const row = e.target.closest?.("[data-photo-context-filter]");
+  if (!row) return;
+  e.preventDefault();
+  const id = row.dataset.photoContextFilter;
+  const item = (state.photoPrint.photos || []).find(p => p.id === id);
+  if (!item) return;
+  state.photoPrint.selectedId = id;
+  state.photoPrint.selectedType = "photo";
+  const pad = 170;
+  state.photoPrint.contextMenu = {
+    id,
+    x: Math.min(window.innerWidth - pad, Math.max(8, e.clientX)),
+    y: Math.min(window.innerHeight - 90, Math.max(8, e.clientY))
+  };
+  renderPhotoPrintTool();
+});
+
+document.addEventListener("pointerdown", (e) => {
+  if (state.currentView !== "photoPrint") return;
+  if (!state.photoPrint?.contextMenu) return;
+  if (e.target.closest?.("[data-photo-context-menu]") || e.target.closest?.("[data-photo-context-filter]")) return;
+  state.photoPrint.contextMenu = null;
+  renderPhotoPrintTool();
+});
+
 function renderCurrentView() {
+  if (state.publicShareView) {
+    renderPublicSharePage(state.publicShareView).catch(err => { console.error(err); renderLanding(); });
+    return;
+  }
   if (!state.session) {
     renderLanding();
+    return;
+  }
+
+  if (isOnboardingRequired(state.session) && state.currentView !== "onboarding") {
+    renderOnboardingPage();
+    return;
+  }
+
+  if (state.currentView === "onboarding") {
+    renderOnboardingPage();
+    return;
+  }
+
+  if (state.currentView === "profile") {
+    renderProfileHome();
     return;
   }
 
@@ -6118,7 +8487,9 @@ function renderCurrentView() {
     renderMoneyRequestsTool();
     return;
   }
+  if (state.currentView === "coreChampion") { renderCoreChampionTool(); return; }
   if (state.currentView === "campusCares") { renderCampusCaresTool(); return; }
+  if (state.currentView === "photoPrint") { renderPhotoPrintTool(); return; }
   if (state.currentView === "notificationSettings") { renderNotificationSettings(); return; }
 
   if (state.currentView === "villageVoice") {
@@ -6133,12 +8504,58 @@ function render() {
   renderCurrentView();
 }
 
+
+$app.addEventListener("input", async (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const editableTextId = e.target.closest?.("[data-photo-text-content]")?.dataset.photoTextContent;
+  if (editableTextId) {
+    const t = (state.photoPrint.texts || []).find(x => x.id === editableTextId);
+    if (!t) return;
+    state.photoPrint.selectedId = editableTextId;
+    state.photoPrint.selectedType = "text";
+    t.text = e.target.innerText || "";
+    const ribbonInput = document.querySelector(`[data-photo-text-ribbon] [data-photo-text-prop="text"]`);
+    if (ribbonInput && ribbonInput !== e.target) ribbonInput.value = t.text;
+    clearTimeout(state.photoPrintTextSaveTimer);
+    state.photoPrintTextSaveTimer = setTimeout(() => savePhotoPrintWorkspaceLocal(), 250);
+    return;
+  }
+  if (!e.target.matches("[data-photo-text-prop]")) return;
+  const t = getSelectedPhotoPrintText();
+  const prop = e.target.dataset.photoTextProp;
+  if (!t || !prop) return;
+  const value = e.target.value;
+  if (["size","opacity","lineHeight","letterSpacing","outlineWidth"].includes(prop)) t[prop] = Number(value); else t[prop] = value;
+  const textEl = document.querySelector(`.photo-text-item[data-photo-text-id="${CSS.escape(t.id)}"] .photo-text-content`);
+  if (textEl) {
+    textEl.style.cssText = renderPhotoTextStyle(t);
+    textEl.textContent = t.text || "";
+  }
+  clearTimeout(state.photoPrintTextSaveTimer);
+  state.photoPrintTextSaveTimer = setTimeout(() => savePhotoPrintWorkspaceLocal(), 250);
+});
+
 $app.addEventListener("change", async (e) => {
+  if (e.target.matches("[data-photo-print-upload]")) { await addPhotoPrintFiles(e.target.files); e.target.value = ""; return; }
+  if (e.target.matches("[data-photo-text-prop]")) {
+    const t = getSelectedPhotoPrintText();
+    const prop = e.target.dataset.photoTextProp;
+    if (t && prop) {
+      const value = e.target.value;
+      if (["size","opacity","lineHeight","letterSpacing","outlineWidth"].includes(prop)) t[prop] = Number(value); else t[prop] = value;
+      state.photoPrint.textDefaults = { ...(state.photoPrint.textDefaults || {}), color: t.color, size: t.size, font: t.font, align: t.align, outlineColor: t.outlineColor, outlineWidth: t.outlineWidth };
+      await savePhotoPrintWorkspaceLocal();
+      renderPhotoPrintTool();
+    }
+    return;
+  }
   if (e.target.matches("[data-education-level]")) {
     const row = e.target.closest("[data-education-row]");
     const isCert = e.target.value === "Certificate";
-    row?.querySelector(".education-in")?.classList.toggle("hidden", isCert);
-    row?.querySelector('[name="educationField"]')?.classList.toggle("hidden", isCert);
+    const isHighSchool = e.target.value === "High School Diploma";
+    row?.querySelector(".education-in")?.classList.toggle("hidden", isCert || isHighSchool);
+    row?.querySelector('[name="educationField"]')?.classList.toggle("hidden", isCert || isHighSchool);
+    row?.querySelector('[name="educationGradYear"]')?.classList.toggle("hidden", !isHighSchool);
     row?.querySelector('[name="educationCertificate"]')?.classList.toggle("hidden", !isCert);
     refreshEducationCertificateOptions(row?.closest("[data-education-builder]") || document);
     return;
@@ -6147,6 +8564,12 @@ $app.addEventListener("change", async (e) => {
     refreshEducationCertificateOptions(e.target.closest("[data-education-builder]") || document);
     return;
   }
+  if (e.target.matches("[data-core-schedule-type]")) {
+    state.appSettings = { ...(state.appSettings || {}), coreChampionScheduleType: e.target.value };
+    renderLeadership();
+    return;
+  }
+  if (e.target.matches("[data-core-eligible]")) { await toggleCoreEligible(e.target.dataset.coreEligible, e.target.checked); return; }
   if (e.target.matches("[data-dev-view-role]")) {
     state.devViewRoleKey = e.target.value;
     state.selectedMoneyApprovalIds = [];
@@ -6166,22 +8589,6 @@ $app.addEventListener("change", async (e) => {
       showToast("Important dates import saved.");
     } catch (err) {
       alert(err.message || "That file could not be imported. Please use the converted family calendar JSON file.");
-    }
-    return;
-  }
-
-  if (e.target.matches("[data-budget-code-upload]")) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      showAppLoading("Importing budget codes...");
-      await importBudgetCodesFromFile(file);
-      e.target.value = "";
-      renderOwnersPanel();
-    } catch (err) {
-      alert(err.message || "That budget code file could not be imported.");
-    } finally {
-      hideAppLoading();
     }
     return;
   }
@@ -6461,6 +8868,7 @@ $app.addEventListener("click", async (e) => {
   const tab = e.target.closest("[data-tab]")?.dataset.tab;
   const action = e.target.closest("[data-action]")?.dataset.action;
   const resetPin = e.target.closest("[data-reset-pin]")?.dataset.resetPin;
+  const resetUserOnboarding = e.target.closest("[data-reset-user-onboarding]")?.dataset.resetUserOnboarding;
   const deleteUid = e.target.closest("[data-delete-user]")?.dataset.deleteUser;
   const deletePositionId = e.target.closest("[data-delete-position]")?.dataset.deletePosition;
   const deleteRoleId = e.target.closest("[data-delete-role]")?.dataset.deleteRole;
@@ -6478,6 +8886,20 @@ $app.addEventListener("click", async (e) => {
   const deleteCertificateId = e.target.closest("[data-delete-certificate]")?.dataset.deleteCertificate;
   const printableTab = e.target.closest("[data-printable-tab]")?.dataset.printableTab;
   const clearBrandingLogo = e.target.closest("[data-clear-branding-logo]");
+  const onboardingPrev = e.target.closest("[data-onboarding-prev]");
+  const onboardingGoStep = e.target.closest("[data-onboarding-go-step]")?.dataset.onboardingGoStep;
+  const leaderCheckbox = e.target.closest("[data-new-user-leader-checkbox]");
+  if (leaderCheckbox) {
+    const form = leaderCheckbox.closest("form");
+    const box = form?.querySelector("[data-new-user-leader-password]");
+    if (box) box.hidden = !leaderCheckbox.checked;
+    return;
+  }
+  if (e.target.closest("[data-photo-print-open-upload]")) { document.querySelector("[data-photo-print-upload]")?.click(); return; }
+  if (e.target.closest("[data-photo-zoom-reset]")) { setPhotoPrintZoom(1); return; }
+  if (onboardingPrev) { state.onboardingStep = Math.max(0, Number(state.onboardingStep || 0) - 1); renderOnboardingPage(); return; }
+  if (onboardingGoStep !== undefined) { state.onboardingStep = Math.max(0, Math.min(Number(onboardingGoStep || 0), 3)); renderOnboardingPage(); return; }
+  if (modalType === "forcePinChange") { state.modal = { type: "forcePinChange" }; renderCurrentView(); return; }
   if (printableTab) {
     state.printableTab = printableTab;
     renderVillageVoiceTool();
@@ -6502,14 +8924,136 @@ $app.addEventListener("click", async (e) => {
   const nukeCampusCareRequests = e.target.closest("[data-nuke-campus-care-requests]");
   const clearDevPreview = e.target.closest("[data-clear-dev-preview]");
   const openSelfProfile = e.target.closest("[data-open-self-profile]");
-
   const permissionToolToggle = e.target.closest("[data-permission-tool-toggle]")?.dataset.permissionToolToggle;
   const addPermissionRole = e.target.closest("[data-add-permission-role]")?.dataset.addPermissionRole;
   const removePermissionRole = e.target.closest("[data-remove-permission-role]")?.dataset.removePermissionRole;
   const addPermissionPosition = e.target.closest("[data-add-permission-position]")?.dataset.addPermissionPosition;
   const removePermissionPosition = e.target.closest("[data-remove-permission-position]")?.dataset.removePermissionPosition;
 
-  if (openSelfProfile) { state.modal = { type: "selfProfile", user: { ...state.session } }; renderCurrentView(); return; }
+  if (e.target.closest("[data-finish-onboarding]")) { await withAppLoading("Finishing onboarding...", completeOnboardingIfReady); return; }
+  const onboardingProfileBtn = e.target.closest("[data-open-onboarding-profile]");
+  if (onboardingProfileBtn) { state.modal = null; renderProfileHome(); return; }
+  const copyShareLink = e.target.closest("[data-copy-share-link]")?.dataset.copyShareLink;
+  if (copyShareLink) { try { await navigator.clipboard.writeText(copyShareLink); showToast("Link copied."); } catch (err) { showToast("Copy failed. Select and copy the link manually."); } renderLeadership(); return; }
+  const publicPositionSummary = e.target.closest("[data-public-position-card] > summary");
+  if (publicPositionSummary) {
+    const card = publicPositionSummary.closest("[data-public-position-card]");
+    document.querySelectorAll("[data-public-position-card][open]").forEach(other => { if (other !== card) other.removeAttribute("open"); });
+  }
+  const publicPersonId = e.target.closest("[data-public-person]")?.dataset.publicPerson;
+  if (publicPersonId) {
+    const u = (state.publicShareUsers || []).find(x => x.uid === publicPersonId);
+    if (u) { state.modal = { type: "publicWhatILike", user: u }; renderCurrentView(); }
+    return;
+  }
+  const addLikeRowKey = e.target.closest("[data-add-like-row]")?.dataset.addLikeRow;
+  if (addLikeRowKey) {
+    const wrap = e.target.closest(`[data-like-rows="${addLikeRowKey}"]`);
+    const input = wrap?.querySelector(`[name="like_${addLikeRowKey}"]`);
+    const value = String(input?.value || "").trim();
+    if (wrap && input && value) {
+      const list = wrap.querySelector(`[data-like-chip-list="${addLikeRowKey}"]`);
+      list?.querySelector(".like-empty-hint")?.remove();
+      list?.classList.remove("is-empty");
+      const existing = Array.from(list?.querySelectorAll(`[data-like-chip-value="${addLikeRowKey}"]`) || []).map(x => String(x.value || "").toLowerCase());
+      if (!existing.includes(value.toLowerCase())) list?.insertAdjacentHTML("beforeend", renderLikeChip(addLikeRowKey, value));
+      input.value = "";
+      wrap.querySelector("[data-add-like-row]")?.classList.add("hidden");
+      input.focus();
+    }
+    return;
+  }
+  if (e.target.closest("[data-remove-like-chip]")) {
+    const list = e.target.closest("[data-like-chip-list]");
+    e.target.closest("[data-like-chip]")?.remove();
+    if (list && !list.querySelector("[data-like-chip]")) {
+      list.classList.add("is-empty");
+      list.innerHTML = `<span class="like-empty-hint">No items yet.</span>`;
+    }
+    return;
+  }
+  if (e.target.closest("[data-remove-like-row]")) {
+    e.target.closest("[data-like-row]")?.remove();
+    return;
+  }
+  if (openSelfProfile) { renderProfileHome(); return; }
+  const selfProfileEditorBtn = e.target.closest("[data-open-self-profile-editor]");
+  if (selfProfileEditorBtn) {
+    state.modal = { type: "selfProfile", section: selfProfileEditorBtn.dataset.profileSection || "details", user: { ...state.session } };
+    renderCurrentView();
+    return;
+  }
+
+
+  const duplicateChoice = e.target.closest("[data-photo-duplicate-choice]")?.dataset.photoDuplicateChoice;
+  if (duplicateChoice) {
+    if (duplicateChoice === "cancel") { state.photoPrint.duplicatePrompt = null; renderPhotoPrintTool(); return; }
+    await duplicatePhotoPrintSelectionSmart(duplicateChoice === "fill" ? "fill" : "once");
+    return;
+  }
+  const photoOrientation = e.target.closest("[data-photo-orientation]")?.dataset.photoOrientation;
+  if (photoOrientation) { state.photoPrint.orientation = photoOrientation === "landscape" ? "landscape" : "portrait"; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); return; }
+  const photoGuideStep = e.target.closest("[data-photo-guide-step]")?.dataset.photoGuideStep;
+  if (photoGuideStep) { const [kind, rawStep] = photoGuideStep.split(":"); const key = kind === "cols" ? "guideCols" : "guideRows"; state.photoPrint[key] = Math.max(1, Math.min(8, Number(state.photoPrint[key] || 1) + Number(rawStep || 0))); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); return; }
+  if (e.target.closest("[data-photo-snap-toggle]")) { state.photoPrint.snapGuides = state.photoPrint.snapGuides === false; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); return; }
+  if (e.target.closest("[data-photo-add-text]")) { pushPhotoPrintHistory(); addPhotoPrintTextBox(); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); return; }
+
+  const photoSelect = e.target.closest("[data-photo-select]")?.dataset.photoSelect;
+  if (photoSelect) { setPhotoPrintSelection(e.ctrlKey || e.metaKey ? (getPhotoPrintSelectedIds().includes(photoSelect) ? getPhotoPrintSelectedIds().filter(id => id !== photoSelect) : [...getPhotoPrintSelectedIds(), photoSelect]) : [photoSelect], photoSelect); state.photoPrint.cropMode = false; renderPhotoPrintTool(); return; }
+  if (e.target.closest("[data-photo-print-print]")) { printPhotoPrintPage(); return; }
+  if (e.target.closest("[data-photo-print-clear]")) { if (confirm("Clear all photos from this local page?")) { state.photoPrint = { ...defaultPhotoPrintState(), loaded: true }; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  if (e.target.closest("[data-photo-duplicate-selected]")) { openPhotoPrintDuplicatePrompt(); return; }
+  const photoLayer = e.target.closest("[data-photo-layer]")?.dataset.photoLayer;
+  if (photoLayer) { const id = state.photoPrint.selectedId; if (id) { movePhotoPrintAnyLayer(id, photoLayer); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  const photoReset = e.target.closest("[data-photo-reset]")?.dataset.photoReset;
+  if (photoReset) { const item = getSelectedPhotoPrintItem(); if (item) { if (photoReset === "crop") { item.cropL = 0; item.cropT = 0; item.cropR = 0; item.cropB = 0; } if (photoReset === "rotation") item.rotate = 0; if (photoReset === "size") { const b = getPhotoPrintBaseDims(item); item.w = b.w; item.h = b.h; } await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  const photoFit = e.target.closest("[data-photo-fit]")?.dataset.photoFit;
+  if (photoFit) { if (fitPhotoPrintSelectedToGuide(photoFit)) { await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  if (e.target.closest("[data-photo-crop-toggle]")) {
+    const item = getSelectedPhotoPrintItem();
+    if (state.photoPrint.cropMode && item) {
+      const b = getPhotoPrintCropBounds(item);
+      item.x = (item.x || 0) + (item.w || 1) * b.l / 100;
+      item.y = (item.y || 0) + (item.h || 1) * b.t / 100;
+      item.w = Math.max(30, (item.w || 1) * b.visibleW / 100);
+      item.h = Math.max(30, (item.h || 1) * b.visibleH / 100);
+    }
+    state.photoPrint.cropMode = !state.photoPrint.cropMode;
+    await savePhotoPrintWorkspaceLocal();
+    renderPhotoPrintTool();
+    return;
+  }
+  if (e.target.closest("[data-photo-delete]")) { deletePhotoPrintSelection(); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); return; }
+  if (e.target.closest("[data-photo-duplicate]")) { openPhotoPrintDuplicatePrompt(); return; }
+
+  const textPropEl = e.target.closest("[data-photo-text-prop]");
+  const textProp = textPropEl?.dataset.photoTextProp;
+  if (textProp && textPropEl.tagName === "BUTTON") {
+    const t = getSelectedPhotoPrintText();
+    if (t) {
+      pushPhotoPrintHistory();
+      const value = textPropEl.value || textPropEl.getAttribute("value") || "";
+      if (["size","opacity","lineHeight","letterSpacing","outlineWidth"].includes(textProp)) t[textProp] = Number(value);
+      else t[textProp] = value;
+      state.photoPrint.textDefaults = { ...(state.photoPrint.textDefaults || {}), color: t.color, size: t.size, font: t.font, align: t.align, outlineColor: t.outlineColor, outlineWidth: t.outlineWidth };
+      await savePhotoPrintWorkspaceLocal();
+      renderPhotoPrintTool();
+    }
+    return;
+  }
+  const textToggle = e.target.closest("[data-photo-text-toggle]")?.dataset.photoTextToggle;
+  if (textToggle) { const t = getSelectedPhotoPrintText(); if (t) { pushPhotoPrintHistory(); t[textToggle] = !t[textToggle]; autoSizePhotoTextBox(t); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  if (e.target.closest("[data-photo-text-clear-bg]")) { const t = getSelectedPhotoPrintText(); if (t) { pushPhotoPrintHistory(); t.background = "transparent"; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  const textLayer = e.target.closest("[data-photo-text-layer]")?.dataset.photoTextLayer;
+  if (textLayer) { const id = state.photoPrint.selectedId; if (id) { movePhotoPrintAnyLayer(id, textLayer); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  if (e.target.closest("[data-photo-text-delete]")) { deletePhotoPrintSelection(); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); return; }
+  if (e.target.closest("[data-photo-text-duplicate]")) { openPhotoPrintDuplicatePrompt(); return; }
+  const chromaContextId = e.target.closest("[data-photo-context-chroma]")?.dataset.photoContextChroma;
+  if (chromaContextId) { const item = (state.photoPrint.photos || []).find(p => p.id === chromaContextId); if (item) { setPhotoPrintSelection([item.id], item.id); state.photoPrint.contextMenu = null; await applyPhotoChromaKey(item, item.chromaKeyColor || "#00ff00", item.chromaKeyTolerance || 70); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  const removeFilterId = e.target.closest("[data-photo-context-remove-filter]")?.dataset.photoContextRemoveFilter;
+  if (removeFilterId) { const item = (state.photoPrint.photos || []).find(p => p.id === removeFilterId); if (item?.originalSrc) { item.src = item.originalSrc; delete item.originalSrc; delete item.chromaKeyColor; delete item.chromaKeyTolerance; setPhotoPrintSelection([item.id], item.id); state.photoPrint.contextMenu = null; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  if (e.target.closest("[data-photo-apply-chroma]")) { const item = getSelectedPhotoPrintItem(); if (item) { const color = document.querySelector("[data-photo-filter-color]")?.value || item.chromaKeyColor || "#00ff00"; const tolerance = Number(document.querySelector("[data-photo-filter-tolerance]")?.value || item.chromaKeyTolerance || 70); await applyPhotoChromaKey(item, color, tolerance); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
+  if (e.target.closest("[data-photo-reset-filter]")) { const item = getSelectedPhotoPrintItem(); if (item?.originalSrc) { item.src = item.originalSrc; delete item.originalSrc; delete item.chromaKeyColor; delete item.chromaKeyTolerance; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
 
   if (clearDevPreview) { await withAppLoading("Updating view...", async () => { state.devViewRoleKey = ""; state.devViewPosition = ""; renderHome(); }); return; }
   if (editImportantDateId) { state.editingImportantDateId = editImportantDateId; renderLeadership(); return; }
@@ -6693,11 +9237,6 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
-  if (e.target.closest("[data-trigger-budget-code-upload]")) {
-    document.querySelector("[data-budget-code-upload]")?.click();
-    return;
-  }
-
   if (denyMoneyRequestId) {
     state.modal = { type: "denyMoneyRequest", requestId: denyMoneyRequestId, stage: denyStage || "pendingDoso", error: "" };
     renderMoneyRequestsTool();
@@ -6799,6 +9338,7 @@ $app.addEventListener("click", async (e) => {
   }
 
   if (toolId === "campusCares") { await withAppLoading("Opening Campus Cares...", async () => { await refreshCampusCaresData(); const mode=getCampusCaresOpenPreference(); if (mode === "submitted") state.campusCaresTab = "submitted"; renderCampusCaresTool(); if (mode === "submitPopup") { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); } }); return; }
+  if (toolId === "photoPrint") { await withAppLoading("Opening Photo Print and Edit...", async () => { await loadPhotoPrintWorkspace(); renderPhotoPrintTool(); }); return; }
   if (toolId === "villageVoice") { await withAppLoading("Opening Printables...", async () => { await refreshAdminData(); state.printableTab = state.printableTab || "villageVoice"; renderVillageVoiceTool(); }); return; }
   if (toolId === "moneyRequests") {
     await withAppLoading("Opening Money Requests...", async () => {
@@ -6807,6 +9347,20 @@ $app.addEventListener("click", async (e) => {
     });
     return;
   }
+  if (toolId === "coreChampion") { await withAppLoading("Opening Core Count Champion...", async () => { await refreshAdminData(); renderCoreChampionTool(); }); return; }
+
+  const coreOpenRound = e.target.closest("[data-core-open-round]")?.dataset.coreOpenRound;
+  const coreCloseRound = e.target.closest("[data-core-close-round]")?.dataset.coreCloseRound;
+  const coreNominate = e.target.closest("[data-core-nominate]");
+  const coreVote = e.target.closest("[data-core-vote]");
+  const coreSetWinner = e.target.closest("[data-core-set-winner]");
+  const coreOpenVote = e.target.closest("[data-core-open-vote]")?.dataset.coreOpenVote;
+  if (coreOpenRound) { await openCoreChampionRound(coreOpenRound); renderLeadership(); return; }
+  if (coreCloseRound) { await closeCoreChampionRound(coreCloseRound); renderLeadership(); return; }
+  if (coreOpenVote) { await loadCoreChampionRounds(); state.modal={type:"coreVoteRound", monthKey:coreOpenVote}; renderCoreChampionTool(); return; }
+  if (coreNominate) { state.modal={type:"coreNominate", uid:coreNominate.dataset.coreNominate, monthKey:coreNominate.dataset.coreMonth}; renderCoreChampionTool(); return; }
+  if (coreVote) { state.modal={type:"coreVote", uid:coreVote.dataset.coreVote, monthKey:coreVote.dataset.coreMonth}; renderCoreChampionTool(); return; }
+  if (coreSetWinner) { await setCoreWinner(coreSetWinner.dataset.coreMonth, coreSetWinner.dataset.coreSetWinner); return; }
 
   if (toolId) {
     await withAppLoading("Opening tool...", async () => renderHome());
@@ -6817,6 +9371,7 @@ $app.addEventListener("click", async (e) => {
     await withAppLoading("Loading Leadership tab...", async () => {
       state.leadershipTab = leadershipTab;
       await refreshAdminData();
+      await applyCoreChampionAutoOpenIfDue();
       renderLeadership();
     });
     return;
@@ -6860,8 +9415,8 @@ $app.addEventListener("click", async (e) => {
   }
 
   if (deleteBudgetCodeId) {
-    if (confirm("Delete this budget code? Existing submitted requests will keep their saved code/category.")) {
-      await deleteBudgetCode(deleteBudgetCodeId);
+    if (confirm("Hide this budget code?")) {
+      await hideBudgetCode(deleteBudgetCodeId);
       state.modal = null;
       await refreshAdminData();
       state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin();
@@ -6965,7 +9520,8 @@ if (editRoleId) {
   }
   if (action === "logout") { await withAppLoading("Logging out...", async () => { await logout(); }); return; }
   if (action === "home") { await withAppLoading("Loading home...", async () => renderHome()); return; }
-  if (action === "leadership") { await withAppLoading("Opening Leadership Panel...", async () => { await refreshAdminData(); renderLeadership(); }); return; }
+  if (action === "onboarding") { await withAppLoading("Loading onboarding...", async () => renderOnboardingPage()); return; }
+  if (action === "leadership") { await withAppLoading("Opening Leadership Panel...", async () => { await refreshAdminData(); await applyCoreChampionAutoOpenIfDue(); renderLeadership(); }); return; }
   if (action === "ownersPanel") { await withAppLoading("Opening Owners Panel...", async () => { await refreshAdminData(); renderOwnersPanel(); }); return; }
   if (action === "home") { await withAppLoading("Opening Home...", async () => { renderHome(); }); return; }
   if (action === "systemAdmin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminData(); renderSystemAdmin(); }); return; }
@@ -7005,7 +9561,7 @@ if (editRoleId) {
   const modalColorBtn = e.target.closest("[data-apply-voice-bg-color]");
   if (modalColorBtn) {
     const id = modalColorBtn.dataset.applyVoiceBgColor;
-    const form = document.getElementById("villageVoiceForm");
+    const form = document.getElementById("villageVoiceForm") || modalColorBtn.closest("form");
     const color = form?.querySelector(`[data-voice-bg-modal-color="${id}"]`)?.value || "#ffffff";
     form?.querySelectorAll(`[data-block-bg-color="${id}"]`).forEach(input => { input.value = color; });
     updateVillageVoiceDraftFromForm(form);
@@ -7026,13 +9582,8 @@ if (editRoleId) {
   if (e.target.closest(".voice-inline-editor, .voice-left-block-editor")) return;
   const previewBlock = e.target.closest("[data-preview-block]");
   const previewSpecial = e.target.closest("[data-preview-special]");
+  // v149: preview blocks no longer open on single click. Double-click handler below owns editing.
   if (previewBlock || previewSpecial) {
-    const form = document.getElementById("villageVoiceForm");
-    if (form) updateVillageVoiceDraftFromForm(form);
-    state.expandedVillageVoiceEditorId = previewBlock?.dataset.previewBlock || previewSpecial?.dataset.previewSpecial || "";
-    state.villageVoiceSelectedBlockTab = "content";
-    renderVillageVoiceTool();
-    focusVillageVoiceEditingSection(state.expandedVillageVoiceEditorId);
     return;
   }
 
@@ -7079,16 +9630,43 @@ if (editRoleId) {
 
   const ovaColor = e.target.closest("[data-ova-block-color]");
   if (ovaColor) {
-    const form = ovaColor.closest("form");
+    e.preventDefault();
+    e.stopPropagation();
+    const form = document.getElementById("villageVoiceForm") || ovaColor.closest("form");
     const id = ovaColor.dataset.ovaBlockColor;
     const color = ovaColor.dataset.ovaColor;
-    form?.querySelectorAll(`[data-block-bg-color="${id}"]`).forEach(input => { input.value = color; });
-    const keepFocusId = state.expandedVillageVoiceEditorId || id;
+    form?.querySelectorAll(`[data-block-bg-color="${id}"]`).forEach(input => { input.value = color; input.setAttribute("value", color); });
+    const custom = form?.querySelector(`[data-voice-bg-modal-color="${id}"]`);
+    if (custom) custom.value = color;
+    const draft = updateVillageVoiceDraftFromForm(form);
+    const block = (draft.blocks || []).find(b => b.id === id);
+    if (block) block.backgroundColor = color;
+    state.villageVoiceDraft = { ...(state.villageVoiceDraft || {}), ...draft, blocks: draft.blocks };
+    saveVillageVoiceSessionDraft(state.villageVoiceDraft);
     state.villageVoiceBgPickerId = "";
-    if (form?.dataset?.printableKind) updatePrintableDraftFromForm(form.dataset.printableKind, form);
-    else updateVillageVoiceDraftFromForm(form);
+    state.expandedVillageVoiceEditorId = id;
+    state.villageVoiceSelectedBlockTab = "style";
     renderVillageVoiceTool();
-    focusVillageVoiceEditingSection(keepFocusId);
+    focusVillageVoiceEditingSection(id);
+    return;
+  }
+
+
+  const startVillageEditor = e.target.closest("[data-start-village-editor]");
+  if (startVillageEditor) {
+    state.villageVoiceEditorOpen = true;
+    renderVillageVoiceTool();
+    return;
+  }
+  const closeVillageEditor = e.target.closest("[data-close-village-editor]");
+  if (closeVillageEditor) {
+    const form = document.getElementById("villageVoiceForm");
+    if (form) updateVillageVoiceDraftFromForm(form);
+    state.villageVoiceEditorOpen = false;
+    state.expandedVillageVoiceEditorId = "";
+    state.villageVoiceBgPickerId = "";
+    state.villageVoiceRearrangeMode = false;
+    renderVillageVoiceTool();
     return;
   }
 
@@ -7176,6 +9754,7 @@ if (editRoleId) {
   if (e.target.closest("[data-close-modal]")) {
     state.modal = null;
     renderCurrentView();
+    return;
   }
   if (resetPin) {
     if (confirm("Reset this user's PIN to 0000?")) await resetUserPin(resetPin);
@@ -7183,6 +9762,16 @@ if (editRoleId) {
     const user = state.users.find(u => u.uid === resetPin) || await readUser(resetPin);
     state.modal = { type: "editUser", user };
     renderLeadership();
+    return;
+  }
+  if (resetUserOnboarding) {
+    const warning = "Reset this user for onboarding testing? This will set their PIN back to 0000, send them through onboarding again, clear birthday, education, why childcare, What I Like, and move their position back to Unassigned. It will not delete their name, login, role, or locations.";
+    if (confirm(warning)) await resetUserForOnboarding(resetUserOnboarding);
+    await refreshAdminData();
+    const user = state.users.find(u => u.uid === resetUserOnboarding) || await readUser(resetUserOnboarding);
+    state.modal = { type: "editUser", user };
+    renderLeadership();
+    return;
   }
   if (deletePositionId) {
     if (confirm("Hide this position?")) await deletePosition(deletePositionId);
@@ -7209,6 +9798,25 @@ if (editRoleId) {
 });
 
 $app.addEventListener("input", (e) => {
+  const photoTextPropEl = e.target.closest?.("[data-photo-text-prop]");
+  if (state.currentView === "photoPrint" && photoTextPropEl && photoTextPropEl.tagName !== "BUTTON") {
+    const t = getSelectedPhotoPrintText();
+    if (t) {
+      const prop = photoTextPropEl.dataset.photoTextProp;
+      const value = photoTextPropEl.value;
+      if (!["text"].includes(prop) && !(photoTextPropEl.type === "range")) pushPhotoPrintHistory();
+      if (["size","opacity","lineHeight","letterSpacing","outlineWidth"].includes(prop)) t[prop] = Number(value); else t[prop] = value;
+      if (["text","font","size","bold","italic","lineHeight","letterSpacing","outlineWidth"].includes(prop)) autoSizePhotoTextBox(t);
+      state.photoPrint.textDefaults = { ...(state.photoPrint.textDefaults || {}), color: t.color, size: t.size, font: t.font, align: t.align, outlineColor: t.outlineColor, outlineWidth: t.outlineWidth };
+      renderPhotoPrintTool();
+      clearTimeout(state.photoPrintTextSaveTimer);
+      state.photoPrintTextSaveTimer = setTimeout(() => savePhotoPrintWorkspaceLocal(), 200);
+    }
+    return;
+  }
+  const photoControl = e.target.closest("[data-photo-control]")?.dataset.photoControl;
+  if (photoControl) { applyPhotoControl(photoControl, e.target.value); return; }
+
   if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; renderHome(); return; }
   if (e.target.matches("[data-money-input]")) {
     e.target.value = String(e.target.value || "").replace(/[^0-9.]/g, "");
@@ -7250,6 +9858,13 @@ $app.addEventListener("input", (e) => {
   if (e.target.matches("[data-budget-category]")) {
     syncBudgetFromCategory(e.target);
   }
+  const likeInput = e.target.closest?.("[data-like-entry-input]");
+  if (likeInput) {
+    const row = likeInput.closest("[data-like-row]");
+    const btn = row?.querySelector("[data-add-like-row]");
+    btn?.classList.toggle("hidden", !String(likeInput.value || "").trim());
+    return;
+  }
   if (e.target.closest(".money-request-line")) {
     updateMoneyRequestAddButtons();
   }
@@ -7284,6 +9899,49 @@ $app.addEventListener("input", (e) => {
     return;
   }
 }, true);
+async function awaitMaybeSavePhotoPrint() { await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); }
+$app.addEventListener("keydown", (e) => {
+  if (state.currentView === "photoPrint") {
+    const editing = e.target.closest?.('input,textarea,select,[contenteditable="true"]');
+    if (e.key === "Escape") { setPhotoPrintSelection([]); state.photoPrint.cropMode = false; renderPhotoPrintTool(); return; }
+    if (!editing && (e.key === "Delete" || e.key === "Backspace")) { if (deletePhotoPrintSelection()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+    if ((e.ctrlKey || e.metaKey) && !editing) {
+      const k = e.key.toLowerCase();
+      if (k === 'c') { copyPhotoPrintSelectionToClipboard(false); e.preventDefault(); return; }
+      if (k === 'x') { if (copyPhotoPrintSelectionToClipboard(true)) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+      if (k === 'v') { if (pastePhotoPrintClipboard()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+      if (k === 'z') { if (undoPhotoPrint()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+      if (k === 'y') { if (redoPhotoPrint()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+    }
+  }
+  const likeInput = e.target.closest?.("[data-like-entry-input]");
+  if (likeInput && e.key === "Enter") {
+    e.preventDefault();
+    const key = likeInput.dataset.likeEntryInput;
+    likeInput.closest("[data-like-rows]")?.querySelector(`[data-add-like-row="${key}"]`)?.click();
+  }
+}, true);
+
+document.addEventListener("keydown", (e) => {
+  if (state.currentView !== "photoPrint") return;
+  const editing = e.target.closest?.('input,textarea,select,[contenteditable="true"]');
+  if (editing) return;
+  const key = String(e.key || "").toLowerCase();
+  if (key === "delete" || key === "backspace") {
+    if (deletePhotoPrintSelection()) {
+      e.preventDefault();
+      awaitMaybeSavePhotoPrint();
+    }
+    return;
+  }
+  if (!(e.ctrlKey || e.metaKey)) return;
+  if (key === "c") { if (copyPhotoPrintSelectionToClipboard(false)) e.preventDefault(); return; }
+  if (key === "x") { if (copyPhotoPrintSelectionToClipboard(true)) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+  if (key === "v") { if (pastePhotoPrintClipboard()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+  if (key === "z") { if (undoPhotoPrint()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+  if (key === "y") { if (redoPhotoPrint()) { e.preventDefault(); awaitMaybeSavePhotoPrint(); } return; }
+}, true);
+
 $app.addEventListener("blur", (e) => {
   if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; renderHome(); return; }
   if (e.target.matches("[data-money-input]")) {
@@ -7334,6 +9992,8 @@ function villageVoiceDescribeElement(el) {
   }, true);
 });
 
+// v142: duplicate Village Voice rearrange listeners removed; pointer-only handler lives below.
+
 $app.addEventListener("dragstart", (e) => {
   const tool = e.target.closest("[data-drag-tool]");
   if (!tool) return;
@@ -7368,56 +10028,306 @@ $app.addEventListener("drop", (e) => {
 });
 
 
+$app.addEventListener("click", (e) => {
+  if (!state.villageVoiceRearrangeMode) return;
+  if (window.__vvSuppressNextVoiceClick) return;
+  const choice = getVillageVoiceDndChoice(e);
+  if (!choice) return;
+  e.preventDefault();
+  e.stopPropagation();
+  applyVillageVoiceChoiceDrop(choice);
+}, true);
+
+$app.addEventListener("pointerover", (e) => {
+  if (!state.villageVoiceRearrangeMode || window.__vvPointerRearrange) return;
+  const choice = getVillageVoiceDndChoice(e);
+  if (!choice) return;
+  const draggedId = state.villageVoicePickedBlock || state.villageVoiceDraggedBlock || "";
+  const targetId = choice.dataset.targetId || "";
+  const place = choice.dataset.placement || "";
+  if (!draggedId || !targetId || !place || draggedId === targetId) return;
+  document.querySelectorAll("[data-voice-dnd-choice]").forEach(el => el.classList.toggle("active", el === choice));
+  previewVillageVoiceDropLayout(draggedId, targetId, place);
+}, true);
+
+$app.addEventListener("pointermove", (e) => {
+  if (!state.villageVoiceRearrangeMode || window.__vvPointerRearrange) return;
+  if (state.villageVoicePickedBlock || state.villageVoiceDraggedBlock) updateVillageVoiceCursorRing(e);
+}, true);
+
+$app.addEventListener("click", (e) => {
+  // v148: single-click no longer selects/edits blocks; double-click opens editing.
+  return;
+}, true);
+
 $app.addEventListener("dragstart", (e) => {
-  if (e.target.matches("input, textarea, select, button, label")) return;
-  const block = e.target.closest(".voice-edit-block[draggable='true'], [data-preview-block][draggable='true']");
+  if (!state.villageVoiceRearrangeMode) return;
+  const block = e.target.closest?.("[data-preview-block]");
   if (!block || !document.getElementById("villageVoiceForm")?.contains(block)) return;
-  const id = block.dataset.voiceBlock || block.dataset.previewBlock;
-  if (!id) { villageVoiceDndLog("dragstart-rejected", { reason: "no block id", block }); return; }
-  villageVoiceDndLog("dragstart", { id, source: block.dataset.voiceBlock ? "left editor" : "preview", className: block.className, layout: villageVoiceLayoutSnapshot() });
-  state.villageVoiceDraggedBlock = id;
-  e.dataTransfer.setData("application/x-village-voice-block", id);
-  e.dataTransfer.setData("text/plain", id);
-  e.dataTransfer.effectAllowed = "move";
-  block.classList.add("dragging");
+  // v140: rearrange now uses pointer events only. Cancel native HTML5 drag/drop
+  // so the browser does not fire a second drop after the pointer drop.
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
 }, true);
 
 $app.addEventListener("dragend", (e) => {
   e.target.closest(".voice-edit-block, [data-preview-block]")?.classList.remove("dragging");
   state.villageVoiceDraggedBlock = "";
+  hideVillageVoiceCursorRing();
+  restoreVillageVoicePreviewAfterDropHover();
   clearVillageVoiceDropMarkers();
 }, true);
 
 $app.addEventListener("dragover", (e) => {
-  const draggedId = getVillageVoiceDraggedId(e);
-  if (!draggedId) { villageVoiceDndLog("dragover-ignored", { reason: "no dragged id", eventTarget: e.target }); return; }
-  const target = getVoiceDropTarget(e);
-  const targetId = getVillageVoiceTargetId(target);
-  if (!target || !targetId || targetId === draggedId) { villageVoiceDndLog("dragover-rejected", { draggedId, targetId, hasTarget: !!target }); return; }
+  if (!state.villageVoiceRearrangeMode) return;
+  // v141: native HTML5 drag/drop is intentionally disabled for Village Voice.
+  // The rearrange UI now uses pointerdown/move/up only. Letting native drop run
+  // after pointerup caused duplicate moves/crashes in Chrome on the dot anchors.
   e.preventDefault();
   e.stopPropagation();
-  e.dataTransfer.dropEffect = "move";
-  const place = villageVoiceDropPlacement(e, target);
-  clearVillageVoiceDropMarkers();
-  target.classList.add(`drop-${place}`);
-  villageVoiceDndLog("dragover-accepted", { draggedId, targetId, place });
+  e.stopImmediatePropagation();
 }, true);
 
 $app.addEventListener("drop", (e) => {
-  const draggedId = getVillageVoiceDraggedId(e);
-  if (!draggedId) { villageVoiceDndLog("drop-ignored", { reason: "no dragged id", eventTarget: e.target }); return; }
-  const target = getVoiceDropTarget(e);
-  const targetId = getVillageVoiceTargetId(target);
-  if (!target || !targetId || targetId === draggedId) { villageVoiceDndLog("drop-rejected", { draggedId, targetId, hasTarget: !!target }); return; }
+  if (!state.villageVoiceRearrangeMode) return;
   e.preventDefault();
   e.stopPropagation();
-  const place = villageVoiceDropPlacement(e, target);
-  villageVoiceDndLog("drop-accepted", { draggedId, targetId, place, beforeLayout: villageVoiceLayoutSnapshot() });
-  updateVillageVoiceDraftFromForm(document.getElementById("villageVoiceForm"));
-  const moved = moveVillageVoiceBlock(draggedId, targetId, place);
-  villageVoiceDndLog("drop-complete", { moved, afterLayout: villageVoiceLayoutSnapshot() });
+  e.stopImmediatePropagation();
+  villageVoiceDndLog("native-drop-suppressed", { picked: state.villageVoicePickedBlock, dragged: state.villageVoiceDraggedBlock });
+}, true);
+
+document.addEventListener("dragenter", (e) => {
+  if (!state.villageVoiceRearrangeMode || window.__vvPointerRearrange) return;
+  const draggedId = getVillageVoiceDraggedId(e);
+  const choice = getVillageVoiceDndChoice(e);
+  if (!draggedId || !choice) return;
+  const targetId = choice.dataset.targetId || "";
+  const place = choice.dataset.placement || "";
+  if (!targetId || !place || targetId === draggedId) return;
+  e.preventDefault();
+  document.querySelectorAll("[data-voice-dnd-choice]").forEach(el => el.classList.toggle("active", el === choice));
+  previewVillageVoiceDropLayout(draggedId, targetId, place);
+}, true);
+
+
+
+// v152: robust preview edit targeting + console debugging for double-click edit.
+function villageVoiceEditDebug(...args) {
+  try { console.info("[Village Voice Edit]", ...args); } catch (_) {}
+}
+function findVillageVoiceEditableAtEvent(e) {
+  const form = document.getElementById("villageVoiceForm");
+  if (!form) return { id: "", block: null, special: null, source: "no-form" };
+  const directTarget = e?.target || null;
+  const directInside = !!(directTarget && form.contains(directTarget));
+  let block = directInside ? directTarget.closest?.("[data-preview-block]") : null;
+  let special = directInside ? directTarget.closest?.("[data-preview-special]") : null;
+  let source = "target";
+  if ((!block && !special) && typeof document.elementsFromPoint === "function" && Number.isFinite(e?.clientX) && Number.isFinite(e?.clientY)) {
+    const stack = document.elementsFromPoint(e.clientX, e.clientY) || [];
+    for (const el of stack) {
+      if (!el || !form.contains(el)) continue;
+      block = el.closest?.("[data-preview-block]");
+      special = el.closest?.("[data-preview-special]");
+      if (block || special) { source = "elementsFromPoint"; break; }
+    }
+  }
+  const id = block?.dataset?.previewBlock || special?.dataset?.previewSpecial || "";
+  return { id, block, special, source, directInside, targetTag: directTarget?.tagName || "", targetClass: directTarget?.className || "" };
+}
+// v150: shared opener so native dblclick and quick pointer double-click both open the editor.
+function openVillageVoicePreviewEditor(editId) {
+  const form = document.getElementById("villageVoiceForm");
+  villageVoiceEditDebug("open request", { editId, hasForm: !!form, currentExpanded: state.expandedVillageVoiceEditorId || "" });
+  if (!form || !editId) return false;
+  window.__vvPointerPendingRearrange = null;
+  window.__vvPointerRearrange = null;
+  window.__vvSuppressNextVoiceClick = false;
+  state.villageVoicePickedBlock = "";
   state.villageVoiceDraggedBlock = "";
-  clearVillageVoiceDropMarkers();
+  state.villageVoiceRearrangeMode = false;
+  state.villageVoiceEditorOpen = true;
+  try { hideVillageVoiceCursorRing(); } catch (_) {}
+  document.querySelector("[data-vv-natural-drop-hint]")?.remove();
+  document.querySelector("[data-voice-dnd-choice-layer]")?.remove();
+  try { updateVillageVoiceDraftFromForm(form); } catch (err) { console.warn("[Village Voice Edit] form sync skipped before opening editor", err); }
+  state.expandedVillageVoiceEditorId = editId;
+  state.villageVoiceSelectedBlockTab = "content";
+  const keepX = window.scrollX;
+  const keepY = window.scrollY;
+  renderVillageVoiceTool();
+  requestAnimationFrame(() => {
+    window.scrollTo(keepX, keepY);
+    focusVillageVoiceEditingSection(editId);
+    const opened = document.querySelector(`[data-left-block-editor="${CSS.escape(editId)}"], [data-left-block-editor="flyerHeader"], [data-left-block-editor="flyerFooter"]`);
+    villageVoiceEditDebug("after render", { editId, opened: !!opened, expanded: state.expandedVillageVoiceEditorId || "" });
+    if (!opened) showToast("Edit panel did not open. Check console for Village Voice Edit logs.");
+  });
+  return true;
+}
+
+// v148: always-on natural drag; edit opens on double-click only.
+function canUseVillageVoiceNaturalRearrange() {
+  const form = document.getElementById("villageVoiceForm");
+  if (!form) return false;
+  return hasToolPermission(state.session, "villageVoice", "arrangeFlyer") || hasFullDevAccess(state.session);
+}
+
+function beginVillageVoicePointerRearrange(e, block, pending = null) {
+  const id = block?.dataset?.previewBlock || pending?.id || "";
+  if (!id || !canUseVillageVoiceNaturalRearrange()) return false;
+  window.__vvPointerRearrange = { id, startX: pending?.startX ?? e.clientX, startY: pending?.startY ?? e.clientY, moved: true };
+  window.__vvPointerPendingRearrange = null;
+  state.villageVoiceRearrangeMode = true;
+  state.villageVoicePickedBlock = id;
+  state.villageVoiceDraggedBlock = id;
+  clearVillageVoiceDropMarkers(true);
+  document.querySelectorAll("[data-preview-block]").forEach(el => {
+    el.classList.toggle("voice-preview-selected", el.dataset.previewBlock === id);
+    el.setAttribute("draggable", "false");
+  });
+  renderVillageVoiceDropChoices(null, id);
+  updateVillageVoiceCursorRing(e);
+  villageVoiceDndLog("pointer-rearrange-start", { id, x: e.clientX, y: e.clientY });
+  return true;
+}
+
+document.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  const form = document.getElementById("villageVoiceForm");
+  if (!form || !form.contains(e.target)) return;
+  if (e.target.closest?.("[data-voice-dnd-choice], .voice-close-focus-editor, input, textarea, select, button, label, .voice-left-block-editor, .voice-inline-editor")) return;
+  const found = findVillageVoiceEditableAtEvent(e);
+  const block = found.block;
+  const editId = found.id || "";
+  if (editId && e.detail >= 2) {
+    villageVoiceEditDebug("pointerdown double", found);
+    window.__vvPointerPendingRearrange = null;
+    window.__vvPointerRearrange = null;
+    if (openVillageVoicePreviewEditor(editId)) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
+    return;
+  }
+  if (!canUseVillageVoiceNaturalRearrange()) return;
+  if (!block) return;
+  window.__vvPointerPendingRearrange = { id: block.dataset.previewBlock || "", block, startX: e.clientX, startY: e.clientY };
+}, true);
+
+document.addEventListener("pointermove", (e) => {
+  const pending = window.__vvPointerPendingRearrange;
+  if (pending && !window.__vvPointerRearrange) {
+    if (Math.hypot(e.clientX - pending.startX, e.clientY - pending.startY) <= 6) return;
+    if (!beginVillageVoicePointerRearrange(e, pending.block, pending)) return;
+  }
+  const drag = window.__vvPointerRearrange;
+  if (!drag || !canUseVillageVoiceNaturalRearrange()) return;
+  drag.moved = true;
+  updateVillageVoiceCursorRing(e);
+  const choice = getVillageVoiceChoiceAtPoint(e.clientX, e.clientY);
+  const target = choice?.__vvNaturalTarget || null;
+  const choiceKey = target ? vvNaturalTargetKey(target) : "";
+  if (drag.lastChoiceKey !== choiceKey) {
+    drag.lastChoiceKey = choiceKey;
+    drag.choiceTarget = target;
+    drag.choicePlacement = choice?.dataset?.placement || "";
+    if (choice) previewVillageVoiceDropLayout(drag.id, "__natural", drag.choicePlacement);
+    else restoreVillageVoicePreviewAfterDropHover();
+  }
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+
+document.addEventListener("pointerup", (e) => {
+  if (window.__vvPointerPendingRearrange && !window.__vvPointerRearrange) {
+    const pending = window.__vvPointerPendingRearrange;
+    window.__vvPointerPendingRearrange = null;
+    const now = Date.now();
+    const last = window.__vvLastPreviewClick || null;
+    const sameBlock = last && last.id === pending.id;
+    const closeEnough = last && Math.hypot((e.clientX || 0) - (last.x || 0), (e.clientY || 0) - (last.y || 0)) < 12;
+    if (sameBlock && closeEnough && now - last.time < 420) {
+      window.__vvLastPreviewClick = null;
+      if (openVillageVoicePreviewEditor(pending.id)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      }
+      return;
+    }
+    window.__vvLastPreviewClick = { id: pending.id, x: e.clientX || pending.startX, y: e.clientY || pending.startY, time: now };
+    return;
+  }
+  const drag = window.__vvPointerRearrange;
+  if (!drag || !canUseVillageVoiceNaturalRearrange()) return;
+  try {
+    const finalTarget = drag.choiceTarget || getVillageVoiceChoiceAtPoint(e.clientX, e.clientY)?.__vvNaturalTarget || null;
+    const choice = makeVillageVoiceNaturalChoice(finalTarget);
+    if (choice) applyVillageVoiceChoiceDrop(choice, drag.id);
+    else if (drag.moved) clearVillageVoicePickedBlock();
+  } catch (err) {
+    console.error("Village Voice pointer drop crashed", err);
+    showToast("That drop did not work. Try again.");
+    clearVillageVoicePickedBlock();
+  } finally {
+    window.__vvPointerRearrange = null;
+    window.__vvPointerPendingRearrange = null;
+    window.__vvSuppressNextVoiceClick = true;
+    setTimeout(() => { window.__vvSuppressNextVoiceClick = false; }, 160);
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+}, true);
+
+document.addEventListener("pointercancel", (e) => {
+  window.__vvPointerPendingRearrange = null;
+  if (!window.__vvPointerRearrange) return;
+  window.__vvPointerRearrange = null;
+  state.villageVoiceRearrangeMode = false;
+  clearVillageVoicePickedBlock();
+}, true);
+
+document.addEventListener("click", (e) => {
+  if (!window.__vvSuppressNextVoiceClick) return;
+  if (!document.getElementById("villageVoiceForm")?.contains(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+}, true);
+
+document.addEventListener("click", (e) => {
+  if ((e.detail || 0) < 2) return;
+  const form = document.getElementById("villageVoiceForm");
+  if (!form) return;
+  if (e.target.closest?.("input, textarea, select, button, label, .voice-left-block-editor, .voice-inline-editor")) return;
+  const found = findVillageVoiceEditableAtEvent(e);
+  const editId = found.id || "";
+  villageVoiceEditDebug("click detail>=2", found);
+  if (!editId) return;
+  window.__vvPointerPendingRearrange = null;
+  window.__vvPointerRearrange = null;
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+  openVillageVoicePreviewEditor(editId);
+}, true);
+
+document.addEventListener("dblclick", (e) => {
+  const form = document.getElementById("villageVoiceForm");
+  if (!form) return;
+  if (e.target.closest?.("input, textarea, select, button, label, .voice-left-block-editor, .voice-inline-editor")) return;
+  const found = findVillageVoiceEditableAtEvent(e);
+  const editId = found.id || "";
+  villageVoiceEditDebug("native dblclick", found);
+  if (!editId) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+  openVillageVoicePreviewEditor(editId);
 }, true);
 
 $app.addEventListener("submit", async (e) => {
@@ -7437,6 +10347,9 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "removeCampusDiscussionForm") { await removeCampusDiscussion(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionToTaskForm") { await createCampusTaskFromDiscussion(form); hideAppLoading(); return; }
     if (form.id === "notificationSettingsForm") { await saveNotificationSettings(form); hideAppLoading(); return; }
+    if (form.id === "coreChampionSettingsForm") { await saveCoreChampionSettings(form); hideAppLoading(); return; }
+    if (form.id === "coreNominationForm") { await submitCoreNomination(form); hideAppLoading(); return; }
+    if (form.id === "coreVoteForm") { await submitCoreVote(form); hideAppLoading(); return; }
     if (form.id === "adminPasswordLoginForm") { await adminLeaderLogin(state.modal.user, form.password.value, !!form.stayLoggedIn?.checked); hideAppLoading(); return; }
     if (form.id === "approvalPasswordForm" || form.id === "selfDosoApprovalForm") { await completeApprovalPassword(form.password.value); hideAppLoading(); return; }
     if (form.id === "nukeMoneyRequestsForm") { await completeNukeMoneyRequests(form.password.value); hideAppLoading(); return; }
@@ -7445,8 +10358,9 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "editDeniedMoneyRequestForm") { await saveEditedDeniedMoneyRequest(form); hideAppLoading(); return; }
     if (form.id === "loginForm") await loginUser(state.modal.user, form.credential.value.trim(), !!form.stayLoggedIn?.checked);
     if (form.id === "passwordSetupForm") await saveNewPassword(form.password.value);
-    if (form.id === "pinChangeForm") await saveNewPin(form.pin.value.trim());
+    if (form.id === "pinChangeForm") { await saveNewPin(form.pin.value.trim()); renderCurrentView(); hideAppLoading(); return; }
     if (form.id === "selfProfileForm") { await updateSelfProfile(form); hideAppLoading(); return; }
+    if (form.id === "onboardingStepForm") { await saveOnboardingStep(form); hideAppLoading(); return; }
     if (form.id === "schoolForm") { await addSchool(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "editSchoolForm") { await updateSchool(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "positionForm") { await addPosition(form); await refreshAdminData(); renderSystemAdmin(); }
@@ -7714,6 +10628,8 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
 
 (async function start() {
   applyThemePreference(getThemePreference());
+  const shareParam = new URLSearchParams(window.location.search).get("share");
+  if (shareParam) state.publicShareView = shareParam;
   try {
     await refreshLandingData();
   } catch (err) {
