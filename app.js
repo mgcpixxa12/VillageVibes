@@ -10669,22 +10669,27 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
 
 (async function start() {
   applyThemePreference(getThemePreference());
-  clearOldAppCachesInBackground();
-  const shareParam = new URLSearchParams(window.location.search).get("share");
-  if (shareParam) state.publicShareView = shareParam;
+  showAppLoading("Loading OVA tools...");
   try {
-    await refreshLandingData();
-    if (!shareParam) {
-      const restored = await restorePersistedSessionIfAvailable();
-      if (restored) {
-        renderHome();
-        return;
+    clearOldAppCachesInBackground();
+    const shareParam = new URLSearchParams(window.location.search).get("share");
+    if (shareParam) state.publicShareView = shareParam;
+    try {
+      await refreshLandingData();
+      if (!shareParam) {
+        const restored = await restorePersistedSessionIfAvailable();
+        if (restored) {
+          renderHome();
+          return;
+        }
       }
+    } catch (err) {
+      console.warn("Initial load failed. This is expected until Firebase config/rules are set.", err);
     }
-  } catch (err) {
-    console.warn("Initial load failed. This is expected until Firebase config/rules are set.", err);
+    render();
+  } finally {
+    hideAppLoading();
   }
-  render();
 })();
 
 
