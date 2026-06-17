@@ -26,7 +26,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v185-cache-login-persistence-fix";
+const VV_APP_VERSION = "v186-refresh-home-after-persisted-login";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -10676,7 +10676,10 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
     await refreshLandingData();
     if (!shareParam) {
       const restored = await restorePersistedSessionIfAvailable();
-      if (restored) return;
+      if (restored) {
+        renderHome();
+        return;
+      }
     }
   } catch (err) {
     console.warn("Initial load failed. This is expected until Firebase config/rules are set.", err);
