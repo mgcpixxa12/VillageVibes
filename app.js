@@ -26,7 +26,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v186-refresh-home-after-persisted-login";
+const VV_APP_VERSION = "v187-shareable-staff-signup";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -3192,17 +3192,78 @@ function getShareablePositionsUrl() {
   return url.toString();
 }
 
+function getShareableSignupUrl() {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("share", "signup");
+  if (state.selectedSchoolId) url.searchParams.set("school", state.selectedSchoolId);
+  return url.toString();
+}
+
+function renderPublicSignupPage(message = "", success = false) {
+  state.currentView = "publicSignup";
+  const schoolId = new URLSearchParams(window.location.search).get("school") || "";
+  $app.innerHTML = `<main class="shell public-share-shell">
+    <section class="card public-share-hero"><p class="eyebrow">Oak Village Academy</p><h1>Staff Sign Up</h1><p class="helper">Create your Village Vibes account. Your access starts as staff; leadership can assign additional permissions.</p></section>
+    <section class="card" style="max-width:560px;margin:1rem auto;">
+      ${message ? `<p role="status" class="helper" style="color:${success ? 'inherit' : '#b42318'}">${escapeHtml(message)}</p>` : ""}
+      ${success ? `<p><a href="${escapeHtml(window.location.origin + window.location.pathname)}">Return to Village Vibes login</a></p>` : `<form id="publicSignupForm" class="stack">
+        <div class="grid two"><label>First name<input name="firstName" required maxlength="80" autocomplete="given-name" /></label><label>Last name<input name="lastName" required maxlength="80" autocomplete="family-name" /></label></div>
+        <label>Email<input type="email" name="email" required autocomplete="email" /></label>
+        <label>Password<input type="password" name="password" minlength="8" required autocomplete="new-password" /></label>
+        <label>Confirm password<input type="password" name="confirmPassword" minlength="8" required autocomplete="new-password" /></label>
+        <input type="hidden" name="schoolId" value="${escapeHtml(schoolId)}" />
+        <button type="submit">Create Account</button>
+      </form>`}
+    </section></main>`;
+}
+
+async function submitPublicSignup(form) {
+  const firstName = form.firstName.value.trim();
+  const lastName = form.lastName.value.trim();
+  const email = form.email.value.trim().toLowerCase();
+  const password = form.password.value;
+  if (!firstName || !lastName) throw new Error("Please enter your name.");
+  if (password !== form.confirmPassword.value) throw new Error("Passwords do not match.");
+  const schoolId = form.schoolId.value;
+  // Secondary auth avoids replacing an existing signed-in leader session.
+  const secondaryAuth = getSecondaryAuth();
+  const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+  try {
+    await setDoc(doc(db, "users", cred.user.uid), {
+      firstName, lastName, usedName: firstName, fakeEmail: email,
+      role: "teacher", roles: ["teacher"], roleKeys: ["teacher"],
+      schoolIds: schoolId ? [schoolId] : [], active: true,
+      passwordSet: true, onboardingRequired: true,
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    try { await deleteUser(cred.user); } catch (cleanupError) { console.warn("Could not clean up incomplete signup", cleanupError); }
+    throw err;
+  } finally {
+    await signOut(secondaryAuth).catch(() => {});
+  }
+  renderPublicSignupPage("Account created. A leader can now assign your role and permissions. Return to the main page to log in.", true);
+}
+
 function renderShareableLinksLeadershipTab() {
   const positionUrl = getShareablePositionsUrl();
+  const signupUrl = getShareableSignupUrl();
   return `<div class="share-links-panel">
     <div class="card slim-card">
       <h3>Shareable Links</h3>
-      <p class="helper">Links here are made for people outside of the tool. More link types can be added later for sign ups, feedback, and other forms.</p>
+      <p class="helper">Links here are made for people outside of the tool. Copy these links to share with staff and families.</p>
     </div>
     <div class="share-link-card card">
       <div><strong>Teacher Positions + What I Like Pages</strong><p class="helper">Parents can pick a classroom/position, choose a teacher, and see their What I Like page.</p></div>
       <input readonly value="${escapeHtml(positionUrl)}" onclick="this.select()" />
       <button type="button" data-copy-share-link="${escapeHtml(positionUrl)}">Copy Link</button>
+    </div>
+    <div class="share-link-card card">
+      <div><strong>Staff Sign Up</strong><p class="helper">Send this link to staff to create their own account. New accounts receive teacher permissions until promoted by an administrator.</p></div>
+      <input readonly value="${escapeHtml(signupUrl)}" onclick="this.select()" />
+      <button type="button" data-copy-share-link="${escapeHtml(signupUrl)}">Copy Link</button>
     </div>
   </div>`;
 }
@@ -8485,6 +8546,10 @@ document.addEventListener("pointerdown", (e) => {
 });
 
 function renderCurrentView() {
+  if (state.publicShareView === "signup") {
+    renderPublicSignupPage();
+    return;
+  }
   if (state.publicShareView) {
     renderPublicSharePage(state.publicShareView).catch(err => { console.error(err); renderLanding(); });
     return;
@@ -10377,6 +10442,11 @@ $app.addEventListener("submit", async (e) => {
   showAppLoading(form.id === "loginForm" ? "Logging in..." : "Saving...");
   try {
     await new Promise(resolve => requestAnimationFrame(resolve));
+    if (form.id === "publicSignupForm") {
+      try { await submitPublicSignup(form); }
+      catch (err) { renderPublicSignupPage(err.message || "Sign up failed. Please try again."); }
+      hideAppLoading(); return;
+    }
     if (form.dataset.campusAssignForm) { await assignCampusTask(form.dataset.campusAssignForm, form); hideAppLoading(); return; }
     if (form.id === "campusCareRequestForm") { await submitCampusCareRequest(form); hideAppLoading(); return; }
     if (form.id === "campusCareLocationForm") { await saveCampusCareLocation(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
