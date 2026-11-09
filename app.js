@@ -3205,14 +3205,13 @@ function renderPublicSignupPage(message = "", success = false) {
   state.currentView = "publicSignup";
   const schoolId = new URLSearchParams(window.location.search).get("school") || "";
   $app.innerHTML = `<main class="shell public-share-shell">
-    <section class="card public-share-hero"><p class="eyebrow">Oak Village Academy</p><h1>Staff Sign Up</h1><p class="helper">Create your Village Vibes account. Your access starts as staff; leadership can assign additional permissions.</p></section>
+    <section class="card public-share-hero"><p class="eyebrow">Oak Village Academy</p><h1>Staff Sign Up</h1><p class="helper">Enter your name and choose a four-digit PIN. Your login is created automatically, just like accounts added by leadership.</p></section>
     <section class="card" style="max-width:560px;margin:1rem auto;">
       ${message ? `<p role="status" class="helper" style="color:${success ? 'inherit' : '#b42318'}">${escapeHtml(message)}</p>` : ""}
       ${success ? `<p><a href="${escapeHtml(window.location.origin + window.location.pathname)}">Return to Village Vibes login</a></p>` : `<form id="publicSignupForm" class="stack">
         <div class="grid two"><label>First name<input name="firstName" required maxlength="80" autocomplete="given-name" /></label><label>Last name<input name="lastName" required maxlength="80" autocomplete="family-name" /></label></div>
-        <label>Email<input type="email" name="email" required autocomplete="email" /></label>
-        <label>Password<input type="password" name="password" minlength="8" required autocomplete="new-password" /></label>
-        <label>Confirm password<input type="password" name="confirmPassword" minlength="8" required autocomplete="new-password" /></label>
+        <label>Choose a 4-digit PIN<input type="password" name="pin" required minlength="4" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" autocomplete="new-password" /></label>
+        <label>Confirm PIN<input type="password" name="confirmPin" required minlength="4" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" autocomplete="new-password" /></label>
         <input type="hidden" name="schoolId" value="${escapeHtml(schoolId)}" />
         <button type="submit">Create Account</button>
       </form>`}
@@ -3222,20 +3221,25 @@ function renderPublicSignupPage(message = "", success = false) {
 async function submitPublicSignup(form) {
   const firstName = form.firstName.value.trim();
   const lastName = form.lastName.value.trim();
-  const email = form.email.value.trim().toLowerCase();
-  const password = form.password.value;
-  if (!firstName || !lastName) throw new Error("Please enter your name.");
-  if (password !== form.confirmPassword.value) throw new Error("Passwords do not match.");
+  const pin = form.pin.value.trim();
+  if (!firstName || !lastName) throw new Error("Please enter your first and last name.");
+  if (!/^\d{4}$/.test(pin)) throw new Error("PIN must be exactly four digits.");
+  if (pin !== form.confirmPin.value.trim()) throw new Error("PINs do not match.");
   const schoolId = form.schoolId.value;
-  // Secondary auth avoids replacing an existing signed-in leader session.
+  const fakeEmail = generateFakeEmail(firstName, lastName);
   const secondaryAuth = getSecondaryAuth();
-  const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+  const cred = await createUserWithEmailAndPassword(secondaryAuth, fakeEmail, DEFAULT_AUTH_PASSWORD);
   try {
     await setDoc(doc(db, "users", cred.user.uid), {
-      firstName, lastName, usedName: firstName, fakeEmail: email,
-      role: "teacher", roles: ["teacher"], roleKeys: ["teacher"],
-      schoolIds: schoolId ? [schoolId] : [], active: true,
-      passwordSet: true, onboardingRequired: true,
+      firstName, lastName, displayName: `${firstName} ${lastName.slice(0, 1)}.`,
+      usedName: `${firstName} ${lastName}`, profileImageData: "",
+      educationList: [], education: "", earlyEducationStart: "", whyEarlyEducation: "",
+      birthday: "", leaderSummary: "", whatILike: {},
+      fakeEmail, pin, teamPosition: "Unassigned", role: "teacher", roles: ["teacher"], roleKeys: ["teacher"],
+      pinResetRequired: false, onboardingRequired: true,
+      schoolIds: schoolId ? [schoolId] : [], defaultCampusCareBuildingId: "", defaultCampusCareSublocation: "",
+      active: true, passwordRequired: false, passwordSet: false,
+      homeLayout: [], hiddenToolIds: [], notificationSettings: { inApp: true, push: false },
       createdAt: serverTimestamp(), updatedAt: serverTimestamp()
     });
   } catch (err) {
@@ -3244,7 +3248,7 @@ async function submitPublicSignup(form) {
   } finally {
     await signOut(secondaryAuth).catch(() => {});
   }
-  renderPublicSignupPage("Account created. A leader can now assign your role and permissions. Return to the main page to log in.", true);
+  renderPublicSignupPage("Account created! Return to Village Vibes, select your name, and enter your four-digit PIN to sign in.", true);
 }
 
 function renderShareableLinksLeadershipTab() {
