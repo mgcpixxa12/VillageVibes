@@ -5098,3 +5098,216 @@ h2, h3 { margin: 0 0 0.75rem; }
 
 /* v183 photo print duplicate modal, snap indicators, cleaner layers */
 .photo-duplicate-backdrop{z-index:2147483600}.photo-duplicate-modal{max-width:440px}.photo-duplicate-modal .actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}.photo-snap-line{position:absolute;pointer-events:none;z-index:2147482998;background:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.13)}.photo-snap-line.vertical{top:0;bottom:0;width:2px;transform:translateX(-1px)}.photo-snap-line.horizontal{left:0;right:0;height:2px;transform:translateY(-1px)}.photo-snap-dot{position:absolute;width:14px;height:14px;margin-left:-7px;margin-top:-7px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.25);z-index:2147482999;pointer-events:none}.photo-layer-row[data-photo-context-filter]::after{display:none!important}.photo-layer-row{min-height:56px}.photo-print-page .photo-guide-controls{position:sticky;top:8px;z-index:12}
+
+/* Village Vibes interface refresh: shared shell and personal profile */
+.vv-app-layout{display:grid;grid-template-columns:226px minmax(0,1fr);min-height:100vh;align-items:start}
+.vv-sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:18px;padding:22px 13px 16px;background:var(--panel);border-right:1px solid var(--line);z-index:7;overflow-y:auto}
+.vv-brand{display:flex;align-items:center;gap:11px;padding:4px 10px 20px;border-bottom:1px solid var(--line)}
+.vv-brand .logo{width:39px;height:39px;border-radius:12px;flex-shrink:0;font-size:13px}
+.vv-brand span{display:grid;gap:2px;min-width:0}.vv-brand strong{font-size:14px;white-space:nowrap}.vv-brand small{font-size:11px;color:var(--muted)}
+.vv-sidebar-label{font-size:10px;letter-spacing:.15em;color:var(--muted);font-weight:800;padding:0 13px}
+.vv-side-links,.vv-sidebar-bottom{display:grid;gap:4px}.vv-sidebar-bottom{margin-top:auto;padding-top:14px;border-top:1px solid var(--line)}
+.vv-sidebar .vv-nav-link,.vv-mobile-navigation .vv-nav-link{width:100%;display:flex;align-items:center;gap:11px;text-align:left;padding:11px 12px;border-radius:11px;background:transparent;color:var(--text);font-size:13px;font-weight:650;line-height:1.25}
+.vv-sidebar .vv-nav-link:hover,.vv-mobile-navigation .vv-nav-link:hover{background:rgba(47,111,99,.08)}
+.vv-sidebar .vv-nav-link.is-current,.vv-mobile-navigation .vv-nav-link.is-current{background:rgba(47,111,99,.12);color:var(--brand-dark)}
+.vv-nav-icon{width:21px;text-align:center;font-size:18px;flex-shrink:0}.vv-logout-link{color:var(--muted)!important}
+.vv-main-column{min-width:0}.vv-clean-topbar{z-index:6;background:var(--panel)}
+.vv-clean-topbar .topbar-inner{max-width:none;min-height:64px;padding:9px 24px;flex-direction:row;align-items:center}
+.vv-page-heading{font-size:17px;min-width:0}.vv-top-actions{display:flex;align-items:center;gap:12px;margin-left:auto}
+.vv-clean-topbar .vv-icon-button{width:37px;height:37px;display:grid;place-items:center;padding:0;border-radius:12px;background:transparent;color:var(--text);font-size:17px;position:relative}
+.vv-clean-topbar .vv-icon-button:hover{background:rgba(47,111,99,.08)}
+.vv-account-button{display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:transparent;color:var(--text);padding:5px 11px 5px 5px;border-radius:999px;font-size:12px}
+.vv-account-button:hover{background:rgba(47,111,99,.08)}
+.vv-account-avatar{width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0}.vv-initials{display:grid;place-items:center;background:var(--brand);color:white;font-size:11px;font-weight:800}
+.vv-content{max-width:1550px;width:100%;padding:20px 24px 32px}.vv-dev-tools{padding:8px 24px 0}.vv-dev-tools .dev-preview-controls{margin:0}
+.vv-mobile-navigation,.vv-mobile-brand{display:none}
+.profile-homepage{gap:16px}.profile-homepage .card{box-shadow:0 3px 15px rgba(20,45,40,.045);border:1px solid var(--line)}
+.profile-homepage .profile-hero-card{background:linear-gradient(115deg,rgba(47,111,99,.10),rgba(255,255,255,.94) 62%);border-radius:20px;padding:27px;gap:22px}
+.profile-homepage .profile-hero-photo{width:102px;height:102px;border-radius:25px;background:var(--brand);color:white;box-shadow:none;border:3px solid rgba(255,255,255,.85)}
+.profile-homepage .profile-hero-copy h2{font-size:clamp(1.6rem,2.8vw,2.35rem);line-height:1.15;margin-bottom:7px;letter-spacing:-.035em}
+.profile-homepage .profile-hero-copy .eyebrow{color:var(--brand);opacity:1;font-size:11px}
+.profile-homepage .profile-chip-row span{background:rgba(47,111,99,.10);color:var(--brand-dark);font-size:12px;font-weight:700;padding:6px 10px}
+.profile-homepage .profile-info-card{padding:21px;border-radius:17px;min-width:0}
+.profile-homepage .profile-card-title{margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.profile-homepage .profile-card-title h3{font-size:16px;letter-spacing:-.015em}
+.profile-homepage .profile-detail-list{grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:9px}
+.profile-homepage .profile-detail-list div,.profile-homepage .profile-mini-row{background:rgba(47,111,99,.045);border:1px solid rgba(47,111,99,.08);padding:13px;border-radius:12px;overflow-wrap:anywhere}
+.profile-homepage .profile-detail-list small{font-size:11px}.profile-homepage .profile-long-text{line-height:1.7}
+.profile-homepage .profile-card-grid{gap:14px}
+:root[data-theme="dark"] .vv-sidebar,:root[data-theme="dark"] .vv-clean-topbar{background:var(--panel)}
+:root[data-theme="dark"] .profile-homepage .profile-hero-card{background:linear-gradient(115deg,rgba(47,111,99,.20),var(--panel))}
+@media(max-width:850px){.vv-app-layout{grid-template-columns:1fr}.vv-sidebar{display:none}.vv-mobile-brand{display:inline;color:var(--muted);font-size:13px}.vv-mobile-brand span{padding:0 4px}.vv-clean-topbar .topbar-inner{padding:9px 16px}.vv-content{padding:15px}.vv-mobile-navigation{display:block;border-bottom:1px solid var(--line);background:var(--panel);padding:0 15px}.vv-mobile-navigation summary{cursor:pointer;padding:11px 2px;font-size:13px;font-weight:750;list-style:none}.vv-mobile-navigation summary::-webkit-details-marker{display:none}.vv-mobile-navigation nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:0 0 12px}.vv-dev-tools{padding:8px 15px 0}}
+@media(max-width:560px){.vv-account-name{display:none}.vv-account-button{padding:4px}.vv-top-actions{gap:5px}.profile-homepage .profile-hero-card{padding:19px}.profile-homepage .profile-card-grid{grid-template-columns:1fr}.profile-homepage .profile-hero-actions{width:100%}.profile-homepage .profile-hero-actions button{flex:1}.vv-mobile-navigation nav{grid-template-columns:1fr}}
+
+/* Leader-reviewed teacher biographies */
+.leader-bio-editor{margin:1rem 0;padding:1.1rem;border:1px solid var(--border, #e2e8f0);border-radius:12px;background:var(--surface, #fff)}
+.leader-bio-editor h3{margin:0 0 .4rem}
+.leader-bio-source{padding:.85rem 1rem;margin:1rem 0;background:rgba(100,116,139,.07);border-radius:9px}
+.leader-bio-source p{white-space:pre-wrap;line-height:1.55;margin:.55rem 0 0}
+.leader-bio-editor textarea{width:100%;box-sizing:border-box;min-height:130px}
+
+/* v194 — direct-manipulation profile photo crop */
+.profile-crop-stage { cursor: grab; touch-action: none; user-select: none; }
+.profile-crop-stage:active { cursor: grabbing; }
+.profile-crop-stage img { pointer-events: none; user-select: none; transform-origin: center center; }
+.profile-crop-circle { inset: 0; border-radius: 50%; }
+.profile-crop-zoom-label { display: grid; gap: .45rem; }
+.profile-crop-zoom-label input { width: 100%; }
+
+/* v195 — Teacher Bio: refined 4 × 6 printable. Scoped to this printable only. */
+.printable-preview-card.teacher-bio-size.teacher-bio-printable {
+  box-sizing: border-box;
+  width: 4in;
+  height: 6in;
+  min-height: 6in;
+  max-height: 6in;
+  padding: .22in .24in .20in;
+  gap: .105in;
+  background: #fffdf7;
+  border: 1px solid #d9e4d9;
+  border-radius: 3px;
+  box-shadow: 0 12px 28px rgba(19,44,35,.10);
+  color: #244b3c;
+  overflow: hidden;
+}
+.teacher-bio-printable .teacher-bio-topline {
+  min-height: .94in;
+  align-items: center;
+  padding: 0 .05in;
+}
+.teacher-bio-printable .teacher-bio-logo {
+  flex: 0 0 .73in;
+  width: .73in;
+  height: .73in;
+  box-shadow: none;
+  font-size: 16px;
+}
+.teacher-bio-printable .teacher-bio-photo {
+  box-sizing: border-box;
+  flex: 0 0 .94in;
+  width: .94in;
+  height: .94in;
+  border: 3px solid #d9bd65;
+  outline: 2px solid #4d8666;
+  font-size: 10px;
+}
+.teacher-bio-printable h1 {
+  margin: 0;
+  padding: 0 0 .10in;
+  border-bottom: 1px solid #c9d9cb;
+  color: #2c7055;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: .025em;
+}
+.teacher-bio-printable .teacher-bio-lines {
+  padding: .10in .12in;
+  border: 1px solid #d9e4d9;
+  border-radius: 7px;
+  background: #fff;
+}
+.teacher-bio-printable .teacher-bio-lines p {
+  display: grid;
+  grid-template-columns: 1.12in minmax(0,1fr);
+  gap: .10in;
+  align-items: baseline;
+  margin: 0;
+  padding: .045in 0;
+  border-bottom: 1px solid #edf1eb;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 10.5px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.teacher-bio-printable .teacher-bio-lines p:last-child { border-bottom: 0; }
+.teacher-bio-printable .teacher-bio-lines strong {
+  color: #4d7460;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.teacher-bio-printable .teacher-bio-lines span { color: #233f33; }
+.teacher-bio-printable .teacher-bio-summary {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: .14in .16in;
+  border: 1px solid #d7e5d9;
+  border-radius: 7px;
+  background: #f1f6ef;
+  overflow: hidden;
+}
+.teacher-bio-printable .teacher-bio-summary h2 {
+  margin: 0 0 .09in;
+  font-family: Georgia, 'Times New Roman', serif;
+  color: #28664c;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.teacher-bio-printable .teacher-bio-summary p {
+  margin: 0;
+  color: #2b4a3b;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 11.5px;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+@media print {
+  .printable-preview-card.teacher-bio-size.teacher-bio-printable {
+    width: 4in !important;
+    height: 6in !important;
+    min-height: 6in !important;
+    max-height: 6in !important;
+    margin: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+}
+
+/* v196 — understated OVA portrait card; print dimensions remain 4 × 6 inches. */
+.printable-preview-card.teacher-bio-size.teacher-bio-printable.teacher-bio-modern {
+  padding: .18in .20in .14in;
+  gap: .075in;
+  background: #fffefa;
+  border: 1px solid #d7e3d8;
+  border-top: .065in solid #2f7055;
+  border-radius: 5px;
+  box-shadow: 0 8px 24px rgba(26,63,45,.09);
+}
+.teacher-bio-modern .teacher-bio-brand { display:flex; align-items:center; gap:.09in; min-height:.38in; padding-bottom:.07in; border-bottom:1px solid #e4e9df; }
+.teacher-bio-modern .teacher-bio-brand-logo { width:.38in; height:.38in; object-fit:contain; }
+.teacher-bio-modern .teacher-bio-brand-monogram { width:.38in; height:.38in; border-radius:50%; background:#2f7055; color:#fff; display:grid; place-items:center; font:bold 11px Arial,sans-serif; }
+.teacher-bio-modern .teacher-bio-brand-name { display:block; font: bold 13px Georgia,serif; letter-spacing:.015em; color:#24533f; }
+.teacher-bio-modern .teacher-bio-brand-subtitle { display:block; font: 9px Arial,sans-serif; letter-spacing:.09em; text-transform:uppercase; color:#7b8c7d; margin-top:2px; }
+.teacher-bio-modern .teacher-bio-hero { position:relative; flex:0 0 auto; }
+.teacher-bio-modern .teacher-bio-photo { width:100%; height:2.20in; border:0; outline:0; border-radius:4px; background:#e6eee7; box-shadow:none; overflow:hidden; }
+.teacher-bio-modern .teacher-bio-photo img { width:100%; height:100%; object-fit:cover; object-position:center 34%; }
+.teacher-bio-modern .teacher-bio-identity { text-align:center; padding:.075in .08in .07in; background:#f1f5ed; border-bottom:2px solid #c3ad65; }
+.teacher-bio-modern .teacher-bio-identity h1 { font: bold 22px/1.12 Georgia,serif; color:#245b43; margin:0; padding:0; border:0; letter-spacing:0; overflow-wrap:anywhere; }
+.teacher-bio-modern .teacher-bio-identity p { font: 10px/1.2 Arial,sans-serif; color:#5b705f; margin:3px 0 0; letter-spacing:.04em; }
+.teacher-bio-modern .teacher-bio-lines { padding:.04in .08in; border:0; border-bottom:1px solid #e0e7dc; border-radius:0; background:transparent; }
+.teacher-bio-modern .teacher-bio-lines p { grid-template-columns:1.1in minmax(0,1fr); font-size:9.5px; padding:.035in 0; line-height:1.25; }
+.teacher-bio-modern .teacher-bio-lines strong { font-size:8.5px; }
+.teacher-bio-modern .teacher-bio-summary { flex:1 1 0; min-height:0; padding:.08in .09in; border:0; background:transparent; overflow:hidden; }
+.teacher-bio-modern .teacher-bio-summary h2 { font:bold 13px Georgia,serif; color:#2d674d; margin:0 0 .055in; }
+.teacher-bio-modern .teacher-bio-summary p { font:10.5px/1.36 Georgia,serif; color:#34483b; }
+.teacher-bio-modern .teacher-bio-footer { flex:0 0 auto; text-align:center; padding-top:.045in; border-top:1px solid #e2e8dd; font:italic 8px Georgia,serif; color:#758777; }
+@media print { .printable-preview-card.teacher-bio-size.teacher-bio-printable.teacher-bio-modern { border:0!important; border-top:.065in solid #2f7055!important; box-shadow:none!important; } }
+
+/* Curriculum workspace v197 */
+.curriculum-workspace{display:grid;gap:18px}.curriculum-heading{display:flex;align-items:end;justify-content:space-between;gap:16px;flex-wrap:wrap}.curriculum-heading h1{margin:0}.curriculum-tabs{display:flex;gap:6px;flex-wrap:wrap}.curriculum-theme-list{display:grid}.curriculum-theme-row{display:grid;grid-template-columns:110px 1fr;gap:14px;padding:12px 4px;border-bottom:1px solid var(--border,#dfe5df)}.curriculum-week{font-weight:700;color:#42684e}.curriculum-meta{font-size:.85rem;opacity:.72;margin-top:4px}.curriculum-ole-location{border:1px solid #dfe6dd;border-radius:12px;padding:15px;margin:12px 0}.curriculum-ole-location h3{margin:0 0 12px}.curriculum-ole-node{padding:8px 0 4px 16px;border-left:2px solid #dce7da;margin-left:8px}.curriculum-ole-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.curriculum-ole-line small{text-transform:capitalize;opacity:.6}.curriculum-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.curriculum-form label{display:grid;gap:6px}.curriculum-form input:not([type=radio]),.curriculum-form textarea,.curriculum-form select{width:100%}.curriculum-form fieldset{border:1px solid #dfe6dd;border-radius:9px;padding:12px}.curriculum-form fieldset label{display:inline-flex;align-items:center;margin-right:20px}.curriculum-wide,.curriculum-form .actions{grid-column:1/-1}.curriculum-feedback-group{border-bottom:1px solid #dfe6dd;padding:12px}.curriculum-feedback-group summary{cursor:pointer;display:flex;justify-content:space-between;gap:16px}.curriculum-feedback-entry{padding:12px;border-top:1px solid #e4e8e2;margin-top:10px}.curriculum-feedback-entry p{margin:7px 0}@media(max-width:640px){.curriculum-theme-row{grid-template-columns:80px 1fr}.curriculum-form{grid-template-columns:1fr}}
+
+/* v198: discoverable tool controls, pinned navigation and guided OLE setup */
+.home-tool-wrap .tool-tile-controls{opacity:1;top:8px;right:8px;gap:5px;z-index:2}
+.home-tool-wrap .tool-tile-controls .mini-icon-button{display:grid;place-items:center;min-width:36px;min-height:36px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font-size:19px;box-shadow:0 2px 8px rgba(0,0,0,.07)}
+.home-tool-wrap .tool-tile-controls .mini-icon-button:hover,.home-tool-wrap .tool-tile-controls .mini-icon-button:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.square-tool-tile .tool-icon{width:72px;height:72px;font-size:35px;border-radius:20px}
+.square-tool-tile .tool-tile-image{width:88px;height:88px}
+.square-grid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}
+.square-tool-tile{min-height:175px;padding:48px 12px 14px}
+.curriculum-wizard{margin-bottom:16px}.curriculum-wizard .curriculum-form{grid-template-columns:1fr}.curriculum-wizard-block{border:1px solid var(--line);padding:14px;border-radius:12px;display:grid;gap:12px}.curriculum-wizard-bin{padding:10px;border-radius:10px;background:var(--bg);display:grid;gap:10px}.curriculum-wizard textarea{width:100%;min-height:85px}
+@media(max-width:600px){.square-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.square-tool-tile{min-height:150px}.home-tool-wrap .tool-tile-controls .mini-icon-button{min-width:34px;min-height:34px}}

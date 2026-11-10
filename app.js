@@ -26,7 +26,7 @@ import {
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v187-shareable-staff-signup";
+const VV_APP_VERSION = "v189-profile-navigation-refinement";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -298,9 +298,9 @@ function renderToolTile(tool, extraClass = "") {
       <h3>${t.title}</h3>
     </button>
     <div class="tool-tile-controls">
-      ${t.id === "campusCares" ? `<button class="mini-icon-button" type="button" title="Campus Cares open setting" data-campus-open-menu>⋯</button>` : ""}
-      <button class="mini-icon-button" type="button" title="Bookmark" data-bookmark-tool="${t.id}">${bookmarked ? "★" : "☆"}</button>
-      <button class="mini-icon-button" type="button" title="Hide" data-hide-tool="${t.id}">×</button>
+      ${t.id === "campusCares" ? `<button class="mini-icon-button" type="button" title="Tool settings" aria-label="Campus Cares settings" data-campus-open-menu>⋯</button>` : ""}
+      <button class="mini-icon-button" type="button" title="${bookmarked ? "Unpin" : "Pin to sidebar"}" aria-label="${bookmarked ? "Unpin" : "Pin to sidebar"} ${escapeHtml(t.title)}" data-bookmark-tool="${t.id}">${bookmarked ? "★" : "☆"}</button>
+      <button class="mini-icon-button" type="button" title="Hide tool" aria-label="Hide ${escapeHtml(t.title)}" data-hide-tool="${t.id}">×</button>
       ${t.id === "campusCares" ? `<div class="tool-tile-menu" data-campus-open-menu-panel><strong>Open Campus Cares to:</strong><button type="button" data-campus-open-mode="submitPopup">Submit Request popup</button><button type="button" data-campus-open-mode="tool">Open the tool</button><button type="button" data-campus-open-mode="submitted">View Your Submissions</button></div>` : ""}
     </div>
   </div>`;
@@ -484,6 +484,12 @@ let state = {
   budgetCodes: [],
   importantDates: [],
   weeklyThemes: [],
+  curriculumTab: "weeklyThemes",
+  curriculumOle: [],
+  curriculumFeedback: [],
+  curriculumLoadedAt: 0,
+  curriculumFeedbackTheme: "",
+  curriculumSchoolId: "",
   weeklyThemesDraftImages: {},
   weeklyThemesDraftTiles: {},
   certificates: [],
@@ -691,19 +697,39 @@ function isSystemAdmin(user) {
   return user?.uid === FIRST_SYSTEM_ADMIN_UID || hasAnyRole(user, ["systemadmin", "system-admin", "system_admin", "system admin", "dev"]);
 }
 
+// Preview mode is a UI/permission simulation, never an authorization grant.
+// Only the signed-in developer's own identity is previewed; other users retain their roles.
+function getViewedRoleUser(user) {
+  if (!user || !state.session || user.uid !== state.session.uid || !devPreviewActive()) return user;
+  return getPermissionUser(user);
+}
+
+function hasViewedRole(user, allowed) {
+  const viewed = getViewedRoleUser(user);
+  // The original admin UID and roleKeys must not leak into preview checks.
+  if (viewed !== user) return hasAnyRole(viewed, allowed);
+  return hasAnyRole(user, allowed);
+}
+
 function isLeaderOrAdmin(user) {
+  if (user?.uid === state.session?.uid && devPreviewActive())
+    return hasViewedRole(user, ["lead", "leader", "owner", "admin", "systemadmin", "dev"]);
   return isSystemAdmin(user) || hasAnyRole(user, ["lead", "leader", "owner", "admin"]);
 }
 
 function canUseLeadership(user) {
-  return isSystemAdmin(user) || isLeaderOrAdmin(user);
+  return isLeaderOrAdmin(user);
 }
 
 function canUseSystemAdmin(user) {
+  if (user?.uid === state.session?.uid && devPreviewActive())
+    return hasViewedRole(user, ["systemadmin", "system-admin", "system_admin", "system admin", "dev"]);
   return isSystemAdmin(user);
 }
 
 function canUseOwnersPanel(user) {
+  if (user?.uid === state.session?.uid && devPreviewActive())
+    return hasViewedRole(user, ["owner", "systemadmin", "dev"]);
   return isSystemAdmin(user) || hasAnyRole(user, ["owner"]);
 }
 
@@ -737,6 +763,7 @@ function getPermissionUser(user = state.session) {
     ...user,
     role: state.devViewRoleKey || getPrimaryRole(user),
     roles: [state.devViewRoleKey || getPrimaryRole(user)].filter(Boolean),
+    roleKeys: [state.devViewRoleKey || getPrimaryRole(user)].filter(Boolean),
     teamPosition: state.devViewPosition || user.teamPosition || user.position || "",
     position: state.devViewPosition || user.position || user.teamPosition || ""
   };
@@ -806,27 +833,33 @@ async function loadAllUsers() {
     .sort(byName);
 }
 
-async function refreshAdminData() {
-  await loadSchools();
-  await loadAllUsers();
-  await loadPositions();
-  await loadRoles();
-  await loadCoreChampionRounds();
-  await loadMoneyRequestTypes();
-  await loadMoneyRequests();
-  await loadCampusCaresAdmin();
-  await loadCampusCareTasks();
-  await loadCampusCareDiscussions();
-  await loadBudgetCodes();
-  await loadImportantDates();
-  await loadWeeklyThemes();
-  await loadCertificates();
-  await loadAppSettings();
-  await loadAppTools();
-  await loadNotifications();
-  await loadVillageVoiceDraft();
-  await loadPrintableDrafts();
-  await loadIllnessNoticeTemplates();
+// Navigation can reuse recently loaded admin data; mutations always call the
+// default (forced) refresh. Concurrent requests share one in-flight load.
+let adminDataLoadedAt = 0;
+let adminDataLoadPromise = null;
+async function refreshAdminData({ maxAgeMs = 0 } = {}) {
+  if (maxAgeMs > 0 && adminDataLoadedAt && Date.now() - adminDataLoadedAt < maxAgeMs) return;
+  if (adminDataLoadPromise) return adminDataLoadPromise;
+  adminDataLoadPromise = (async () => {
+    // These collections are independent. Fetch in parallel instead of making
+    // every Firestore round trip wait for the previous one.
+    await Promise.all([
+      loadSchools(), loadAllUsers(), loadPositions(), loadRoles(),
+      loadCoreChampionRounds(), loadMoneyRequestTypes(), loadMoneyRequests(),
+      loadCampusCaresAdmin(), loadCampusCareTasks(), loadCampusCareDiscussions(),
+      loadBudgetCodes(), loadImportantDates(), loadWeeklyThemes(),
+      loadCertificates(), loadAppSettings(), loadAppTools(), loadNotifications(),
+      loadVillageVoiceDraft(), loadPrintableDrafts(), loadIllnessNoticeTemplates()
+    ]);
+    adminDataLoadedAt = Date.now();
+  })();
+  try { return await adminDataLoadPromise; }
+  finally { adminDataLoadPromise = null; }
+}
+
+// Switching panels within a short period should not re-download everything.
+async function refreshAdminDataForNavigation() {
+  return refreshAdminData({ maxAgeMs: 30000 });
 }
 
 async function refreshMoneyRequestsData() {
@@ -859,13 +892,10 @@ function hideAppLoading() {
 
 async function withAppLoading(message, task) {
   showAppLoading(message);
-  const startedAt = Date.now();
   try {
     await new Promise(resolve => requestAnimationFrame(resolve));
     return await task();
   } finally {
-    const elapsed = Date.now() - startedAt;
-    if (elapsed < 175) await new Promise(resolve => setTimeout(resolve, 175 - elapsed));
     hideAppLoading();
   }
 }
@@ -1550,13 +1580,7 @@ async function updateAppUser(form) {
     displayName: `${firstName} ${lastName.slice(0, 1)}.`,
     usedName,
     profileImageData,
-    educationList: collectEducationEntries(form),
-    education: collectEducationEntries(form).map(educationDisplayText).join("; "),
-    earlyEducationStart: form.earlyEducationStart?.value?.trim() || "",
-    whyEarlyEducation: form.whyEarlyEducation?.value?.trim() || "",
-    birthday: collectBirthdayFromForm(form),
-    leaderSummary: form.leaderSummary?.value?.trim() || "",
-    whatILike: collectWhatILike(form),
+    ...(form.querySelector('[name="leaderSummary"]') ? { leaderSummary: form.leaderSummary.value.trim() } : {}),
     pin: form.pin.value.trim(),
     pinResetRequired: form.pin.value.trim() === "0000",
     onboardingRequired: form.pin.value.trim() === "0000" ? true : (state.modal.user?.onboardingRequired || false),
@@ -1790,6 +1814,7 @@ function getAvailableTools(user) {
     });
   }
 
+  tools.push({ id: "curriculum", title: "Curriculum", icon: "📚", desc: "Weekly themes, OLE kits, feedback, and printables." });
   return tools;
 }
 
@@ -2047,30 +2072,55 @@ function getOvaLogoHtml(className = "logo", fallbackText = "VV") {
 }
 
 function pageShell(content) {
+  const navigation = [
+    ["home", "⌂", "Home", true],
+    ["profile", "◉", "My profile", true],
+    ["leadership", "▦", "Leadership", canUseLeadership(state.session)],
+    ["ownersPanel", "◇", "Owners", canUseOwnersPanel(state.session)],
+    ["systemAdmin", "⚙", "System admin", canUseSystemAdmin(state.session)]
+  ];
+  const pageTitles = { profile: "My profile", curriculum: "Curriculum", home: "Home", leadership: "Leadership", ownersPanel: "Owners", systemAdmin: "System admin" };
+  const currentTitle = pageTitles[state.currentView] || "Workspace";
+  const pinnedTools = getAvailableTools(state.session).filter(t => isToolBookmarked(t.id));
+  const pinnedHtml = pinnedTools.map(t => `<button type="button" class="vv-nav-link ${state.currentView === t.id ? 'is-current' : ''}" data-tool="${escapeHtml(t.id)}"><span class="vv-nav-icon">${t.icon}</span><span>${escapeHtml(getToolDisplay(t).title)}</span></button>`).join('');
+  const navHtml = navigation.filter(item => item[3]).map(([action, icon, label]) =>
+    `<button type="button" class="vv-nav-link ${state.currentView === action ? "is-current" : ""}" data-action="${action}" ${state.currentView === action ? 'aria-current="page"' : ""}><span class="vv-nav-icon" aria-hidden="true">${icon}</span><span>${label}</span></button>`
+  ).join("");
   return `
-    <div class="topbar">
-      <div class="topbar-inner">
-        <div class="actions">
-          ${getOvaLogoHtml("logo", "VV")}
-          <strong>Village Vibes</strong>
+    <div class="vv-app-layout">
+      <aside class="vv-sidebar" aria-label="Primary navigation">
+        <div class="vv-brand">${getOvaLogoHtml("logo", "VV")}<span><strong>Village Vibes</strong><small>Team workspace</small></span></div>
+        <div class="vv-sidebar-label">WORKSPACE</div>
+        <nav class="vv-side-links">${navHtml}</nav>${pinnedHtml ? `<div class="vv-sidebar-label">PINNED TOOLS</div><nav class="vv-side-links">${pinnedHtml}</nav>` : ""}
+        <div class="vv-sidebar-bottom">
+          <button class="vv-nav-link" type="button" data-action="notificationSettings"><span class="vv-nav-icon">⚙</span><span>Notification settings</span></button>
+          <button class="vv-nav-link" type="button" data-toggle-theme><span class="vv-nav-icon">◐</span><span>${getThemePreference() === "dark" ? "Light appearance" : "Dark appearance"}</span></button>
+          <button class="vv-nav-link vv-logout-link" type="button" data-action="logout"><span class="vv-nav-icon">↪</span><span>Sign out</span></button>
         </div>
-        <div class="actions">
-          <button class="theme-toggle-button secondary small" type="button" data-toggle-theme>${getThemePreference() === "dark" ? "☀️ Light" : "🌙 Dark"}</button>
-          <button class="notification-button" type="button" data-toggle-notifications>🔔${getUnreadNotificationCount() ? `<span>${getUnreadNotificationCount()}</span>` : ""}</button>
-          <button class="secondary small" type="button" data-action="notificationSettings">Notifications</button>
-          <button class="user-pill clickable-user-pill" type="button" data-open-self-profile>${makeDisplayName(state.session)} · ${getPrimaryRole(state.session)}</button>
-          ${canUseLeadership(state.session) ? `<button class="secondary small" data-action="leadership">Leadership</button>` : ""}
-          ${canUseOwnersPanel(state.session) ? `<button class="secondary small" data-action="ownersPanel">Owners</button>` : ""}
-          ${canUseSystemAdmin(state.session) ? `<button class="secondary small" data-action="systemAdmin">System Admin</button>` : ""}
-          <button class="small" data-action="home">Home</button>
-          <button class="secondary small" data-action="logout">Logout</button>
-        </div>
+      </aside>
+      <div class="vv-main-column">
+        <header class="topbar vv-clean-topbar">
+          <div class="topbar-inner">
+            <div class="vv-page-heading"><span class="vv-mobile-brand">Village Vibes <span>·</span> </span><strong>${escapeHtml(currentTitle)}</strong></div>
+            <div class="vv-top-actions">
+              <button class="notification-button vv-icon-button" type="button" data-toggle-notifications aria-label="Notifications" title="Notifications">🔔${getUnreadNotificationCount() ? `<span>${getUnreadNotificationCount()}</span>` : ""}</button>
+              <button class="user-pill clickable-user-pill vv-account-button" type="button" data-open-self-profile title="My profile">${uAvatarForShell(state.session)}<span class="vv-account-name">${escapeHtml(makeDisplayName(state.session))}</span></button>
+            </div>
+          </div>
+          ${state.notificationsOpen ? renderNotificationsPanel() : ""}
+        </header>
+        <details class="vv-mobile-navigation"><summary>☰ &nbsp; Menu</summary><nav>${navHtml}${pinnedHtml}<button type="button" class="vv-nav-link" data-action="notificationSettings">Notification settings</button><button type="button" class="vv-nav-link" data-toggle-theme>Toggle appearance</button><button type="button" class="vv-nav-link" data-action="logout">Sign out</button></nav></details>
+        ${isSystemAdmin(state.session) ? `<div class="vv-dev-tools">${renderDevPreviewControls()}</div>` : ""}
+        <main class="shell vv-content">${content}</main>
       </div>
-      ${renderDevPreviewControls()}
-      ${state.notificationsOpen ? renderNotificationsPanel() : ""}
     </div>
-    <main class="shell">${content}</main>
   `;
+}
+
+function uAvatarForShell(user) {
+  const name = makeDisplayName(user || {});
+  const initials = name.split(/\s+/).slice(0, 2).map(part => part.charAt(0)).join("").toUpperCase() || "VV";
+  return user?.profileImageData ? `<img class="vv-account-avatar" src="${user.profileImageData}" alt="" />` : `<span class="vv-account-avatar vv-initials">${escapeHtml(initials)}</span>`;
 }
 
 function renderLanding() {
@@ -3149,7 +3199,7 @@ function renderLeadership() {
       <div class="nav-tabs">
         <button class="${state.leadershipTab === "users" ? "active" : ""}" data-leadership-tab="users">Users</button>
         <button class="${state.leadershipTab === "importantDates" ? "active" : ""}" data-leadership-tab="importantDates">Important Dates</button>
-        <button class="${state.leadershipTab === "weeklyThemes" ? "active" : ""}" data-leadership-tab="weeklyThemes">Weekly Themes</button>
+
         <button class="${state.leadershipTab === "certificates" ? "active" : ""}" data-leadership-tab="certificates">Certificates</button>
         <button class="${state.leadershipTab === "shareableLinks" ? "active" : ""}" data-leadership-tab="shareableLinks">Shareable Links</button>
         <button class="${state.leadershipTab === "coreChampion" ? "active" : ""}" data-leadership-tab="coreChampion">Core Champion</button>
@@ -3170,7 +3220,7 @@ function renderLeadership() {
       ` : ""}
 
       ${state.leadershipTab === "importantDates" ? renderImportantDatesLeadershipTab() : ""}
-      ${state.leadershipTab === "weeklyThemes" ? renderWeeklyThemesLeadershipTab() : ""}
+
       ${state.leadershipTab === "certificates" ? renderCertificatesLeadershipTab() : ""}
       ${state.leadershipTab === "shareableLinks" ? renderShareableLinksLeadershipTab() : ""}
       ${state.leadershipTab === "coreChampion" ? renderCoreChampionLeadershipTab() : ""}
@@ -4027,6 +4077,52 @@ function showWeeklyThemesFloatingSave(form) {
   if (!form) return;
   document.body.insertAdjacentHTML('beforeend', `<div class="weekly-theme-floating-save" data-weekly-theme-floating-save><span>Weekly Theme image changed</span><button type="button" data-save-weekly-themes-now>Save Weekly Themes</button></div>`);
 }
+
+// Profile photo editor: drag position and zoom share the exact coordinates used by the saved canvas crop.
+function updateProfileCropPreview() {
+  const stage = document.querySelector("[data-profile-crop-stage]");
+  const img = stage?.querySelector("[data-profile-crop-img]");
+  const u = state.modal?.user;
+  if (!stage || !img || !u || !img.naturalWidth || !img.naturalHeight) return;
+  const side = stage.clientWidth;
+  const zoom = Math.max(1, Number(u.cropZoom ?? 1.2));
+  const scale = Math.max(side / img.naturalWidth, side / img.naturalHeight) * zoom;
+  const maxX = Math.max(0, (img.naturalWidth * scale - side) / 2);
+  const maxY = Math.max(0, (img.naturalHeight * scale - side) / 2);
+  const dx = -((Number(u.cropX ?? 50) - 50) / 50) * maxX;
+  const dy = -((Number(u.cropY ?? 50) - 50) / 50) * maxY;
+  img.style.transformOrigin = "center center";
+  img.style.transform = `translate(${dx}px, ${dy}px) scale(${zoom})`;
+}
+let profileCropDrag = null;
+document.addEventListener("pointerdown", (e) => {
+  const stage = e.target.closest?.("[data-profile-crop-stage]");
+  if (!stage || !state.modal?.user?.rawProfileImageData) return;
+  e.preventDefault();
+  const u = state.modal.user;
+  profileCropDrag = { id: e.pointerId, stage, x: e.clientX, y: e.clientY, cropX: Number(u.cropX ?? 50), cropY: Number(u.cropY ?? 50) };
+  stage.setPointerCapture(e.pointerId);
+});
+document.addEventListener("pointermove", (e) => {
+  const d = profileCropDrag;
+  if (!d || d.id !== e.pointerId || !state.modal?.user) return;
+  const img = d.stage.querySelector("[data-profile-crop-img]");
+  if (!img?.naturalWidth) return;
+  const side = d.stage.clientWidth;
+  const zoom = Math.max(1, Number(state.modal.user.cropZoom ?? 1.2));
+  const scale = Math.max(side / img.naturalWidth, side / img.naturalHeight) * zoom;
+  const maxX = Math.max(0, (img.naturalWidth * scale - side) / 2);
+  const maxY = Math.max(0, (img.naturalHeight * scale - side) / 2);
+  state.modal.user.cropX = maxX ? Math.max(0, Math.min(100, d.cropX - (e.clientX - d.x) * 50 / maxX)) : 50;
+  state.modal.user.cropY = maxY ? Math.max(0, Math.min(100, d.cropY - (e.clientY - d.y) * 50 / maxY)) : 50;
+  updateProfileCropPreview();
+});
+for (const eventName of ["pointerup", "pointercancel"]) document.addEventListener(eventName, (e) => {
+  if (profileCropDrag?.id === e.pointerId) profileCropDrag = null;
+});
+document.addEventListener("load", (e) => {
+  if (e.target.matches?.("[data-profile-crop-img]")) updateProfileCropPreview();
+}, true);
 
 function cropProfileImageToSquare(src, zoom = 1, x = 50, y = 50) {
   return new Promise((resolve, reject) => {
@@ -5029,21 +5125,24 @@ function renderTeacherBioPreview(draft = currentPrintableDraft("teacherBio")) {
   const user = getSelectedTeacherBioUser(draft);
   const name = `${user.firstName || ""} ${user.lastName || ""}`.trim() || "Employee Name";
   const position = user.teamPosition || user.position || "";
-  return `<div class="printable-preview-card teacher-bio-size teacher-bio-printable">
-    <div class="teacher-bio-topline">
-      ${state.appSettings?.ovaLogoData ? `<img class="teacher-bio-logo teacher-bio-logo-img" src="${state.appSettings.ovaLogoData}" alt="OVA logo" />` : `<div class="teacher-bio-logo">OVA</div>`}
-      <div class="teacher-bio-photo">${user.profileImageData ? `<img src="${user.profileImageData}" alt="${escapeHtml(name)}" />` : `<span>No Photo</span>`}</div>
+  return `<div class="printable-preview-card teacher-bio-size teacher-bio-printable teacher-bio-modern">
+    <div class="teacher-bio-brand">
+      ${state.appSettings?.ovaLogoData ? `<img class="teacher-bio-brand-logo" src="${state.appSettings.ovaLogoData}" alt="OVA logo" />` : `<span class="teacher-bio-brand-monogram">OVA</span>`}
+      <div><span class="teacher-bio-brand-name">Oak Village Academy</span><span class="teacher-bio-brand-subtitle">Meet Our Team</span></div>
     </div>
-    <h1>Teacher Bio</h1>
+    <div class="teacher-bio-hero">
+      <div class="teacher-bio-photo">${user.profileImageData ? `<img src="${user.profileImageData}" alt="${escapeHtml(name)}" />` : `<span>Photo coming soon</span>`}</div>
+      <div class="teacher-bio-identity"><h1>${escapeHtml(user.usedName || user.firstName || name)}</h1><p>${escapeHtml(position || "OVA Team Member")}</p></div>
+    </div>
     <div class="teacher-bio-lines">
-      <p><strong>Employee Name:</strong> ${escapeHtml(name)}</p>
-      <p><strong>Position:</strong> ${escapeHtml(position || "Not assigned")}</p>
-      <p><strong>Education:</strong> ${escapeHtml(normalizeEducationList(user.educationList || user.education).map(educationDisplayText).filter(Boolean).join(", "))}</p>
-      <p><strong>Started Working In Early Childhood Education:</strong> ${escapeHtml(user.earlyEducationStart || "")}</p>
+      <p><strong>Education</strong><span>${escapeHtml(normalizeEducationList(user.educationList || user.education).map(educationDisplayText).filter(Boolean).join(", ") || "Not provided")}</span></p>
+      <p><strong>In Early Education Since</strong><span>${escapeHtml(user.earlyEducationStart || "Not provided")}</span></p>
     </div>
     <div class="teacher-bio-summary">
+      <h2>A Little About ${escapeHtml(user.usedName || user.firstName || "Me")}</h2>
       <p>${escapeHtml(user.leaderSummary || "Leader summary has not been added yet.")}</p>
     </div>
+    <div class="teacher-bio-footer">Growing together at Oak Village Academy</div>
   </div>`;
 }
 
@@ -5979,7 +6078,7 @@ function exportPrintablePdf(kind) {
   const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).map(node => node.outerHTML).join("\n");
   const isBio = kind === "teacherBio";
   win.document.write(`<!doctype html><html><head><title>${escapeHtml(printableKindLabel(kind))}</title>${styles}<style>
-    @page { size: ${isBio ? "4in 6in" : "letter"}; margin: 0.15in; }
+    @page { size: ${isBio ? "4in 6in" : "letter"}; margin: ${isBio ? "0" : "0.15in"}; }
     body { margin: 0; background: white; }
     .voice-print-wrap { width: 100%; display: flex; justify-content: center; }
     .printable-preview-card { box-shadow: none !important; }
@@ -6192,11 +6291,19 @@ async function updateSelfProfile(form) {
     payload.whyEarlyEducation = form.whyEarlyEducation?.value?.trim() || "";
   } else if (section === "likes") {
     payload.whatILike = collectWhatILike(form);
-  } else {
-    payload.usedName = form.usedName?.value?.trim() || state.session.usedName || "";
-    payload.profileImageData = form.profileImageData?.value || state.session.profileImageData || "";
-    payload.earlyEducationStart = form.earlyEducationStart?.value?.trim() || "";
+  } else if (section === "photo") {
+    const cropUser = state.modal?.user || {};
+    const photo = cropUser.rawProfileImageData
+      ? await cropProfileImageToSquare(cropUser.rawProfileImageData, cropUser.cropZoom ?? 1.2, cropUser.cropX ?? 50, cropUser.cropY ?? 50)
+      : cropUser.profileImageData;
+    if (!photo || photo === state.session.profileImageData) throw new Error("Choose a new photo first.");
+    payload.profileImageData = photo;
+  } else if (section === "usedName" || section === "details") {
+    payload.usedName = form.usedName?.value?.trim() || "";
+  } else if (section === "birthday") {
     payload.birthday = collectBirthdayFromForm(form);
+  } else if (section === "earlyEducationStart") {
+    payload.earlyEducationStart = form.earlyEducationStart?.value?.trim() || "";
   }
   const wasOnboarding = isOnboardingRequired(state.session);
   await updateDoc(doc(db, "users", state.session.uid), payload);
@@ -6341,51 +6448,25 @@ function renderProfileHome() {
     : `<p class="empty">No education added yet.</p>`;
 
   $app.innerHTML = pageShell(`
-    <section class="profile-homepage">
-      <div class="profile-hero-card card">
-        <div class="profile-hero-photo">
-          ${u.profileImageData ? `<img src="${u.profileImageData}" alt="${escapeHtml(displayName)}" />` : `<span>${escapeHtml((u.firstName || "?").slice(0,1))}</span>`}
+    <section class="profile-homepage profile-v2" aria-label="My profile">
+      <div class="profile-v2-topline"><div><p class="profile-v2-kicker">TEAM DIRECTORY / MY PROFILE</p><h1>My profile</h1></div><button type="button" class="secondary small" data-action="home">Back to dashboard</button></div>
+      <div class="profile-v2-layout">
+        <aside class="profile-v2-identity card">
+          <div class="profile-v2-portrait">${u.profileImageData ? `<img src="${u.profileImageData}" alt="${escapeHtml(displayName)}" />` : `<span>${escapeHtml((u.firstName || "?").slice(0,1))}</span>`}</div>
+          <div class="profile-v2-person"><h2>${escapeHtml(displayName)}</h2><p>${escapeHtml(u.teamPosition || "Team member")}</p></div>
+          <div class="profile-v2-status"><span class="profile-v2-dot"></span> Team profile</div>
+          <div class="profile-v2-side-section"><h3>ROLE</h3><div class="profile-chip-row"><span>${escapeHtml(getPrimaryRole(u) || "Staff")}</span></div></div>
+          <div class="profile-v2-side-section"><h3>SCHOOL${schools.length === 1 ? "" : "S"}</h3><div class="profile-chip-row">${schools.length ? schools.map(school => `<span>${escapeHtml(school)}</span>`).join("") : `<span>Not assigned</span>`}</div></div>
+          <button type="button" class="profile-v2-edit-button" data-open-self-profile-editor data-profile-section="photo">Change profile photo</button>
+        </aside>
+        <div class="profile-v2-main">
+          <div class="profile-v2-intro"><div><p class="profile-v2-kicker">ABOUT</p><h2>Profile information</h2><p>Information you share with your school team.</p></div></div>
+          ${isOnboardingRequired(u) ? `<div class="card onboarding-profile-progress"><div class="tool-heading-row"><div><p class="eyebrow">Onboarding</p><h2>Finish setting up your profile</h2><p class="helper">Complete the sections below to finish onboarding.</p></div><button type="button" class="secondary small" data-action="onboarding">Continue onboarding</button></div>${getOnboardingStatusHtml(u)}</div>` : ""}
+          <article class="profile-v2-section"><div class="profile-v2-section-head"><div><span class="profile-v2-section-index">01</span><h3>Personal details</h3></div><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="usedName">Edit</button></div><dl class="profile-v2-facts"><div><dt>Preferred name</dt><dd>${escapeHtml(u.usedName || "Not set")}</dd><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="usedName">Edit</button></div><div><dt>Birthday</dt><dd>${escapeHtml(u.birthday || "Not set")}</dd><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="birthday">Edit</button></div><div><dt>Early education start</dt><dd>${escapeHtml(u.earlyEducationStart || "Not set")}</dd><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="earlyEducationStart">Edit</button></div></dl></article>
+          <article class="profile-v2-section"><div class="profile-v2-section-head"><div><span class="profile-v2-section-index">02</span><h3>Education</h3></div><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="education">Edit</button></div><div class="profile-v2-education">${eduHtml}</div></article>
+          <article class="profile-v2-section"><div class="profile-v2-section-head"><div><span class="profile-v2-section-index">03</span><h3>Why I chose early education</h3></div><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="story">Edit</button></div><p class="profile-long-text">${escapeHtml(u.whyEarlyEducation || "Share your story with your team.")}</p></article>
+          <article class="profile-v2-section"><div class="profile-v2-section-head"><div><span class="profile-v2-section-index">04</span><h3>What I like</h3></div><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="likes">Edit</button></div>${renderWhatILikeDisplay(u)}</article>
         </div>
-        <div class="profile-hero-copy">
-          <p class="eyebrow">My Profile</p>
-          <h2>${escapeHtml(displayName)}</h2>
-          <p>${escapeHtml(u.teamPosition || getPrimaryRole(u) || "Village Vibes user")}</p>
-          <div class="profile-chip-row">
-            <span>${escapeHtml(getPrimaryRole(u))}</span>
-            ${schools.map(school => `<span>${escapeHtml(school)}</span>`).join("")}
-          </div>
-        </div>
-        <div class="profile-hero-actions">
-          <button type="button" data-open-self-profile-editor data-profile-section="details">Update Profile</button>
-          <button type="button" class="secondary" data-action="home">Back Home</button>
-        </div>
-      </div>
-
-      ${isOnboardingRequired(u) ? `<div class="card onboarding-profile-progress"><div class="tool-heading-row"><div><p class="eyebrow">Onboarding</p><h2>Finish setting up your profile</h2><p class="helper">Update each section below. Checks update as soon as each section is saved.</p></div><button type="button" class="secondary small" data-action="onboarding">Back to Onboarding</button></div>${getOnboardingStatusHtml(u)}</div>` : ""}
-
-      <div class="profile-card-grid">
-        <article class="card profile-info-card">
-          <div class="profile-card-title"><h3>Profile Details</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="details">Edit</button></div>
-          <div class="profile-detail-list">
-            <div><small>Used Name</small><strong>${escapeHtml(u.usedName || "Not set")}</strong></div>
-            <div><small>Birthday</small><strong>${escapeHtml(u.birthday || "Not set")}</strong></div>
-            <div><small>Early Education Start</small><strong>${escapeHtml(u.earlyEducationStart || "Not set")}</strong></div>
-          </div>
-        </article>
-
-        <article class="card profile-info-card">
-          <div class="profile-card-title"><h3>Education</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="education">Edit</button></div>
-          <div class="profile-mini-list">${eduHtml}</div>
-        </article>
-
-        <article class="card profile-info-card wide-profile-card">
-          <div class="profile-card-title"><h3>Why I Chose Early Education</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="story">Edit</button></div>
-          <p class="profile-long-text">${escapeHtml(u.whyEarlyEducation || "Add a short answer here so printables and leader tools can use it later.")}</p>
-        </article>
-        <article class="card profile-info-card wide-profile-card">
-          <div class="profile-card-title"><h3>What I Like</h3><button type="button" class="secondary small" data-open-self-profile-editor data-profile-section="likes">Edit</button></div>
-          ${renderWhatILikeDisplay(u)}
-        </article>
       </div>
     </section>
     ${state.modal ? renderModal() : ""}
@@ -7046,40 +7127,28 @@ if (state.modal.type === "coreVote") {
 if (state.modal.type === "selfProfile") {
     const u = state.modal.user || state.session || {};
     const section = state.modal.section || "details";
-    const title = section === "education" ? "Edit Education" : section === "story" ? "Edit Early Education Story" : section === "likes" ? "Edit What I Like" : "Edit Profile Details";
+    const titles = { photo: "Change Profile Photo", usedName: "Edit Preferred Name", birthday: "Edit Birthday", earlyEducationStart: "Edit Early Education Start", education: "Edit Education", story: "Edit Early Education Story", likes: "Edit What I Like" };
+    const title = titles[section] || "Edit Personal Details";
     let body = "";
-    if (section === "education") {
-      body = `${renderEducationBuilder(u)}`;
+    if (section === "photo") {
+      body = `<label>Choose a photo<input name="profilePicture" type="file" accept="image/*" data-user-profile-image-input /></label>
+        <div class="profile-preview-row">${u.profileImageData ? `<img class="user-profile-preview" src="${u.profileImageData}" alt="Profile preview" />` : `<div class="user-profile-preview empty">No Photo</div>`}</div>
+        ${u.rawProfileImageData ? `<div class="profile-crop-panel" data-profile-crop-panel><div class="profile-crop-stage" data-profile-crop-stage aria-label="Drag photo to position crop"><img src="${u.rawProfileImageData}" alt="Crop preview" data-profile-crop-img draggable="false" /><div class="profile-crop-circle"></div></div><label class="profile-crop-zoom-label">Zoom<input type="range" min="1" max="3" step="0.05" value="${u.cropZoom ?? 1.2}" data-profile-crop-zoom /></label><p class="helper">Drag the photo to reposition it. Adjust zoom if needed, then select Save Changes.</p><div class="actions"><button type="button" class="secondary" data-cancel-profile-crop>Discard New Photo</button></div></div>` : ""}
+        <p class="helper">Choose an image, adjust the crop, then save your photo.</p>`;
+    } else if (section === "usedName") {
+      body = `<label>Preferred Name<input name="usedName" value="${escapeHtml(u.usedName || "")}" placeholder="What should people call you?" /></label>`;
+    } else if (section === "birthday") {
+      body = renderBirthdayDropdowns(u.birthday || "");
+    } else if (section === "earlyEducationStart") {
+      body = `<label>Started Working In Early Childhood Education<input name="earlyEducationStart" value="${escapeHtml(u.earlyEducationStart || "")}" placeholder="2018 / August 2018" /></label>`;
+    } else if (section === "education") {
+      body = renderEducationBuilder(u);
     } else if (section === "story") {
-      body = `<label>Why I Chose Early Education <textarea name="whyEarlyEducation" rows="6">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>`;
+      body = `<label>Why I Chose Early Education<textarea name="whyEarlyEducation" rows="6">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>`;
     } else if (section === "likes") {
       body = renderWhatILikeFields(u);
     } else {
-      body = `
-        <div class="grid two">
-          <label>Used Name <input name="usedName" placeholder="What should people call you?" value="${escapeHtml(u.usedName || "")}" /></label>
-          <label>Profile Picture
-            <input name="profilePicture" type="file" accept="image/*" data-user-profile-image-input />
-            <input type="hidden" name="profileImageData" value="${u.profileImageData || ""}" />
-          </label>
-        </div>
-        <div class="profile-preview-row">
-          ${u.profileImageData ? `<img class="user-profile-preview" src="${u.profileImageData}" alt="Profile preview" />` : `<div class="user-profile-preview empty">No Photo</div>`}
-        </div>
-        ${u.rawProfileImageData ? `
-          <div class="profile-crop-panel" data-profile-crop-panel>
-            <div class="profile-crop-stage"><img src="${u.rawProfileImageData}" alt="Crop preview" data-profile-crop-img /><div class="profile-crop-circle"></div></div>
-            <div class="grid three">
-              <label>Zoom<input type="range" min="1" max="3" step="0.05" value="${u.cropZoom || 1.2}" data-profile-crop-zoom /></label>
-              <label>Move Left/Right<input type="range" min="0" max="100" step="1" value="${u.cropX || 50}" data-profile-crop-x /></label>
-              <label>Move Up/Down<input type="range" min="0" max="100" step="1" value="${u.cropY || 50}" data-profile-crop-y /></label>
-            </div>
-            <div class="actions"><button type="button" data-apply-profile-crop>Use This Crop</button><button type="button" class="secondary" data-cancel-profile-crop>Cancel Crop</button></div>
-          </div>` : ""}
-        <div class="grid two">
-          <label>Started Working In Early Childhood Education <input name="earlyEducationStart" value="${escapeHtml(u.earlyEducationStart || "")}" placeholder="2018 / August 2018" /></label>
-        </div>
-        ${renderBirthdayDropdowns(u.birthday || "")}`;
+      body = `<label>Preferred Name<input name="usedName" value="${escapeHtml(u.usedName || "")}" /></label>`;
     }
     return `
       <div class="modal-backdrop"><form class="modal card profile-edit-modal wide-profile-modal" id="selfProfileForm" data-profile-section="${escapeHtml(section)}">
@@ -7123,6 +7192,17 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
             ${state.schools.map(school => `<label style="display:flex;align-items:center;gap:.5rem;"><input style="width:auto;" type="checkbox" name="schoolIds" value="${school.id}" ${selectedSchools.includes(school.id) ? "checked" : ""} /> ${school.name} (${school.code})</label>`).join("")}
           </div>
         </div>
+        <section class="leader-bio-editor">
+          <h3>Teacher Bio — Leader Review</h3>
+          <p class="helper">Review the employee’s own explanation below, then write the polished summary that appears on their printable Teacher Bio. The employee’s original response is preserved.</p>
+          <div class="leader-bio-source">
+            <strong>Why they chose early education (employee response)</strong>
+            <p>${escapeHtml(u.whyEarlyEducation || "This employee has not completed their story yet.")}</p>
+          </div>
+          <label>Official Teacher Bio Summary
+            <textarea name="leaderSummary" rows="6" placeholder="Write a warm, professional summary for the printed teacher bio.">${escapeHtml(u.leaderSummary || "")}</textarea>
+          </label>
+        </section>
         <input type="hidden" name="pin" value="${u.pin || "0000"}" />
         <div class="actions">
           <button>Save Changes</button>
@@ -8549,6 +8629,160 @@ document.addEventListener("pointerdown", (e) => {
   renderPhotoPrintTool();
 });
 
+
+// Curriculum workspace: uses the existing weeklyThemes/current document without migrating data.
+function curriculumCanEdit() { return canUseLeadership(state.session); }
+function curriculumSchoolIds() { return [...new Set([...(state.session?.schoolIds || []), state.session?.schoolId].filter(Boolean))]; }
+function curriculumActiveSchool() {
+  const ids = curriculumSchoolIds();
+  if (!state.curriculumSchoolId || (!ids.includes(state.curriculumSchoolId) && !canUseSystemAdmin(state.session))) state.curriculumSchoolId = ids[0] || state.selectedSchoolId || "";
+  return state.curriculumSchoolId;
+}
+function curriculumEsc(v) { return escapeHtml(String(v ?? "")); }
+function curriculumThemeRows() {
+  const cfg = getWeeklyThemeSettings();
+  const weeks = Object.keys(cfg.themes || {}).map(Number).filter(Number.isFinite).sort((a,b)=>a-b);
+  if (!weeks.length) return `<div class="empty">No weekly themes have been added yet.</div>`;
+  return `<div class="curriculum-theme-list">${weeks.map(week => {
+    const key = String(week), theme = cfg.themes[key] || "";
+    const date = cfg.dateRanges?.[key] || "";
+    const letterland = cfg.letterlands?.[key] || "";
+    const ideas = cfg.ideasEvents?.[key] || "";
+    const seedling = cfg.seedlingsValues?.[key] || "";
+    return `<article class="curriculum-theme-row"><span class="curriculum-week">${curriculumEsc(cfg.labels?.[key] || `Week ${week}`)}</span><div><strong>${curriculumEsc(theme || "Theme not set")}</strong><div class="curriculum-meta">${[date,letterland && `Letterland: ${letterland}`,seedling && `Seedlings: ${seedling}`].filter(Boolean).map(curriculumEsc).join(" · ")}</div>${ideas ? `<div class="curriculum-meta">${curriculumEsc(ideas)}</div>` : ""}</div></article>`;
+  }).join("")}</div>`;
+}
+async function loadCurriculumData(force=false) {
+  if (!force && Date.now() - state.curriculumLoadedAt < 30000) return;
+  const schoolIds = curriculumSchoolIds();
+  const [ole,feedback] = await Promise.all([
+    getDocs(collection(db,"curriculumOle")), getDocs(collection(db,"curriculumFeedback"))
+  ]);
+  state.curriculumOle = ole.docs.map(d=>({id:d.id,...d.data()})).filter(x=>schoolIds.includes(x.schoolId) || canUseSystemAdmin(state.session));
+  state.curriculumFeedback = feedback.docs.map(d=>({id:d.id,...d.data()})).filter(x=>schoolIds.includes(x.schoolId) || canUseSystemAdmin(state.session));
+  state.curriculumLoadedAt = Date.now();
+}
+async function openCurriculum() {
+  state.curriculumTab = state.curriculumTab || "weeklyThemes";
+  await withAppLoading("Opening Curriculum...", async()=> {
+    await Promise.all([loadWeeklyThemes(),loadCurriculumData(true)]);
+    renderCurriculum();
+  });
+}
+function curriculumSchoolPicker() {
+  const ids = curriculumSchoolIds();
+  const schools = state.schools.filter(s=>ids.includes(s.id) || canUseSystemAdmin(state.session));
+  if (schools.length < 2) return `<span class="curriculum-school">${curriculumEsc(schools[0]?.name || "My school")}</span>`;
+  return `<label class="curriculum-school">School <select data-curriculum-school>${schools.map(s=>`<option value="${curriculumEsc(s.id)}" ${curriculumActiveSchool()===s.id?"selected":""}>${curriculumEsc(s.name)}</option>`).join("")}</select></label>`;
+}
+function renderCurriculum() {
+  state.currentView="curriculum";
+  const canEdit=curriculumCanEdit();
+  const tabs=[['weeklyThemes','Weekly Themes'],['ole','OLE Kits'],['feedback','Feedback'],['printables','Printables']];
+  $app.innerHTML=pageShell(`<section class="curriculum-workspace"><div class="curriculum-heading"><div><p class="eyebrow">TEACHING RESOURCES</p><h1>Curriculum</h1><p class="helper">Weekly learning plans, outdoor materials, and classroom feedback.</p></div>${curriculumSchoolPicker()}</div>
+  <div class="nav-tabs curriculum-tabs">${tabs.map(([id,name])=>`<button type="button" data-curriculum-tab="${id}" class="${state.curriculumTab===id?'active':''}">${name}</button>`).join('')}</div>
+  ${state.curriculumTab==='weeklyThemes' ? `<section class="card"><div class="section-head compact"><div><h2>Weekly themes</h2><p class="helper">Browse the year at a glance.</p></div>${canEdit?`<button type="button" class="secondary small" data-curriculum-edit-themes>${state.curriculumEditingThemes?'Close editor':'Edit themes'}</button>`:''}</div>${canEdit && state.curriculumEditingThemes?renderWeeklyThemesLeadershipTab():curriculumThemeRows()}</section>`:''}
+  ${state.curriculumTab==='ole'?renderCurriculumOle():''}
+  ${state.curriculumTab==='feedback'?renderCurriculumFeedback():''}
+  ${state.curriculumTab==='printables'?renderCurriculumPrintables():''}
+  </section>${state.toast?`<div class="toast">${state.toast}</div>`:''}`);
+}
+function curriculumOleForSchool() { return state.curriculumOle.filter(x=>x.schoolId===curriculumActiveSchool()); }
+function curriculumOleTree() {
+  const items=curriculumOleForSchool();
+  const locations=items.filter(x=>x.kind==='location').sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  if (!locations.length) return `<div class="empty">No OLE locations have been added for this school yet.</div>`;
+  const children=(parentId,depth)=>items.filter(x=>x.parentId===parentId).sort((a,b)=>String(a.name).localeCompare(String(b.name))).map(x=>`<div class="curriculum-ole-node depth-${Math.min(depth,3)}"><div class="curriculum-ole-line"><span>${x.kind==='shed'?'▣':x.kind==='bin'?'▤':x.kind==='toy'?'◉':'•'}</span><strong>${curriculumEsc(x.name)}</strong><small>${curriculumEsc(x.kind)}</small>${curriculumCanEdit()?`<button type="button" class="secondary small" data-curriculum-edit-ole="${curriculumEsc(x.id)}">Edit</button><button type="button" class="secondary small" data-curriculum-remove-ole="${curriculumEsc(x.id)}">Remove</button>`:''}</div>${x.notes?`<p class="curriculum-meta">${curriculumEsc(x.notes)}</p>`:''}${children(x.id,depth+1)}</div>`).join('');
+  return `<div class="curriculum-ole-tree">${locations.map(x=>`<section class="curriculum-ole-location"><h3>${curriculumEsc(x.name)}${curriculumCanEdit()?` <button type="button" class="secondary small" data-curriculum-edit-ole="${curriculumEsc(x.id)}">Edit</button><button type="button" class="secondary small" data-curriculum-remove-ole="${curriculumEsc(x.id)}">Remove</button>`:''}</h3>${x.notes?`<p class="helper">${curriculumEsc(x.notes)}</p>`:''}${children(x.id,1)}</section>`).join('')}</div>`;
+}
+function curriculumWizardHtml() {
+  const w = state.curriculumWizard;
+  if (!w) return '';
+  const esc = curriculumEsc;
+  const field = (label, name, value='', hint='') => `<label>${label}<input name="${name}" value="${esc(value)}" ${hint ? `placeholder="${esc(hint)}"` : ''} maxlength="120" required></label>`;
+  let body = '';
+  if(w.step===0) body = `<p class="helper">Start with the outdoor location, then set up its sheds and bins.</p>${field('Location name','location',w.name,'e.g. Preschool OLE')}`;
+  if(w.step===1) body = `<p class="helper">How many sheds are at ${esc(w.name)}?</p><label>Number of sheds<input type="number" name="shedCount" min="0" max="30" value="${w.sheds.length}" required></label>`;
+  if(w.step===2) body = `<p class="helper">Name each shed and choose how many bins are in it. Different sheds can have different numbers of bins.</p>${w.sheds.map((shed,i)=>`<div class="curriculum-wizard-block"><h4>Shed ${i+1}</h4>${field(`Shed name`,`shedName_${i}`,shed.name,`Shed ${i+1}`)}<label>Number of bins<input type="number" name="binCount_${i}" min="0" max="100" value="${shed.bins.length}" required></label></div>`).join('') || '<p>No sheds selected. You can still add one later using the inventory editor.</p>'}`;
+  if(w.step===3) body = `<p class="helper">Name the bins and list their contents. Enter one material per line, like the items in What I Like. You can edit everything later.</p>${w.sheds.map((shed,i)=>`<div class="curriculum-wizard-block"><h4>${esc(shed.name)}</h4>${shed.bins.map((bin,j)=>`<div class="curriculum-wizard-bin">${field('Bin name',`binName_${i}_${j}`,bin.name,`Bin ${j+1}`)}<label>Materials in this bin (one per line)<textarea name="materials_${i}_${j}" rows="3" placeholder="Buckets&#10;Shovels&#10;Sand molds">${esc(bin.materials.join('\n'))}</textarea></label></div>`).join('') || '<p class="helper">No bins in this shed.</p>'}</div>`).join('') || '<p class="helper">No sheds to configure.</p>'}`;
+  return `<section class="card curriculum-wizard"><div class="section-head compact"><div><p class="eyebrow">LOCATION SETUP · STEP ${w.step+1} OF 4</p><h3>${['Add location','Sheds','Shed details','Bins & materials'][w.step]}</h3></div><button type="button" class="secondary small" data-curriculum-wizard-cancel>Cancel</button></div><form id="curriculumWizardForm" class="curriculum-form">${body}<div class="actions">${w.step ? '<button type="button" class="secondary" data-curriculum-wizard-back>Back</button>' : ''}<button type="submit">${w.step===3?'Save location & inventory':'Continue'}</button></div></form></section>`;
+}
+function curriculumWizardCapture(form) {
+ const w=state.curriculumWizard, d=new FormData(form);
+ if(w.step===0){const name=String(d.get('location')||'').trim();if(!name)throw Error('Enter a location name.');w.name=name;}
+ if(w.step===1){const n=Number(d.get('shedCount'));if(!Number.isInteger(n)||n<0||n>30)throw Error('Choose 0 to 30 sheds.');w.sheds=Array.from({length:n},(_,i)=>w.sheds[i]||{name:`Shed ${i+1}`,bins:[]});}
+ if(w.step===2){w.sheds.forEach((shed,i)=>{shed.name=String(d.get(`shedName_${i}`)||'').trim();if(!shed.name)throw Error('Name every shed.');const n=Number(d.get(`binCount_${i}`));if(!Number.isInteger(n)||n<0||n>100)throw Error('Choose 0 to 100 bins per shed.');shed.bins=Array.from({length:n},(_,j)=>shed.bins[j]||{name:`Bin ${j+1}`,materials:[]});});}
+ if(w.step===3){w.sheds.forEach((shed,i)=>shed.bins.forEach((bin,j)=>{bin.name=String(d.get(`binName_${i}_${j}`)||'').trim();if(!bin.name)throw Error('Name every bin.');bin.materials=String(d.get(`materials_${i}_${j}`)||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);}));}
+}
+async function curriculumWizardSave() {
+ const w=state.curriculumWizard,schoolId=curriculumActiveSchool();if(!schoolId||!curriculumCanEdit())throw Error('School or edit permission missing.');
+ const nodes=[];const locId=doc(collection(db,'curriculumOle')).id;nodes.push({id:locId,kind:'location',name:w.name,parentId:''});
+ for(const shed of w.sheds){const sid=doc(collection(db,'curriculumOle')).id;nodes.push({id:sid,kind:'shed',name:shed.name,parentId:locId});for(const bin of shed.bins){const bid=doc(collection(db,'curriculumOle')).id;nodes.push({id:bid,kind:'bin',name:bin.name,parentId:sid});for(const material of bin.materials){nodes.push({id:doc(collection(db,'curriculumOle')).id,kind:'material',name:material,parentId:bid});}}}
+ // Each item uses the same document schema as the existing OLE editor.
+ for(const node of nodes)await setDoc(doc(db,'curriculumOle',node.id),{kind:node.kind,name:node.name,parentId:node.parentId,notes:'',schoolId,updatedBy:state.session.uid,updatedAt:serverTimestamp()});
+ state.curriculumWizard=null;await loadCurriculumData(true);showToast(`Location saved with ${nodes.length-1} items.`);renderCurriculum();
+}
+function renderCurriculumOle() {
+  const items=curriculumOleForSchool();
+  const parentOptions=items.filter(x=>['location','shed','bin'].includes(x.kind)).map(x=>`<option value="${curriculumEsc(x.id)}">${curriculumEsc(x.kind)} · ${curriculumEsc(x.name)}</option>`).join('');
+  const edit=items.find(x=>x.id===state.curriculumOleEditId);
+  return `${curriculumWizardHtml()}<section class="card"><div class="section-head compact"><div><h2>OLE Kits & Storage</h2><p class="helper">Find the correct home for outdoor toys and materials.</p></div>${curriculumCanEdit()?`<button type="button" data-curriculum-add-location>Add location</button>`:""}</div>${curriculumOleTree()}</section>${curriculumCanEdit()?`<section class="card"><h3>${edit?'Edit item':'Add storage or materials'}</h3><form id="curriculumOleForm" class="curriculum-form"><input type="hidden" name="itemId" value="${curriculumEsc(edit?.id||'')}"><label>Item type<select name="kind" required>${['location','shed','bin','toy','material'].map(k=>`<option value="${k}" ${edit?.kind===k?'selected':''}>${k[0].toUpperCase()+k.slice(1)}</option>`).join('')}</select></label><label>Name<input name="name" required maxlength="120" value="${curriculumEsc(edit?.name||'')}" placeholder="e.g. Red shed / Bin 4 / Sand toys"></label><label>Stored inside<select name="parentId"><option value="">Top level (locations only)</option>${parentOptions}</select></label><label class="curriculum-wide">Notes / quantity<textarea name="notes" rows="2" placeholder="Optional quantity or return instructions">${curriculumEsc(edit?.notes||'')}</textarea></label><div class="actions"><button type="submit">${edit?'Save changes':'Add item'}</button>${edit?'<button type="button" class="secondary" data-curriculum-cancel-ole>Cancel</button>':''}</div></form></section>`:''}`;
+}
+function curriculumThemeOptions() {
+  const cfg=getWeeklyThemeSettings();
+  const rows=Object.entries(cfg.themes||{}).filter(([,v])=>v).sort((a,b)=>Number(a[0])-Number(b[0]));
+  return rows.map(([week,name])=>`<option value="${curriculumEsc(name)}" ${state.curriculumFeedbackTheme===name?'selected':''}>${curriculumEsc(cfg.labels?.[week]||`Week ${week}`)} — ${curriculumEsc(name)}</option>`).join('');
+}
+function renderCurriculumFeedback() {
+  const feedback=state.curriculumFeedback.filter(x=>x.schoolId===curriculumActiveSchool());
+  if (curriculumCanEdit() && state.curriculumFeedbackMode!=='submit') {
+    const grouped=Object.groupBy ? Object.groupBy(feedback,x=>x.theme||'Other') : feedback.reduce((a,x)=>{(a[x.theme||'Other'] ||= []).push(x);return a;},{});
+    return `<section class="card"><div class="section-head compact"><div><h2>Theme feedback</h2><p class="helper">${feedback.length} submission(s) grouped by curriculum theme.</p></div><button type="button" class="secondary" data-curriculum-feedback-submit>Submit feedback</button></div>${Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0])).map(([theme,rows])=>`<details class="curriculum-feedback-group"><summary><strong>${curriculumEsc(theme)}</strong><span>${rows.length} response(s)</span></summary>${rows.map(x=>`<article class="curriculum-feedback-entry"><div class="curriculum-meta">${curriculumEsc(x.authorName||'Staff')} · ${curriculumEsc(x.ageGroup||'Age group not specified')} · ${curriculumEsc(x.createdDate||'')}</div>${[['On time',x.onTime],['Complete',x.complete],['Missing',x.missing],['Fun and exciting',x.fun],['Elaboration',x.funNotes],['Keep next year',x.keep],['New theme idea',x.newTheme],['Worked',x.worked],['Did not work',x.didNotWork],['Add/remove',x.addRemove],['Other feedback',x.other]].filter(([,v])=>v).map(([label,value])=>`<p><strong>${label}:</strong> ${curriculumEsc(value)}</p>`).join('')}</article>`).join('')}</details>`).join('')||'<div class="empty">No feedback submitted for this school yet.</div>'}</section>`;
+  }
+  return `<section class="card curriculum-feedback-form"><div class="section-head compact"><div><h2>Curriculum Kit Feedback</h2><p class="helper">Share how this theme worked in your classroom.</p></div>${curriculumCanEdit()?'<button type="button" class="secondary small" data-curriculum-feedback-list>View responses</button>':''}</div><form id="curriculumFeedbackForm" class="curriculum-form"><label class="curriculum-wide">Theme completed<select name="theme" required><option value="">Select theme</option>${curriculumThemeOptions()}</select></label><label>Age group<input name="ageGroup" required maxlength="80" placeholder="e.g. Preschool"></label>${[['onTime','Was the kit distributed on time?'],['complete','Were all necessary materials included?'],['fun','Was this a fun and exciting theme?'],['keep','Should this theme continue next year?']].map(([name,label])=>`<fieldset class="curriculum-wide"><legend>${label}</legend><label><input type="radio" name="${name}" value="Yes" required> Yes</label><label><input type="radio" name="${name}" value="No"> No</label></fieldset>`).join('')}${[['missing','If not complete, what was missing?'],['funNotes','If not fun or exciting, please elaborate'],['newTheme','If not continued, suggest a new theme'],['worked','What worked?'],['didNotWork','What did not work?'],['addRemove','What would you add or remove?'],['other','Other feedback about this theme and kit']].map(([name,label])=>`<label class="curriculum-wide">${label}<textarea name="${name}" rows="2" maxlength="3000"></textarea></label>`).join('')}<div class="actions"><button type="submit">Submit feedback</button></div></form></section>`;
+}
+function renderCurriculumPrintables() {return `<section class="card"><h2>Curriculum printables</h2><p class="helper">Starter printable: a clean storage inventory list for your current school's OLE kits. Label templates and bin-specific designs can be added here later.</p><button type="button" data-curriculum-print>Print OLE inventory</button></section>`;}
+async function submitCurriculumForm(form) {
+  if (form.id==='curriculumWizardForm') {if(!curriculumCanEdit())throw Error('Permission denied.');curriculumWizardCapture(form);if(state.curriculumWizard.step===3)await curriculumWizardSave();else{state.curriculumWizard.step++;renderCurriculum();}return;}
+  if (form.id==='curriculumFeedbackForm') {
+    const schoolId=curriculumActiveSchool(); if (!schoolId) throw new Error('Your account needs a school assignment.');
+    const data=Object.fromEntries(new FormData(form));
+    const id=doc(collection(db,'curriculumFeedback')).id;
+    await setDoc(doc(db,'curriculumFeedback',id),{...data,schoolId,authorUid:state.session.uid,authorName:makeDisplayName(state.session),createdDate:new Date().toISOString().slice(0,10),createdAt:serverTimestamp()});
+    state.curriculumFeedbackMode=''; await loadCurriculumData(true); showToast('Feedback submitted. Thank you!'); renderCurriculum(); return;
+  }
+  if (!curriculumCanEdit()) throw new Error('You do not have permission to edit OLE kits.');
+  const data=Object.fromEntries(new FormData(form)); const schoolId=curriculumActiveSchool();
+  if (!schoolId) throw new Error('Select a school first.');
+  if (data.kind==='location' && data.parentId) throw new Error('Locations must be top level.');
+  if (data.kind!=='location' && !data.parentId) throw new Error('Choose where this item is stored.');
+  const items=curriculumOleForSchool(), parent=items.find(x=>x.id===data.parentId);
+  const allowed={shed:['location'],bin:['shed'],toy:['shed','bin'],material:['bin']};
+  if (data.kind!=='location' && !allowed[data.kind]?.includes(parent?.kind)) throw new Error('Choose a valid parent: sheds in locations, bins in sheds, toys in sheds/bins, and materials in bins.');
+  if (data.itemId && data.itemId===data.parentId) throw new Error('An item cannot contain itself.');
+  const id=data.itemId||doc(collection(db,'curriculumOle')).id;
+  await setDoc(doc(db,'curriculumOle',id),{kind:data.kind,name:data.name.trim(),parentId:data.parentId||'',notes:data.notes.trim(),schoolId,updatedBy:state.session.uid,updatedAt:serverTimestamp()},{merge:true});
+  state.curriculumOleEditId=''; await loadCurriculumData(true); showToast('OLE inventory saved.'); renderCurriculum();
+}
+async function handleCurriculumClick(e) {
+  if(e.target.closest('[data-curriculum-add-location]')){if(!curriculumCanEdit())return true;state.curriculumWizard={step:0,name:'',sheds:[]};renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-wizard-cancel]')){state.curriculumWizard=null;renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-wizard-back]')){state.curriculumWizard.step=Math.max(0,state.curriculumWizard.step-1);renderCurriculum();return true;}
+  const tab=e.target.closest('[data-curriculum-tab]')?.dataset.curriculumTab;
+  if(tab){state.curriculumTab=tab;state.curriculumOleEditId='';state.curriculumFeedbackMode='';renderCurriculum();return true;}
+  const edit=e.target.closest('[data-curriculum-edit-ole]')?.dataset.curriculumEditOle;
+  if(edit){if(!curriculumCanEdit())return true;state.curriculumOleEditId=edit;renderCurriculum();const item=curriculumOleForSchool().find(x=>x.id===edit);const select=document.querySelector('#curriculumOleForm [name="parentId"]');if(select&&item)select.value=item.parentId||'';return true;}
+  const remove=e.target.closest('[data-curriculum-remove-ole]')?.dataset.curriculumRemoveOle;
+  if(remove){if(!curriculumCanEdit())return true;const descendants=state.curriculumOle.some(x=>x.parentId===remove);if(descendants){showToast('Remove the contents of this item first.');return true;}if(confirm('Remove this OLE item?')){await deleteDoc(doc(db,'curriculumOle',remove));await loadCurriculumData(true);renderCurriculum();}return true;}
+  if(e.target.closest('[data-curriculum-cancel-ole]')){state.curriculumOleEditId='';renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-edit-themes]')){if(!curriculumCanEdit())return true;state.curriculumEditingThemes=!state.curriculumEditingThemes;renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-feedback-submit]')){state.curriculumFeedbackMode='submit';renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-feedback-list]')){state.curriculumFeedbackMode='';renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-print]')){const items=curriculumOleForSchool();const school=state.schools.find(x=>x.id===curriculumActiveSchool());const win=window.open('','_blank');if(!win){showToast('Allow pop-ups to print the inventory.');return true;}win.document.write(`<html><head><title>OLE Inventory</title><style>body{font:14px Arial;padding:28px;color:#243b2c}h1{border-bottom:2px solid #63806b;padding-bottom:12px}li{margin:9px 0}</style></head><body><h1>OLE Inventory · ${curriculumEsc(school?.name||'School')}</h1><ul>${items.map(x=>`<li>${curriculumEsc(x.kind)}: ${curriculumEsc(x.name)} ${x.notes?'— '+curriculumEsc(x.notes):''}</li>`).join('')}</ul></body></html>`);win.document.close();win.focus();win.print();return true;}
+  return false;
+}
+document.addEventListener('change',e=>{if(e.target.matches('[data-curriculum-school]')){state.curriculumSchoolId=e.target.value;state.curriculumOleEditId='';renderCurriculum();}});
+
 function renderCurrentView() {
   if (state.publicShareView === "signup") {
     renderPublicSignupPage();
@@ -8577,6 +8811,8 @@ function renderCurrentView() {
     renderProfileHome();
     return;
   }
+
+  if (state.currentView === "curriculum") { renderCurriculum(); return; }
 
   if (state.currentView === "leadership") {
     renderLeadership();
@@ -8839,6 +9075,12 @@ $app.addEventListener("change", async (e) => {
       try {
         const rawImage = await readRawImageData(file);
         const form = e.target.closest("form");
+        if (state.modal?.type === "selfProfile") {
+          state.modal.user = { ...(state.modal.user || state.session || {}), rawProfileImageData: rawImage, cropZoom: 1.2, cropX: 50, cropY: 50 };
+          renderCurrentView();
+          showToast("Drag to position your photo, then click Save Changes.");
+          return;
+        }
         state.modal.user = {
           ...(state.modal.user || { roles: ["teacher"], schoolIds: [] }),
           firstName: form.firstName?.value || state.modal.user?.firstName || "",
@@ -8861,7 +9103,7 @@ $app.addEventListener("change", async (e) => {
           cropY: 50
         };
         renderCurrentView();
-        showToast("Adjust the crop, then click Use This Crop.");
+        showToast("Drag to position your photo, then click Save Changes.");
       } catch (err) {
         alert(err.message || "That image could not be processed. Please try a smaller image.");
       }
@@ -8903,17 +9145,9 @@ $app.addEventListener("change", async (e) => {
     }
     return;
   }
-  if (e.target.matches("[data-profile-crop-zoom], [data-profile-crop-x], [data-profile-crop-y]")) {
-    const user = state.modal?.user || {};
-    user.cropZoom = document.querySelector("[data-profile-crop-zoom]")?.value || user.cropZoom || 1.2;
-    user.cropX = document.querySelector("[data-profile-crop-x]")?.value || user.cropX || 50;
-    user.cropY = document.querySelector("[data-profile-crop-y]")?.value || user.cropY || 50;
-    state.modal.user = user;
-    const img = document.querySelector("[data-profile-crop-img]");
-    if (img) {
-      img.style.transformOrigin = `${user.cropX}% ${user.cropY}%`;
-      img.style.transform = `scale(${user.cropZoom})`;
-    }
+  if (e.target.matches("[data-profile-crop-zoom]")) {
+    if (state.modal?.user) state.modal.user.cropZoom = Number(e.target.value);
+    updateProfileCropPreview();
     return;
   }
   if (e.target.matches("[data-village-month]")) {
@@ -9016,6 +9250,7 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (await handleCurriculumClick(e)) return;
   const leadershipTab = e.target.closest("[data-leadership-tab]")?.dataset.leadershipTab;
   const ownerTab = e.target.closest("[data-owner-tab]")?.dataset.ownerTab;
   const toolId = e.target.closest("[data-tool]")?.dataset.tool;
@@ -9447,6 +9682,7 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (toolId === "curriculum") { await openCurriculum(); return; }
   if (toolId === "campusCares") { await withAppLoading("Opening Campus Cares...", async () => { await refreshCampusCaresData(); const mode=getCampusCaresOpenPreference(); if (mode === "submitted") state.campusCaresTab = "submitted"; renderCampusCaresTool(); if (mode === "submitPopup") { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); } }); return; }
   if (toolId === "photoPrint") { await withAppLoading("Opening Photo Print and Edit...", async () => { await loadPhotoPrintWorkspace(); renderPhotoPrintTool(); }); return; }
   if (toolId === "villageVoice") { await withAppLoading("Opening Printables...", async () => { await refreshAdminData(); state.printableTab = state.printableTab || "villageVoice"; renderVillageVoiceTool(); }); return; }
@@ -9623,20 +9859,21 @@ if (editRoleId) {
   if (tab) {
     await withAppLoading("Loading System Admin tab...", async () => {
       state.adminTab = tab;
-      await refreshAdminData();
+      await refreshAdminDataForNavigation();
       renderSystemAdmin();
     });
     return;
   }
   if (action === "logout") { await withAppLoading("Logging out...", async () => { await logout(); }); return; }
+  if (action === "curriculum") { await openCurriculum(); return; }
+  if (action === "profile") { state.modal = null; renderProfileHome(); return; }
   if (action === "home") { await withAppLoading("Loading home...", async () => renderHome()); return; }
   if (action === "onboarding") { await withAppLoading("Loading onboarding...", async () => renderOnboardingPage()); return; }
-  if (action === "leadership") { await withAppLoading("Opening Leadership Panel...", async () => { await refreshAdminData(); await applyCoreChampionAutoOpenIfDue(); renderLeadership(); }); return; }
-  if (action === "ownersPanel") { await withAppLoading("Opening Owners Panel...", async () => { await refreshAdminData(); renderOwnersPanel(); }); return; }
-  if (action === "home") { await withAppLoading("Opening Home...", async () => { renderHome(); }); return; }
-  if (action === "systemAdmin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminData(); renderSystemAdmin(); }); return; }
+  if (action === "leadership") { await withAppLoading("Opening Leadership Panel...", async () => { await refreshAdminDataForNavigation(); await applyCoreChampionAutoOpenIfDue(); renderLeadership(); }); return; }
+  if (action === "ownersPanel") { await withAppLoading("Opening Owners Panel...", async () => { await refreshAdminDataForNavigation(); renderOwnersPanel(); }); return; }
+  if (action === "systemAdmin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminDataForNavigation(); renderSystemAdmin(); }); return; }
   if (action === "notificationSettings") { await withAppLoading("Opening notifications...", async () => { renderNotificationSettings(); }); return; }
-  if (action === "admin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminData(); renderSystemAdmin(); }); return; }
+  if (action === "admin") { await withAppLoading("Opening System Admin...", async () => { await refreshAdminDataForNavigation(); renderSystemAdmin(); }); return; }
   const voiceBlockTab = e.target.closest("[data-voice-block-tab]");
   if (voiceBlockTab) {
     const form = document.getElementById("villageVoiceForm");
@@ -9848,7 +10085,7 @@ if (editRoleId) {
       const cropped = await cropProfileImageToSquare(user.rawProfileImageData, user.cropZoom || 1.2, user.cropX || 50, user.cropY || 50);
       state.modal.user = { ...user, profileImageData: cropped, rawProfileImageData: "" };
       renderCurrentView();
-      showToast("Profile crop ready. Click Save User to publish it.");
+      showToast("Photo ready. Click Save Changes to publish it.");
     } catch (err) {
       alert(err.message || "That crop could not be applied.");
     }
@@ -9934,17 +10171,9 @@ $app.addEventListener("input", (e) => {
   if (e.target.matches("[data-budget-code]")) {
     syncBudgetFromCode(e.target);
   }
-  if (e.target.matches("[data-profile-crop-zoom], [data-profile-crop-x], [data-profile-crop-y]")) {
-    const user = state.modal?.user || {};
-    user.cropZoom = document.querySelector("[data-profile-crop-zoom]")?.value || user.cropZoom || 1.2;
-    user.cropX = document.querySelector("[data-profile-crop-x]")?.value || user.cropX || 50;
-    user.cropY = document.querySelector("[data-profile-crop-y]")?.value || user.cropY || 50;
-    state.modal.user = user;
-    const img = document.querySelector("[data-profile-crop-img]");
-    if (img) {
-      img.style.transformOrigin = `${user.cropX}% ${user.cropY}%`;
-      img.style.transform = `scale(${user.cropZoom})`;
-    }
+  if (e.target.matches("[data-profile-crop-zoom]")) {
+    if (state.modal?.user) state.modal.user.cropZoom = Number(e.target.value);
+    updateProfileCropPreview();
     return;
   }
   if (e.target.matches("[data-village-month]")) {
@@ -10446,6 +10675,7 @@ $app.addEventListener("submit", async (e) => {
   showAppLoading(form.id === "loginForm" ? "Logging in..." : "Saving...");
   try {
     await new Promise(resolve => requestAnimationFrame(resolve));
+    if (form.id === "curriculumFeedbackForm" || form.id === "curriculumOleForm" || form.id === "curriculumWizardForm") { await submitCurriculumForm(form); hideAppLoading(); return; }
     if (form.id === "publicSignupForm") {
       try { await submitPublicSignup(form); }
       catch (err) { renderPublicSignupPage(err.message || "Sign up failed. Please try again."); }
@@ -10495,7 +10725,7 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "doorRemindersForm") { await saveDoorReminders(form); hideAppLoading(); return; }
     if (form.id === "importantDateEditForm") { await updateImportantDate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
     if (form.id === "importantDateForm") { await addImportantDate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
-    if (form.id === "weeklyThemesForm") { await saveWeeklyThemes(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "weeklyThemesForm") { if (!curriculumCanEdit()) throw new Error("Permission denied."); await saveWeeklyThemes(form); await loadWeeklyThemes(); if(state.currentView === "curriculum") renderCurriculum(); else renderLeadership(); hideAppLoading(); return; }
     if (form.id === "certificateForm") { await addCertificate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
     if (form.id === "brandingSettingsForm") { await saveBrandingSettings(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
     if (form.id === "userForm") { await addUser(form); await refreshAdminData(); renderLeadership(); }
@@ -10767,3 +10997,10 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
 })();
 
 
+
+// Ensure the crop preview is positioned when its modal first renders (including cached images).
+const profileCropObserver = new MutationObserver(() => {
+  const img = document.querySelector("[data-profile-crop-img]");
+  if (img?.complete && img.naturalWidth) updateProfileCropPreview();
+});
+profileCropObserver.observe(document.body, { childList: true, subtree: true });

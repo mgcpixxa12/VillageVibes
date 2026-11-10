@@ -1,0 +1,1 @@
+v196: understated 4x6 OVA teacher portrait card. Larger photo, simple green header, gold accent, nameplate, compact credentials, leader summary. Existing data bindings preserved. Test with long summaries before production.

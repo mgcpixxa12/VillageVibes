@@ -1,0 +1,28 @@
+/* Profile V2: standalone presentation layer, no changes to data models */
+.profile-v2{max-width:1320px;margin:0 auto;gap:20px}
+.profile-v2-topline{display:flex;align-items:end;justify-content:space-between;gap:16px;padding:2px 0 15px;border-bottom:1px solid var(--line)}
+.profile-v2-kicker{font-size:10px!important;font-weight:800;letter-spacing:.15em;color:var(--muted);margin:0 0 7px!important}
+.profile-v2-topline h1{font-size:clamp(22px,2.5vw,30px);letter-spacing:-.04em;line-height:1.2;margin:0}
+.profile-v2-layout{display:grid;grid-template-columns:minmax(220px,290px) minmax(0,1fr);gap:clamp(22px,3vw,48px);align-items:start}
+.profile-v2-identity.card{padding:0 0 20px;overflow:hidden;border-radius:12px;box-shadow:none;background:var(--panel)}
+.profile-v2-portrait{width:100%;aspect-ratio:1/1;display:grid;place-items:center;background:linear-gradient(135deg,rgba(47,111,99,.2),rgba(47,111,99,.06));font-size:76px;font-weight:700;color:var(--brand)}
+.profile-v2-portrait img{width:100%;height:100%;object-fit:cover}
+.profile-v2-person{padding:19px 20px 0}.profile-v2-person h2{font-size:clamp(20px,2.1vw,27px);line-height:1.2;letter-spacing:-.035em;margin:0 0 5px}.profile-v2-person p{color:var(--brand);font-size:13px;font-weight:650;margin:0}
+.profile-v2-status{margin:15px 20px 0;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:7px}.profile-v2-dot{width:7px;height:7px;border-radius:50%;background:var(--brand)}
+.profile-v2-side-section{margin:19px 20px 0;padding-top:16px;border-top:1px solid var(--line)}.profile-v2-side-section h3{font-size:10px;letter-spacing:.14em;color:var(--muted);margin:0 0 10px}
+.profile-v2 .profile-chip-row{margin:0;gap:6px}.profile-v2 .profile-chip-row span{font-size:11px;padding:6px 9px;border-radius:5px;font-weight:650}
+.profile-v2-edit-button{display:block;margin:22px 20px 0;width:calc(100% - 40px);font-size:12px}
+.profile-v2-main{min-width:0}.profile-v2-intro{padding:4px 0 20px}.profile-v2-intro h2{font-size:clamp(20px,2.2vw,26px);letter-spacing:-.035em;margin:0 0 6px}.profile-v2-intro p:last-child{color:var(--muted);font-size:13px;margin:0}
+.profile-v2-section{padding:20px 0 22px;border-top:1px solid var(--line)}.profile-v2-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:17px}.profile-v2-section-head>div{display:flex;align-items:center;gap:12px;min-width:0}.profile-v2-section-index{font-size:11px;color:var(--brand);font-weight:800}.profile-v2-section-head h3{font-size:15px;letter-spacing:-.01em;margin:0}.profile-v2-section-head button{padding:6px 13px;flex-shrink:0}
+.profile-v2-facts{margin:0;display:grid;gap:0}.profile-v2-facts>div{display:grid;grid-template-columns:minmax(140px,32%) minmax(0,1fr);gap:12px;padding:10px 0}.profile-v2-facts dt{font-size:12px;color:var(--muted)}.profile-v2-facts dd{font-size:13px;font-weight:600;margin:0;overflow-wrap:anywhere}
+.profile-v2-education .profile-mini-row{display:grid;grid-template-columns:minmax(150px,1fr) 1fr;gap:14px;padding:10px 0;background:transparent;border:0;border-radius:0;font-size:13px}.profile-v2-education .profile-mini-row span{font-weight:400}
+.profile-v2-section .profile-long-text{font-size:13px;line-height:1.8;color:var(--text)}.profile-v2-section .empty{font-size:13px;color:var(--muted)}
+.vv-sidebar .vv-nav-link:focus-visible,.vv-mobile-navigation .vv-nav-link:focus-visible,.profile-v2 button:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+@media(max-width:850px){.profile-v2-layout{grid-template-columns:minmax(185px,240px) minmax(0,1fr);gap:22px}}
+@media(max-width:650px){.profile-v2-layout{grid-template-columns:1fr}.profile-v2-identity.card{display:grid;grid-template-columns:110px 1fr;align-items:center;padding:12px;gap:0 14px}.profile-v2-portrait{grid-row:1/4;width:110px;height:110px;border-radius:8px;overflow:hidden}.profile-v2-person{padding:0}.profile-v2-status{margin:7px 0 0}.profile-v2-side-section{grid-column:1/-1;margin:12px 0 0;padding-top:12px}.profile-v2-edit-button{grid-column:1/-1;width:100%;margin:15px 0 0}.profile-v2-topline{align-items:center}.profile-v2-topline button{font-size:11px}.profile-v2-facts>div{grid-template-columns:130px 1fr}}
+
+/* Independent field edits: compact, predictable controls */
+.profile-v2-facts>div{grid-template-columns:minmax(120px,30%) minmax(0,1fr) auto;align-items:center}
+.profile-v2-facts>div>button{justify-self:end;font-size:11px;padding:5px 10px}
+.profile-v2-identity .profile-v2-edit-button{margin-top:20px}
+@media(max-width:650px){.profile-v2-facts>div{grid-template-columns:minmax(95px,35%) minmax(0,1fr) auto;gap:7px}}
