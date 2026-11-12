@@ -1,0 +1,1 @@
+OLE v208: Official Split View based on OLE Layout Lab v2. Uses real Firebase data; left locations, right sheds/kits/materials, prominent back button and breadcrumbs. Existing catalog/import/edit workflows preserved. No data migration.

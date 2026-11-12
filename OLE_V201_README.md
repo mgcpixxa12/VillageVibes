@@ -1,0 +1,1 @@
+OLE v201: Rebuilt as storage-first inventory. Storage > location > shed > bin > materials, with large toys directly in sheds. Leaders use contextual Add/Edit, Materials catalog, Import. Teacher view is browse-only. Fixes v200 mode-switch bug. Existing Firebase data is not migrated or deleted. Browser and Firebase testing still required.

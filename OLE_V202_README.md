@@ -1,0 +1,1 @@
+OLE v202: location → shed → kit → material hierarchy. Kit names come from catalog tags, not hardcoded lists. Catalog has one Add materials to kits button. Existing legacy bin records remain in Firestore; no migration/deletion is performed. Browser and Firebase end-to-end tests still required.

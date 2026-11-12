@@ -1,0 +1,1 @@
+OLE v200: Simplified browse/manage/catalog screens. Import OLE_Materials_Import.csv through Curriculum > OLE Kits > Material catalog. CSV contains material definitions, not quantities or storage assignments. Kit sign documents were the source. Existing Firebase inventory is preserved. Browser/Firebase testing required.

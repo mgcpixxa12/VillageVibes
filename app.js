@@ -8655,9 +8655,12 @@ function curriculumThemeRows() {
 async function loadCurriculumData(force=false) {
   if (!force && Date.now() - state.curriculumLoadedAt < 30000) return;
   const schoolIds = curriculumSchoolIds();
-  const [ole,feedback] = await Promise.all([
-    getDocs(collection(db,"curriculumOle")), getDocs(collection(db,"curriculumFeedback"))
+  const [ole,feedback,catalog] = await Promise.all([
+    getDocs(collection(db,"curriculumOle")), getDocs(collection(db,"curriculumFeedback")), getDocs(collection(db,"curriculumOleCatalog"))
   ]);
+  const allCatalogRecords=catalog.docs.map(d=>({id:d.id,...d.data()})).filter(x=>schoolIds.includes(x.schoolId)||canUseSystemAdmin(state.session));
+  state.oleCatalog=allCatalogRecords.filter(x=>x.recordType!=='category');
+  state.oleCatalogCategories=allCatalogRecords.filter(x=>x.recordType==='category');
   state.curriculumOle = ole.docs.map(d=>({id:d.id,...d.data()})).filter(x=>schoolIds.includes(x.schoolId) || canUseSystemAdmin(state.session));
   state.curriculumFeedback = feedback.docs.map(d=>({id:d.id,...d.data()})).filter(x=>schoolIds.includes(x.schoolId) || canUseSystemAdmin(state.session));
   state.curriculumLoadedAt = Date.now();
@@ -8679,7 +8682,7 @@ function renderCurriculum() {
   state.currentView="curriculum";
   const canEdit=curriculumCanEdit();
   const tabs=[['weeklyThemes','Weekly Themes'],['ole','OLE Kits'],['feedback','Feedback'],['printables','Printables']];
-  $app.innerHTML=pageShell(`<section class="curriculum-workspace"><div class="curriculum-heading"><div><p class="eyebrow">TEACHING RESOURCES</p><h1>Curriculum</h1><p class="helper">Weekly learning plans, outdoor materials, and classroom feedback.</p></div>${curriculumSchoolPicker()}</div>
+  $app.innerHTML=pageShell(`<section class="curriculum-workspace"><div class="curriculum-heading"><div class="curriculum-title"><h1>Curriculum</h1></div>${curriculumSchoolPicker()}</div>
   <div class="nav-tabs curriculum-tabs">${tabs.map(([id,name])=>`<button type="button" data-curriculum-tab="${id}" class="${state.curriculumTab===id?'active':''}">${name}</button>`).join('')}</div>
   ${state.curriculumTab==='weeklyThemes' ? `<section class="card"><div class="section-head compact"><div><h2>Weekly themes</h2><p class="helper">Browse the year at a glance.</p></div>${canEdit?`<button type="button" class="secondary small" data-curriculum-edit-themes>${state.curriculumEditingThemes?'Close editor':'Edit themes'}</button>`:''}</div>${canEdit && state.curriculumEditingThemes?renderWeeklyThemesLeadershipTab():curriculumThemeRows()}</section>`:''}
   ${state.curriculumTab==='ole'?renderCurriculumOle():''}
@@ -8688,13 +8691,14 @@ function renderCurriculum() {
   </section>${state.toast?`<div class="toast">${state.toast}</div>`:''}`);
 }
 function curriculumOleForSchool() { return state.curriculumOle.filter(x=>x.schoolId===curriculumActiveSchool()); }
-function curriculumOleTree() {
-  const items=curriculumOleForSchool();
-  const locations=items.filter(x=>x.kind==='location').sort((a,b)=>String(a.name).localeCompare(String(b.name)));
-  if (!locations.length) return `<div class="empty">No OLE locations have been added for this school yet.</div>`;
-  const children=(parentId,depth)=>items.filter(x=>x.parentId===parentId).sort((a,b)=>String(a.name).localeCompare(String(b.name))).map(x=>`<div class="curriculum-ole-node depth-${Math.min(depth,3)}"><div class="curriculum-ole-line"><span>${x.kind==='shed'?'▣':x.kind==='bin'?'▤':x.kind==='toy'?'◉':'•'}</span><strong>${curriculumEsc(x.name)}</strong><small>${curriculumEsc(x.kind)}</small>${curriculumCanEdit()?`<button type="button" class="secondary small" data-curriculum-edit-ole="${curriculumEsc(x.id)}">Edit</button><button type="button" class="secondary small" data-curriculum-remove-ole="${curriculumEsc(x.id)}">Remove</button>`:''}</div>${x.notes?`<p class="curriculum-meta">${curriculumEsc(x.notes)}</p>`:''}${children(x.id,depth+1)}</div>`).join('');
-  return `<div class="curriculum-ole-tree">${locations.map(x=>`<section class="curriculum-ole-location"><h3>${curriculumEsc(x.name)}${curriculumCanEdit()?` <button type="button" class="secondary small" data-curriculum-edit-ole="${curriculumEsc(x.id)}">Edit</button><button type="button" class="secondary small" data-curriculum-remove-ole="${curriculumEsc(x.id)}">Remove</button>`:''}</h3>${x.notes?`<p class="helper">${curriculumEsc(x.notes)}</p>`:''}${children(x.id,1)}</section>`).join('')}</div>`;
-}
+function oleSelected() { const items=curriculumOleForSchool();return items.find(x=>x.id===state.oleSelectedId)||null; }
+function oleTrail(item) {const items=curriculumOleForSchool(),trail=[];let cur=item;const seen=new Set();while(cur&&!seen.has(cur.id)){trail.unshift(cur);seen.add(cur.id);cur=items.find(x=>x.id===cur.parentId);}return trail;}
+function oleChildren(id) {return curriculumOleForSchool().filter(x=>(x.parentId||'')===(id||'')).sort((a,b)=>a.name.localeCompare(b.name));}
+function oleLocationLabel(x){const names=oleTrail(x).map(y=>y.name);return names.join(' / ');}
+function oleTags(x){return Array.isArray(x.tags)?x.tags:typeof x.tags==='string'?x.tags.split(',').map(y=>y.trim()).filter(Boolean):[];}
+function oleItemCard(x){const children=oleChildren(x.id);const can=curriculumCanEdit();return `<div class="ole-item-card"><button type="button" class="ole-item-main" data-ole-open="${curriculumEsc(x.id)}"><span class="ole-item-icon">${{location:'🌳',shed:'🏠',bin:'📦',toy:'🧸',material:'✂️'}[x.kind]||'•'}</span><span class="ole-item-copy"><strong>${curriculumEsc(x.name)}</strong><small>${curriculumEsc(x.kind)}${children.length?' · '+children.length+' inside':''}${x.kind==='material'||x.kind==='toy'?' · Qty '+(Number(x.quantity)||0):''}</small>${oleTags(x).length?`<small>${oleTags(x).map(curriculumEsc).join(' · ')}</small>`:''}</span><span>›</span></button>${can?`<button type="button" class="secondary small" data-curriculum-edit-ole="${curriculumEsc(x.id)}">Edit</button>`:''}</div>`;}
+function curriculumOleTree(){const selected=oleSelected(),items=curriculumOleForSchool(),q=String(state.oleSearch||'').trim().toLowerCase();if(q){const results=items.filter(x=>[x.name,x.notes,oleTags(x).join(' '),oleLocationLabel(x)].join(' ').toLowerCase().includes(q));return `<div class="ole-results"><h3>${results.length} search result(s)</h3>${results.map(x=>`<div><button type="button" class="ole-result" data-ole-open="${curriculumEsc(x.id)}"><strong>${curriculumEsc(x.name)}</strong><small>${curriculumEsc(oleLocationLabel(x))}</small></button></div>`).join('')||'<div class="empty">No matching materials or storage locations.</div>'}</div>`;}
+const trail=selected?oleTrail(selected):[];const kids=oleChildren(selected?.id||'');return `<div class="ole-breadcrumb"><button type="button" data-ole-root>All locations</button>${trail.map(x=>`<span>›</span><button type="button" data-ole-open="${curriculumEsc(x.id)}">${curriculumEsc(x.name)}</button>`).join('')}</div>${selected?`<div class="ole-current"><h3>${curriculumEsc(selected.name)}</h3><p class="helper">${curriculumEsc(selected.kind)}${selected.notes?' · '+curriculumEsc(selected.notes):''}</p>${['material','toy'].includes(selected.kind)?`<p>Quantity: <strong>${Number(selected.quantity)||0}</strong> · Condition: ${curriculumEsc(selected.condition||'Good')}</p><p>Kit tags: ${oleTags(selected).map(curriculumEsc).join(', ')||'None'}</p>`:''}</div>`:''}<div class="ole-grid">${kids.map(oleItemCard).join('')||'<div class="empty">Nothing stored here yet.</div>'}</div>`;}
 function curriculumWizardHtml() {
   const w = state.curriculumWizard;
   if (!w) return '';
@@ -8722,28 +8726,99 @@ async function curriculumWizardSave() {
  for(const node of nodes)await setDoc(doc(db,'curriculumOle',node.id),{kind:node.kind,name:node.name,parentId:node.parentId,notes:'',schoolId,updatedBy:state.session.uid,updatedAt:serverTimestamp()});
  state.curriculumWizard=null;await loadCurriculumData(true);showToast(`Location saved with ${nodes.length-1} items.`);renderCurriculum();
 }
-function renderCurriculumOle() {
-  const items=curriculumOleForSchool();
-  const parentOptions=items.filter(x=>['location','shed','bin'].includes(x.kind)).map(x=>`<option value="${curriculumEsc(x.id)}">${curriculumEsc(x.kind)} · ${curriculumEsc(x.name)}</option>`).join('');
-  const edit=items.find(x=>x.id===state.curriculumOleEditId);
-  return `${curriculumWizardHtml()}<section class="card"><div class="section-head compact"><div><h2>OLE Kits & Storage</h2><p class="helper">Find the correct home for outdoor toys and materials.</p></div>${curriculumCanEdit()?`<button type="button" data-curriculum-add-location>Add location</button>`:""}</div>${curriculumOleTree()}</section>${curriculumCanEdit()?`<section class="card"><h3>${edit?'Edit item':'Add storage or materials'}</h3><form id="curriculumOleForm" class="curriculum-form"><input type="hidden" name="itemId" value="${curriculumEsc(edit?.id||'')}"><label>Item type<select name="kind" required>${['location','shed','bin','toy','material'].map(k=>`<option value="${k}" ${edit?.kind===k?'selected':''}>${k[0].toUpperCase()+k.slice(1)}</option>`).join('')}</select></label><label>Name<input name="name" required maxlength="120" value="${curriculumEsc(edit?.name||'')}" placeholder="e.g. Red shed / Bin 4 / Sand toys"></label><label>Stored inside<select name="parentId"><option value="">Top level (locations only)</option>${parentOptions}</select></label><label class="curriculum-wide">Notes / quantity<textarea name="notes" rows="2" placeholder="Optional quantity or return instructions">${curriculumEsc(edit?.notes||'')}</textarea></label><div class="actions"><button type="submit">${edit?'Save changes':'Add item'}</button>${edit?'<button type="button" class="secondary" data-curriculum-cancel-ole>Cancel</button>':''}</div></form></section>`:''}`;
-}
-function curriculumThemeOptions() {
-  const cfg=getWeeklyThemeSettings();
-  const rows=Object.entries(cfg.themes||{}).filter(([,v])=>v).sort((a,b)=>Number(a[0])-Number(b[0]));
-  return rows.map(([week,name])=>`<option value="${curriculumEsc(name)}" ${state.curriculumFeedbackTheme===name?'selected':''}>${curriculumEsc(cfg.labels?.[week]||`Week ${week}`)} — ${curriculumEsc(name)}</option>`).join('');
-}
-function renderCurriculumFeedback() {
-  const feedback=state.curriculumFeedback.filter(x=>x.schoolId===curriculumActiveSchool());
-  if (curriculumCanEdit() && state.curriculumFeedbackMode!=='submit') {
-    const grouped=Object.groupBy ? Object.groupBy(feedback,x=>x.theme||'Other') : feedback.reduce((a,x)=>{(a[x.theme||'Other'] ||= []).push(x);return a;},{});
-    return `<section class="card"><div class="section-head compact"><div><h2>Theme feedback</h2><p class="helper">${feedback.length} submission(s) grouped by curriculum theme.</p></div><button type="button" class="secondary" data-curriculum-feedback-submit>Submit feedback</button></div>${Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0])).map(([theme,rows])=>`<details class="curriculum-feedback-group"><summary><strong>${curriculumEsc(theme)}</strong><span>${rows.length} response(s)</span></summary>${rows.map(x=>`<article class="curriculum-feedback-entry"><div class="curriculum-meta">${curriculumEsc(x.authorName||'Staff')} · ${curriculumEsc(x.ageGroup||'Age group not specified')} · ${curriculumEsc(x.createdDate||'')}</div>${[['On time',x.onTime],['Complete',x.complete],['Missing',x.missing],['Fun and exciting',x.fun],['Elaboration',x.funNotes],['Keep next year',x.keep],['New theme idea',x.newTheme],['Worked',x.worked],['Did not work',x.didNotWork],['Add/remove',x.addRemove],['Other feedback',x.other]].filter(([,v])=>v).map(([label,value])=>`<p><strong>${label}:</strong> ${curriculumEsc(value)}</p>`).join('')}</article>`).join('')}</details>`).join('')||'<div class="empty">No feedback submitted for this school yet.</div>'}</section>`;
-  }
-  return `<section class="card curriculum-feedback-form"><div class="section-head compact"><div><h2>Curriculum Kit Feedback</h2><p class="helper">Share how this theme worked in your classroom.</p></div>${curriculumCanEdit()?'<button type="button" class="secondary small" data-curriculum-feedback-list>View responses</button>':''}</div><form id="curriculumFeedbackForm" class="curriculum-form"><label class="curriculum-wide">Theme completed<select name="theme" required><option value="">Select theme</option>${curriculumThemeOptions()}</select></label><label>Age group<input name="ageGroup" required maxlength="80" placeholder="e.g. Preschool"></label>${[['onTime','Was the kit distributed on time?'],['complete','Were all necessary materials included?'],['fun','Was this a fun and exciting theme?'],['keep','Should this theme continue next year?']].map(([name,label])=>`<fieldset class="curriculum-wide"><legend>${label}</legend><label><input type="radio" name="${name}" value="Yes" required> Yes</label><label><input type="radio" name="${name}" value="No"> No</label></fieldset>`).join('')}${[['missing','If not complete, what was missing?'],['funNotes','If not fun or exciting, please elaborate'],['newTheme','If not continued, suggest a new theme'],['worked','What worked?'],['didNotWork','What did not work?'],['addRemove','What would you add or remove?'],['other','Other feedback about this theme and kit']].map(([name,label])=>`<label class="curriculum-wide">${label}<textarea name="${name}" rows="2" maxlength="3000"></textarea></label>`).join('')}<div class="actions"><button type="submit">Submit feedback</button></div></form></section>`;
+function renderCurriculumOle(){
+ const items=curriculumOleForSchool(),can=curriculumCanEdit(),esc=curriculumEsc;
+ const catalog=(state.oleCatalog||[]).filter(x=>x.schoolId===curriculumActiveSchool());
+ const selected=oleSelected(), edit=items.find(x=>x.id===state.curriculumOleEditId);
+ const mode=can?(state.oleWorkspaceMode||'storage'):'storage';
+ const manage=can&&state.oleManageMode===true;
+ const kitTags=[...new Set(catalog.flatMap(x=>oleTags(x)).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+ const search=String(state.oleSearch||'').trim().toLowerCase();
+ const ancestors=selected?oleTrail(selected):[];
+ const breadcrumb=`<div class="ole22-crumb"><button type="button" data-ole-root>All locations</button>${ancestors.map(x=>`<span>›</span><button type="button" data-ole-open="${esc(x.id)}">${esc(x.name)}</button>`).join('')}</div>`;
+ const nav=can?`<div class="ole22-tabs"><button type="button" data-ole-mode="storage" class="${mode==='storage'||mode==='edit'?'active':''}">Locations & kits</button><button type="button" data-ole-mode="catalog" class="${mode==='catalog'?'active':''}">Material catalog</button><button type="button" data-ole-mode="import" class="${mode==='import'?'active':''}">Import CSV</button></div>`:'';
+ const header=`<header class="ole22-header"><h2>OLE Inventory</h2></header>${nav}`;
+ if(mode==='catalog'){
+  const categories=(state.oleCatalogCategories||[]).filter(x=>x.schoolId===curriculumActiveSchool()).sort((a,b)=>a.name.localeCompare(b.name));
+  const tags=[...new Set(catalog.flatMap(x=>oleTags(x)).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  const selectedTag=state.oleCatalogTag||'';
+  const searchText=String(state.oleCatalogSearch||'').trim().toLowerCase();
+  const groupFor=tag=>categories.find(c=>(c.tags||[]).some(t=>t.toLowerCase()===tag.toLowerCase()));
+  const groups=[...categories.map(c=>({id:c.id,name:c.name,tags:tags.filter(t=>groupFor(t)?.id===c.id)})),{id:'uncategorized',name:'Uncategorized',tags:tags.filter(t=>!groupFor(t))}];
+  const selectedCategory=groups.find(g=>g.id===state.oleCatalogCategory)||groups[0];
+  const visibleGroups=groups.filter(g=>!searchText||g.name.toLowerCase().includes(searchText)||g.tags.some(t=>t.toLowerCase().includes(searchText)||catalog.some(x=>oleTags(x).some(tag=>tag.toLowerCase()===t.toLowerCase())&&x.name.toLowerCase().includes(searchText))));
+  const categoryList=visibleGroups.map(g=>`<button type="button" class="ole33-category ${selectedCategory?.id===g.id?'active':''}" data-ole-catalog-category="${esc(g.id)}"><span><strong>${esc(g.name)}</strong><small>${g.tags.length} metadata groups</small></span><span aria-hidden="true">›</span></button>`).join('');
+  const tagCard=t=>{const n=catalog.filter(x=>oleTags(x).some(tag=>tag.toLowerCase()===t.toLowerCase())).length;const assigned=groupFor(t);return `<div class="ole33-tag"><button type="button" class="ole33-tag-main" data-ole-catalog-tag="${esc(t)}"><strong>${esc(t)}</strong><small>${n} material${n===1?'':'s'} <span>›</span></small></button><label class="ole33-move">Move to category<select aria-label="Move ${esc(t)} to category" data-ole-catalog-move="${esc(t)}"><option value="">Uncategorized</option>${categories.map(c=>`<option value="${esc(c.id)}" ${assigned?.id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label></div>`;};
+  const tagged=selectedTag?catalog.filter(x=>oleTags(x).some(t=>t.toLowerCase()===selectedTag.toLowerCase())):[];
+  const selectedTags=(selectedCategory?.tags||[]).filter(t=>!searchText||t.toLowerCase().includes(searchText)||catalog.some(x=>oleTags(x).some(tag=>tag.toLowerCase()===t.toLowerCase())&&x.name.toLowerCase().includes(searchText)));
+  const details=selectedTag?`<div class="ole33-detail-top"><button type="button" class="ole28-back" data-ole-catalog-close><span class="ole28-back-arrow">←</span><span><strong>Back to metadata</strong><small>${esc(selectedCategory?.name||'Categories')}</small></span></button><div class="ole33-crumbs"><button type="button" data-ole-catalog-close>${esc(selectedCategory?.name||'Categories')}</button><span>›</span><strong>${esc(selectedTag)}</strong></div><h3>${esc(selectedTag)}</h3><p class="ole30-muted">${tagged.length} materials</p></div><div class="ole32-material-list">${tagged.map(x=>`<article class="ole32-material-row"><div><strong>${esc(x.name)}</strong>${x.notes?`<small>${esc(x.notes)}</small>`:''}</div><small>${esc(oleTags(x).join(' · '))}</small></article>`).join('')||'<p class="ole30-muted">No materials in this metadata group yet.</p>'}</div>`:`<div class="ole33-detail-top"><h3>${esc(selectedCategory?.name||'Categories')}</h3><p class="ole30-muted">Select a metadata group to see its materials.</p></div><div class="ole33-tag-grid">${selectedTags.map(tagCard).join('')||'<p class="ole30-muted">No metadata groups in this category yet. Assign existing metadata using its category selector.</p>'}</div>`;
+  return `<div class="ole22 ole28 ole30 ole32">${header}<section class="card ole22-panel"><div class="ole30-top"><div><h3>Material catalog</h3><p class="ole30-muted">${catalog.length} materials · ${tags.length} metadata tags · ${categories.length} categories</p></div><div class="ole30-actions"><button type="button" class="secondary" data-ole-catalog-add-category>+ Add category</button><button type="button" data-ole-catalog-add-material>+ Add material</button><button type="button" data-ole-start-placement>Add materials to kits</button></div></div>
+  ${state.oleCatalogForm==='category'?`<form id="oleCatalogCategoryForm" class="ole30-inline-form"><label>Category name<input name="name" maxlength="90" placeholder="e.g. Creative Arts" required autofocus></label><button type="submit">Save category</button><button type="button" class="secondary" data-ole-catalog-cancel>Cancel</button></form>`:''}
+  ${state.oleCatalogForm==='material'?`<form id="oleCatalogForm" class="ole30-inline-form"><label>Material name<input name="name" maxlength="120" required></label><label>Kit metadata tags (comma separated)<input name="tags" placeholder="Art, Writing"></label><label>Notes<input name="notes"></label><button type="submit">Save material</button><button type="button" class="secondary" data-ole-catalog-cancel>Cancel</button></form>`:''}
+  <label class="ole30-search">Find metadata or materials<input type="search" data-ole-catalog-search placeholder="Search tags or material names..." value="${esc(state.oleCatalogSearch||'')}"></label>
+  <div class="ole32-split ole33-split"><aside class="ole32-left ole33-left"><div class="ole32-section-title">Categories</div><div class="ole33-category-list">${categoryList||'<p class="ole30-muted">No matching categories.</p>'}</div></aside><section class="ole32-right ole33-right" aria-label="Selected category contents">${details}</section></div>
+  </section></div>`;
+ }
+ if(mode==='import')return `<div class="ole22 ole28 ole30">${header}<section class="card ole22-panel"><div class="ole30-top"><div><h3>Import materials</h3><p class="ole30-muted">Import material definitions and their kit metadata tags. This does not create physical inventory.</p></div></div><div class="ole30-import-layout"><div class="ole30-import-entry"><label>Choose a CSV file<input type="file" accept=".csv,text/csv" data-ole-csv></label><label>CSV contents<textarea class="ole-import-text" rows="11" placeholder="name,tags,notes">${esc(state.oleImportText||'')}</textarea></label><button type="button" data-ole-preview>Preview CSV</button></div><div class="ole30-import-help"><h3>CSV format</h3><p>Required column: <strong>name</strong></p><p>Optional columns: <strong>tags</strong>, <strong>notes</strong></p><p>Separate multiple metadata tags using a vertical bar (<code>|</code>).</p><pre>name,tags,notes
+Paintbrushes,Art|Writing,
+Magnifying glasses,Science,</pre><p>New metadata tags appear automatically in the Material Catalog under Uncategorized. You can move them into your custom category columns there.</p></div></div>${state.oleImportPreview?`<div class="ole30-import-preview"><div class="ole30-detail-head"><h3>Preview · ${state.oleImportPreview.length} materials</h3><button type="button" data-ole-import>Confirm import</button></div><div class="ole30-preview-table"><table><thead><tr><th>Material</th><th>Metadata tags</th><th>Notes</th></tr></thead><tbody>${state.oleImportPreview.slice(0,100).map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.tags.join(', '))}</td><td>${esc(x.notes||'')}</td></tr>`).join('')}</tbody></table></div>${state.oleImportPreview.length>100?'<p class="ole30-muted">Showing the first 100 rows; all previewed rows will import.</p>':''}</div>`:''}</section></div>`;
+ if(mode==='edit'){
+  const parent=items.find(x=>x.id===(edit?.parentId||state.oleNewParent));
+  const kind=edit?.kind||state.oleNewKind||(!parent?'location':parent.kind==='location'?'shed':parent.kind==='shed'?'kit':parent.kind==='kit'?'material':'material');
+  const parentKinds={location:[''],shed:['location'],kit:['shed'],bin:['shed'],material:['kit','bin'],toy:['shed','bin']};
+  const validParents=items.filter(x=>(parentKinds[kind]||[]).includes(x.kind));
+  const parentId=edit?.parentId||state.oleNewParent||'';
+  const category=parent?.kind==='kit'?parent.name:items.find(x=>x.id===edit?.parentId)?.name||'';
+  const options=kind==='kit'?kitTags:[];
+  const catalogChoices=catalog.filter(x=>kind!=='material'||!category||oleTags(x).some(t=>t.toLowerCase()===category.toLowerCase()));
+  const isStock=['material','toy'].includes(kind);
+  const heading=edit?'Edit '+edit.name:({location:'Add location',shed:'Add shed',kit:'Add kit',material:'Add materials to kit',toy:'Add large toy'}[kind]||'Add item');
+  const form=`<form id="curriculumOleForm" class="curriculum-form"><input type="hidden" name="itemId" value="${esc(edit?.id||'')}"><input type="hidden" name="kind" value="${esc(kind)}"><label class="curriculum-wide">${kind==='material'?'Material':kind==='kit'?'Kit category':'Name'}${kind==='material'?`<select name="name" required><option value="">Select a material</option>${catalogChoices.map(x=>`<option value="${esc(x.name)}" ${edit?.name===x.name?'selected':''}>${esc(x.name)}</option>`).join('')}</select>`:kind==='kit'?`<select name="name" required><option value="">Choose kit category</option>${options.map(x=>`<option value="${esc(x)}" ${edit?.name===x?'selected':''}>${esc(x)} Kit</option>`).join('')}</select>`:`<input name="name" required maxlength="120" value="${esc(edit?.name||'')}" placeholder="${kind==='location'?'e.g. Preschool OLE':kind==='shed'?'e.g. Shed A':'Name'}">`}</label>${kind==='location'?'<input type="hidden" name="parentId" value="">':`<label class="curriculum-wide">Stored in / move to<select name="parentId">${validParents.map(x=>`<option value="${esc(x.id)}" ${x.id===parentId?'selected':''}>${esc(oleLocationLabel(x))}</option>`).join('')}</select></label>`}${isStock?`<label>Quantity<input type="number" name="quantity" min="0" max="1000000" step="1" value="${Number(edit?.quantity)||1}"></label><label>Condition<select name="condition">${['Good','Needs attention','Broken','Missing'].map(x=>`<option ${edit?.condition===x?'selected':''}>${x}</option>`).join('')}</select></label>`:''}<label class="curriculum-wide">Notes<textarea name="notes" rows="2">${esc(edit?.notes||'')}</textarea></label><div class="actions"><button type="submit">Save</button><button type="button" class="secondary" data-curriculum-cancel-ole>Cancel</button>${edit?`<button type="button" class="secondary" data-curriculum-remove-ole="${esc(edit.id)}">Remove</button>`:''}</div></form>`;
+  return `<div class="ole22">${header}<section class="card ole22-panel"><h3>${esc(heading)}</h3><p class="helper">${kind==='material'?'Only materials tagged for this kit appear here. Add or edit tags in Material catalog.':'Create or update this part of the storage hierarchy.'}</p>${kind==='kit'&&!options.length?'<p class="helper">First import or add materials with kit categories in Material catalog.</p>':''}${form}</section></div>`;
+ }
+ const icon={location:'🌳',shed:'🏠',kit:'🧰',bin:'📦',material:'✂️',toy:'🧸'};
+ const childMap=new Map();for(const item of items){const key=item.parentId||'';if(!childMap.has(key))childMap.set(key,[]);childMap.get(key).push(item);}
+ for(const children of childMap.values())children.sort((a,b)=>a.name.localeCompare(b.name));
+ const roots=(childMap.get('')||[]).filter(x=>x.kind==='location');
+ let path=Array.isArray(state.oleSplitPath)?state.oleSplitPath:[];
+ let location=roots.find(x=>x.id===path[0])||roots[0]||null;
+ let shed=location?(childMap.get(location.id)||[]).find(x=>x.id===path[1]&&x.kind==='shed'):null;
+ let kit=shed?(childMap.get(shed.id)||[]).find(x=>x.id===path[2]&&['kit','bin'].includes(x.kind)):null;
+ const depth=kit?3:shed?2:location?1:0;
+ const add=(kind,parent,label)=>manage?`<button type="button" class="ole28-add" data-ole-create="${esc(kind)}" data-ole-parent="${esc(parent||'')}">+ ${esc(label)}</button>`:'';
+ const editBtn=x=>manage?`<button type="button" class="ole28-edit" data-curriculum-edit-ole="${esc(x.id)}" aria-label="Edit ${esc(x.name)}">✎ Edit</button>`:'';
+ const pick=(x,level)=>`data-ole-split="${esc(x.id)}" data-ole-split-level="${level}"`;
+ const crumb=(x,level)=>`<button type="button" class="ole28-crumb ${level===depth?'here':''}" ${pick(x,level)}>${icon[x.kind]||'📦'} ${esc(x.name)}</button>`;
+ const back=depth>1?`<button type="button" class="ole28-back" ${pick(depth===3?shed:location,depth-1)}><span class="ole28-back-arrow">←</span><span><strong>Back to ${depth===3?'kits':'sheds'}</strong><small>${esc(depth===3?shed.name:location.name)}</small></span></button>`:'';
+ const crumbs=location?`<div class="ole28-crumbs">${crumb(location,1)}${shed?`<span>›</span>${crumb(shed,2)}`:''}${kit?`<span>›</span>${crumb(kit,3)}`:''}</div>`:'';
+ const direct=(id)=>(childMap.get(id)||[]);
+ const entries=kit?direct(kit.id):shed?direct(shed.id):location?direct(location.id):[];
+ const stockRow=x=>`<div class="ole28-stock"><span>${icon[x.kind]||'✂️'} <strong>${esc(x.name)}</strong></span><span class="ole28-quantity">Qty ${Number(x.quantity)||0}${x.condition&&x.condition!=='Good'?' · '+esc(x.condition):''}</span>${editBtn(x)}</div>`;
+ const tile=(x,level)=>`<div class="ole28-tile"><button type="button" class="ole28-tile-main" ${pick(x,level)}><span class="ole28-tile-icon">${icon[x.kind]||'📦'}</span><strong>${esc(x.name)}${x.kind==='kit'&&!/kit$/i.test(x.name)?' Kit':''}</strong><small>${direct(x.id).length} items <span>›</span></small></button>${editBtn(x)}</div>`;
+ const query=String(state.oleSearch||'').trim().toLowerCase();
+ const matches=query?items.filter(x=>[x.name,x.notes,oleTags(x).join(' '),oleLocationLabel(x)].join(' ').toLowerCase().includes(query)):[];
+ const results=matches.map(x=>`<div class="ole28-stock"><button type="button" class="ole28-result" data-ole-jump="${esc(x.id)}"><strong>${esc(x.name)}</strong><small>${esc(oleLocationLabel(x))}</small></button>${editBtn(x)}</div>`).join('');
+ const left=roots.map(x=>`<div class="ole28-location ${location?.id===x.id?'active':''}"><button type="button" ${pick(x,1)}><span>🌳</span><strong>${esc(x.name)}</strong><span class="ole28-loc-count">${direct(x.id).filter(y=>y.kind==='shed').length} sheds</span></button>${editBtn(x)}</div>`).join('');
+ let content='';
+ if(kit){content=`<div class="ole28-section-head"><h3>Materials in ${esc(kit.name)}${kit.kind==='kit'&&!/kit$/i.test(kit.name)?' Kit':''}</h3>${add('material',kit.id,'Add materials to kit')}</div><div class="ole28-stock-list">${entries.filter(x=>['material','toy'].includes(x.kind)).map(stockRow).join('')||'<p class="ole28-empty">No materials in this kit yet.</p>'}</div>`;}
+ else if(shed){const containers=entries.filter(x=>['kit','bin'].includes(x.kind));const loose=entries.filter(x=>!['kit','bin'].includes(x.kind));content=`<div class="ole28-section-head"><h3>Kits and bins in ${esc(shed.name)}</h3><div class="ole28-buttons">${add('kit',shed.id,'Add kit')}${add('bin',shed.id,'Add bin')}${add('toy',shed.id,'Add loose material')}</div></div><div class="ole28-tiles">${containers.map(x=>tile(x,3)).join('')||'<p class="ole28-empty">No kits or bins yet.</p>'}</div>${loose.length?`<div class="ole28-section-head"><h3>Loose materials in shed</h3></div><div class="ole28-stock-list">${loose.map(stockRow).join('')}</div>`:''}`;}
+ else if(location){const sheds=entries.filter(x=>x.kind==='shed');content=`<div class="ole28-section-head"><h3>Sheds in ${esc(location.name)}</h3>${add('shed',location.id,'Add shed')}</div><div class="ole28-tiles">${sheds.map(x=>tile(x,2)).join('')||'<p class="ole28-empty">No sheds here yet.</p>'}</div>`;}
+ else content='<p class="ole28-empty">Add a location to begin.</p>';
+ const toggle=can?`<button type="button" class="ole24-mode ${manage?'active':''}" data-ole-manage-toggle aria-pressed="${manage}">${manage?'✓ Done editing':'✎ Edit mode'}</button>`:'';
+ return `<div class="ole22 ole28">${header}<section class="card ole22-panel"><div class="ole28-toolbar"><label class="ole28-search"><span>Search inventory</span><input type="search" data-ole-search placeholder="Search locations, kits, materials..." value="${esc(state.oleSearch||'')}"></label>${toggle}</div>${query?`<div class="ole28-section-head"><h3>${matches.length} search results</h3></div><div class="ole28-stock-list">${results||'<p class="ole28-empty">No matching items.</p>'}</div>`:`<div class="ole28-split"><aside class="ole28-sidebar"><div class="ole28-section-head"><h3>Outdoor locations</h3>${add('location','','Add location')}</div><div class="ole28-location-list">${left||'<p class="ole28-empty">No locations yet.</p>'}</div></aside><div class="ole28-main"><div class="ole28-navigation">${back}${crumbs}</div>${content}</div></div>`}</section></div>`;
 }
 function renderCurriculumPrintables() {return `<section class="card"><h2>Curriculum printables</h2><p class="helper">Starter printable: a clean storage inventory list for your current school's OLE kits. Label templates and bin-specific designs can be added here later.</p><button type="button" data-curriculum-print>Print OLE inventory</button></section>`;}
 async function submitCurriculumForm(form) {
   if (form.id==='curriculumWizardForm') {if(!curriculumCanEdit())throw Error('Permission denied.');curriculumWizardCapture(form);if(state.curriculumWizard.step===3)await curriculumWizardSave();else{state.curriculumWizard.step++;renderCurriculum();}return;}
+  if(form.id==='oleCatalogCategoryForm'){
+    if(!curriculumCanEdit())throw Error('Permission denied');
+    const name=String(new FormData(form).get('name')||'').trim();if(!name)throw Error('Enter a category name.');
+    const schoolId=curriculumActiveSchool();
+    if((state.oleCatalogCategories||[]).some(x=>x.schoolId===schoolId&&x.name.toLowerCase()===name.toLowerCase()))throw Error('That category already exists.');
+    await setDoc(doc(collection(db,'curriculumOleCatalog')),{recordType:'category',name,tags:[],schoolId,updatedAt:serverTimestamp()});
+    state.oleCatalogForm='';await loadCurriculumData(true);renderCurriculum();showToast('Category added.');return;
+  }
+  if(form.id==='oleCatalogForm'){if(!curriculumCanEdit())throw Error('Permission denied');const d=Object.fromEntries(new FormData(form));const name=String(d.name||'').trim();if(!name)throw Error('Enter material name');const schoolId=curriculumActiveSchool();const tags=String(d.tags||'').split(',').map(x=>x.trim()).filter(Boolean);const existing=(state.oleCatalog||[]).find(x=>x.schoolId===schoolId&&x.name.toLowerCase()===name.toLowerCase());await setDoc(doc(db,'curriculumOleCatalog',existing?.id||doc(collection(db,'curriculumOleCatalog')).id),{name,tags,notes:String(d.notes||''),schoolId,updatedAt:serverTimestamp()},{merge:true});state.oleCatalogForm='';await loadCurriculumData(true);renderCurriculum();showToast('Material catalog updated.');return;}
   if (form.id==='curriculumFeedbackForm') {
     const schoolId=curriculumActiveSchool(); if (!schoolId) throw new Error('Your account needs a school assignment.');
     const data=Object.fromEntries(new FormData(form));
@@ -8757,30 +8832,69 @@ async function submitCurriculumForm(form) {
   if (data.kind==='location' && data.parentId) throw new Error('Locations must be top level.');
   if (data.kind!=='location' && !data.parentId) throw new Error('Choose where this item is stored.');
   const items=curriculumOleForSchool(), parent=items.find(x=>x.id===data.parentId);
-  const allowed={shed:['location'],bin:['shed'],toy:['shed','bin'],material:['bin']};
-  if (data.kind!=='location' && !allowed[data.kind]?.includes(parent?.kind)) throw new Error('Choose a valid parent: sheds in locations, bins in sheds, toys in sheds/bins, and materials in bins.');
+  const allowed={shed:['location'],kit:['shed'],bin:['shed'],toy:['shed','bin'],material:['kit','bin']};
+  if (data.kind!=='location' && !allowed[data.kind]?.includes(parent?.kind)) throw new Error('Choose a valid parent: sheds in locations, kits in sheds, and materials in kits.');
   if (data.itemId && data.itemId===data.parentId) throw new Error('An item cannot contain itself.');
+  if(data.itemId){let ancestor=parent;const seen=new Set();while(ancestor&&!seen.has(ancestor.id)){if(ancestor.id===data.itemId)throw Error('Cannot move a container inside itself or its descendants.');seen.add(ancestor.id);ancestor=items.find(x=>x.id===ancestor.parentId);}}
+  const catalogEntry=(state.oleCatalog||[]).find(x=>x.schoolId===schoolId&&x.name===data.name);const tags=catalogEntry?oleTags(catalogEntry):oleTags(items.find(x=>x.id===data.itemId)||{});const quantity=Number(data.quantity||0);if(!Number.isInteger(quantity)||quantity<0||quantity>1000000)throw Error('Enter a valid quantity.');
   const id=data.itemId||doc(collection(db,'curriculumOle')).id;
-  await setDoc(doc(db,'curriculumOle',id),{kind:data.kind,name:data.name.trim(),parentId:data.parentId||'',notes:data.notes.trim(),schoolId,updatedBy:state.session.uid,updatedAt:serverTimestamp()},{merge:true});
-  state.curriculumOleEditId=''; await loadCurriculumData(true); showToast('OLE inventory saved.'); renderCurriculum();
+  await setDoc(doc(db,'curriculumOle',id),{kind:data.kind,name:data.name.trim(),parentId:data.parentId||'',notes:data.notes.trim(),tags,quantity,condition:data.condition||'Good',schoolId,updatedBy:state.session.uid,updatedAt:serverTimestamp()},{merge:true});
+  if(data.itemId){const prior=items.find(x=>x.id===data.itemId);if(prior&&(prior.parentId!==data.parentId||Number(prior.quantity||0)!==quantity||prior.condition!==data.condition)){await setDoc(doc(collection(db,'curriculumOleHistory')),{schoolId,itemId:id,itemName:data.name.trim(),oldParentId:prior.parentId||'',newParentId:data.parentId||'',oldQuantity:Number(prior.quantity)||0,newQuantity:quantity,oldCondition:prior.condition||'Good',newCondition:data.condition,actorUid:state.session.uid,at:serverTimestamp()});}}
+  state.curriculumOleEditId='';state.oleWorkspaceMode='storage'; await loadCurriculumData(true); showToast('OLE inventory saved.'); renderCurriculum();
+}
+function parseOleCsv(raw){const lines=String(raw||'').replace(/^\uFEFF/,'').split(/\r?\n/).filter(x=>x.trim());if(lines.length<2)throw Error('CSV must include a header and at least one row.');const split=line=>{const out=[];let value='',quote=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'){if(quote&&line[i+1]==='"'){value+='"';i++;}else quote=!quote;}else if(c===','&&!quote){out.push(value.trim());value='';}else value+=c;}out.push(value.trim());return out;};const header=split(lines[0]).map(x=>x.toLowerCase());if(!header.includes('name'))throw Error('CSV requires a name column.');if(lines.length>501)throw Error('Import up to 500 rows at a time.');return lines.slice(1).map(line=>{const cells=split(line);const get=k=>cells[header.indexOf(k)]||'';return {name:get('name').slice(0,120),tags:get('tags').split('|').map(x=>x.trim()).filter(Boolean),notes:get('notes').slice(0,2000)};}).filter(x=>x.name);}
+async function moveOleCatalogTag(tag,categoryId){
+ if(!curriculumCanEdit())return;
+ const schoolId=curriculumActiveSchool();const categories=(state.oleCatalogCategories||[]).filter(x=>x.schoolId===schoolId);
+ const destination=categories.find(x=>x.id===categoryId);
+ if(categoryId&&!destination)throw Error('Category not found.');
+ const affected=categories.filter(c=>(c.tags||[]).includes(tag)||(destination&&c.id===destination.id));
+ for(const cat of affected){const tags=(cat.tags||[]).filter(x=>x!==tag);if(cat.id===categoryId)tags.push(tag);await setDoc(doc(db,'curriculumOleCatalog',cat.id),{tags,updatedAt:serverTimestamp()},{merge:true});}
+ await loadCurriculumData(true);renderCurriculum();showToast('Metadata category updated.');
 }
 async function handleCurriculumClick(e) {
+  if(e.target.closest('[data-ole-catalog-add-category]')){state.oleCatalogForm='category';renderCurriculum();return true;}
+  if(e.target.closest('[data-ole-catalog-add-material]')){state.oleCatalogForm='material';renderCurriculum();return true;}
+  if(e.target.closest('[data-ole-catalog-cancel]')){state.oleCatalogForm='';renderCurriculum();return true;}
+  if(e.target.closest('[data-ole-catalog-close]')){state.oleCatalogTag='';renderCurriculum();return true;}
+  const catalogCategory=e.target.closest('[data-ole-catalog-category]');if(catalogCategory){state.oleCatalogCategory=catalogCategory.dataset.oleCatalogCategory;state.oleCatalogTag='';renderCurriculum();return true;}
+  const catalogTag=e.target.closest('[data-ole-catalog-tag]');if(catalogTag){state.oleCatalogTag=state.oleCatalogTag===catalogTag.dataset.oleCatalogTag?'':catalogTag.dataset.oleCatalogTag;renderCurriculum();return true;}
+
+  if(e.target.closest('[data-ole-manage-toggle]')){if(!curriculumCanEdit())return true;state.oleManageMode=!state.oleManageMode;renderCurriculum();return true;}
+  const splitPick=e.target.closest('[data-ole-split]');if(splitPick){const id=splitPick.dataset.oleSplit;const level=Number(splitPick.dataset.oleSplitLevel);const item=curriculumOleForSchool().find(x=>x.id===id);if(item){const trail=oleTrail(item).map(x=>x.id);state.oleSplitPath=trail.slice(0,level);state.oleSearch='';renderCurriculum();}return true;}
+  const create=e.target.closest('[data-ole-create]');if(create){if(!curriculumCanEdit())return true;state.curriculumOleEditId='';state.oleNewKind=create.dataset.oleCreate;state.oleNewParent=create.dataset.oleParent||'';state.oleWorkspaceMode='edit';renderCurriculum();return true;}
+  const expand=e.target.closest('[data-ole-expand]');if(expand){const id=expand.dataset.oleExpand;const items=curriculumOleForSchool();const item=items.find(x=>x.id===id);if(!item)return true;const trail=oleTrail(item).map(x=>x.id);const path=state.oleExpandedPath||[];state.oleExpandedPath=path.includes(id)?trail.slice(0,-1):trail;renderCurriculum();return true;}
+  const jump=e.target.closest('[data-ole-jump]');if(jump){const item=curriculumOleForSchool().find(x=>x.id===jump.dataset.oleJump);if(item){state.oleSplitPath=oleTrail(item).map(x=>x.id);state.oleSearch='';renderCurriculum();}return true;}
+  const oleMode=e.target.closest('[data-ole-mode]')?.dataset.oleMode;if(oleMode){state.oleWorkspaceMode=oleMode;if(oleMode!=='edit')state.curriculumOleEditId='';renderCurriculum();return true;}
+  if(e.target.closest('[data-ole-start-placement]')){state.oleWorkspaceMode='storage';state.oleSelectedId='';state.oleSearch='';renderCurriculum();return true;}
+  const toyParent=e.target.closest('[data-ole-add-toy]')?.dataset.oleAddToy;if(toyParent){state.oleNewParent=toyParent;state.oleNewKind='toy';state.curriculumOleEditId='';state.oleWorkspaceMode='edit';renderCurriculum();return true;}
+  const newNode=e.target.closest('[data-ole-new]')?.dataset.oleNew;
+  if(newNode){if(!curriculumCanEdit())return true;state.curriculumOleEditId='';state.oleNewParent=newNode==='root'?'':newNode;state.oleNewKind='';state.oleWorkspaceMode='edit';renderCurriculum();return true;}
+  const stock=e.target.closest('[data-ole-stock]')?.dataset.oleStock;
+  if(stock){if(!curriculumCanEdit())return true;state.curriculumOleEditId='';state.oleNewKind='material';state.oleNewParent='';state.oleWorkspaceMode='edit';renderCurriculum();const name=document.querySelector('#curriculumOleForm [name="name"]');if(name)name.value=stock;return true;}
+  const addInside=e.target.closest('[data-ole-add-inside]')?.dataset.oleAddInside;if(addInside){state.oleSelectedId=addInside;state.curriculumOleEditId='';state.oleWorkspaceMode='edit';renderCurriculum();return true;}
+  if(e.target.closest('[data-ole-root]')){state.oleSelectedId='';state.oleSearch='';renderCurriculum();return true;}
+  const open=e.target.closest('[data-ole-open]')?.dataset.oleOpen;if(open){state.oleSelectedId=open;state.oleSearch='';renderCurriculum();return true;}
+  if(e.target.closest('[data-ole-preview]')){try{state.oleImportText=document.querySelector('.ole-import-text')?.value||'';state.oleImportPreview=parseOleCsv(state.oleImportText);renderCurriculum();}catch(err){showToast(err.message);}return true;}
+  if(e.target.closest('[data-ole-import]')){if(!curriculumCanEdit())return true;const rows=state.oleImportPreview||[];if(!rows.length)return true;if(!confirm(`Import ${rows.length} material definitions?`))return true;const schoolId=curriculumActiveSchool();for(const row of rows){const existing=(state.oleCatalog||[]).find(x=>x.schoolId===schoolId&&x.name.toLowerCase()===row.name.toLowerCase());await setDoc(doc(db,'curriculumOleCatalog',existing?.id||doc(collection(db,'curriculumOleCatalog')).id),{...row,schoolId,updatedAt:serverTimestamp()},{merge:true});}state.oleImportPreview=null;state.oleImportText='';await loadCurriculumData(true);renderCurriculum();showToast('Catalog imported.');return true;}
   if(e.target.closest('[data-curriculum-add-location]')){if(!curriculumCanEdit())return true;state.curriculumWizard={step:0,name:'',sheds:[]};renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-wizard-cancel]')){state.curriculumWizard=null;renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-wizard-back]')){state.curriculumWizard.step=Math.max(0,state.curriculumWizard.step-1);renderCurriculum();return true;}
   const tab=e.target.closest('[data-curriculum-tab]')?.dataset.curriculumTab;
   if(tab){state.curriculumTab=tab;state.curriculumOleEditId='';state.curriculumFeedbackMode='';renderCurriculum();return true;}
   const edit=e.target.closest('[data-curriculum-edit-ole]')?.dataset.curriculumEditOle;
-  if(edit){if(!curriculumCanEdit())return true;state.curriculumOleEditId=edit;renderCurriculum();const item=curriculumOleForSchool().find(x=>x.id===edit);const select=document.querySelector('#curriculumOleForm [name="parentId"]');if(select&&item)select.value=item.parentId||'';return true;}
+  if(edit){if(!curriculumCanEdit())return true;state.curriculumOleEditId=edit;state.oleNewParent='';state.oleWorkspaceMode='edit';renderCurriculum();const item=curriculumOleForSchool().find(x=>x.id===edit);const select=document.querySelector('#curriculumOleForm [name="parentId"]');if(select&&item)select.value=item.parentId||'';return true;}
   const remove=e.target.closest('[data-curriculum-remove-ole]')?.dataset.curriculumRemoveOle;
   if(remove){if(!curriculumCanEdit())return true;const descendants=state.curriculumOle.some(x=>x.parentId===remove);if(descendants){showToast('Remove the contents of this item first.');return true;}if(confirm('Remove this OLE item?')){await deleteDoc(doc(db,'curriculumOle',remove));await loadCurriculumData(true);renderCurriculum();}return true;}
-  if(e.target.closest('[data-curriculum-cancel-ole]')){state.curriculumOleEditId='';renderCurriculum();return true;}
+  if(e.target.closest('[data-curriculum-cancel-ole]')){state.curriculumOleEditId='';state.oleWorkspaceMode='storage';renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-edit-themes]')){if(!curriculumCanEdit())return true;state.curriculumEditingThemes=!state.curriculumEditingThemes;renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-feedback-submit]')){state.curriculumFeedbackMode='submit';renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-feedback-list]')){state.curriculumFeedbackMode='';renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-print]')){const items=curriculumOleForSchool();const school=state.schools.find(x=>x.id===curriculumActiveSchool());const win=window.open('','_blank');if(!win){showToast('Allow pop-ups to print the inventory.');return true;}win.document.write(`<html><head><title>OLE Inventory</title><style>body{font:14px Arial;padding:28px;color:#243b2c}h1{border-bottom:2px solid #63806b;padding-bottom:12px}li{margin:9px 0}</style></head><body><h1>OLE Inventory · ${curriculumEsc(school?.name||'School')}</h1><ul>${items.map(x=>`<li>${curriculumEsc(x.kind)}: ${curriculumEsc(x.name)} ${x.notes?'— '+curriculumEsc(x.notes):''}</li>`).join('')}</ul></body></html>`);win.document.close();win.focus();win.print();return true;}
   return false;
 }
+document.addEventListener('input',e=>{if(e.target.matches('[data-ole-catalog-search]')){state.oleCatalogSearch=e.target.value;const pos=e.target.selectionStart;renderCurriculum();const input=document.querySelector('[data-ole-catalog-search]');if(input){input.focus();input.setSelectionRange(pos,pos);}return;}if(e.target.matches('[data-ole-search]')){state.oleSearch=e.target.value;const pos=e.target.selectionStart;renderCurriculum();const input=document.querySelector('[data-ole-search]');if(input){input.focus();input.setSelectionRange(pos,pos);}}});
+document.addEventListener('change',async e=>{if(e.target.matches('[data-ole-catalog-move]')){try{await moveOleCatalogTag(e.target.dataset.oleCatalogMove,e.target.value);}catch(err){showToast(err.message);}return;}if(e.target.matches('[data-ole-csv]')){const f=e.target.files?.[0];if(f){if(f.size>500000){showToast('CSV too large.');return;}state.oleImportText=await f.text();const ta=document.querySelector('.ole-import-text');if(ta)ta.value=state.oleImportText;}}});
 document.addEventListener('change',e=>{if(e.target.matches('[data-curriculum-school]')){state.curriculumSchoolId=e.target.value;state.curriculumOleEditId='';renderCurriculum();}});
 
 function renderCurrentView() {
@@ -10675,7 +10789,7 @@ $app.addEventListener("submit", async (e) => {
   showAppLoading(form.id === "loginForm" ? "Logging in..." : "Saving...");
   try {
     await new Promise(resolve => requestAnimationFrame(resolve));
-    if (form.id === "curriculumFeedbackForm" || form.id === "curriculumOleForm" || form.id === "curriculumWizardForm") { await submitCurriculumForm(form); hideAppLoading(); return; }
+    if (form.id === "curriculumFeedbackForm" || form.id === "curriculumOleForm" || form.id === "curriculumWizardForm" || form.id === "oleCatalogCategoryForm" || form.id === "oleCatalogForm") { await submitCurriculumForm(form); hideAppLoading(); return; }
     if (form.id === "publicSignupForm") {
       try { await submitPublicSignup(form); }
       catch (err) { renderPublicSignupPage(err.message || "Sign up failed. Please try again."); }
