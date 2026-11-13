@@ -279,6 +279,13 @@ function setCampusCaresOpenPreference(mode) { const prefs=getToolPrefs(); prefs.
 function isToolBookmarked(toolId) { return (getToolPrefs().bookmarks || []).includes(toolId); }
 function isToolHidden(toolId) { return (getToolPrefs().hidden || []).includes(toolId); }
 function getToolConfig(toolKey) { return state.appTools.find(t => t.key === toolKey) || {}; }
+function isToolActive(toolKey) {
+  return getToolConfig(toolKey).active !== false;
+}
+function canOpenTool(user, toolKey) {
+  if (!isToolActive(toolKey)) return false;
+  return getAvailableTools(user).some(t => t.id === toolKey);
+}
 function getToolDisplay(tool) {
   const cfg = getToolConfig(tool.id);
   const safeName = tool.id === "villageVoice" && (!cfg.name || cfg.name === "Village Voice" || cfg.name === "The Village Voice") ? "Printables" : (cfg.name || tool.title);
@@ -367,6 +374,22 @@ function renderRosterSection(title, users, emptyText = "No users found.") {
 }
 
 const PERMISSION_TOOLS = [
+  { key: "curriculum", name: "Curriculum", permissions: [
+    { key: "viewThemes", label: "View Weekly Themes", description: "Read the weekly themes calendar." },
+    { key: "editThemes", label: "Manage Weekly Themes", description: "Create and update weekly themes." },
+    { key: "viewOle", label: "View OLE Kits", description: "Browse locations, sheds, kits, and material catalog." },
+    { key: "editOle", label: "Manage OLE Inventory", description: "Add, edit, and organize locations, kits, materials, and categories." },
+    { key: "importOle", label: "Import OLE Materials", description: "Import material lists from CSV." },
+    { key: "submitFeedback", label: "Submit Curriculum Feedback", description: "Send feedback to school leadership." },
+    { key: "reviewFeedback", label: "Review Curriculum Feedback", description: "Read submitted feedback." }
+  ] },
+  { key: "appCamera", name: "App Camera", permissions: [
+    { key: "use", label: "Use Camera & Gallery", description: "Capture, upload and reuse photos for assigned schools." },
+    { key: "manage", label: "Manage Gallery", description: "Move photos between albums and permanently delete them." }
+  ] },
+  { key: "photoPrint", name: "Photo Print and Edit", permissions: [
+    { key: "use", label: "Use Photo Print", description: "Open photo layouts, edit and print images." }
+  ] },
   {
     key: "moneyRequests",
     name: "Money Requests",
@@ -470,6 +493,7 @@ const db = getFirestore(app);
 
 let state = {
   session: null,
+  portalChoice: "choose",
   schools: [],
   roster: [],
   users: [],
@@ -962,6 +986,8 @@ async function loadCampusCareDiscussions() {
     const bt = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (b.createdAt?.toMillis ? b.createdAt.toMillis() : 0);
     return bt-at;
   });
+  const visible=state.campusCareDiscussions.filter(d=>d.active!==false&&!d.removedAt&&!d.completedAt&&campusDiscussionInUserScope(d));
+  await loadDiscussionImages(visible.find(d=>d.id===state.activeCampusDiscussionId)||visible[0]);
 }
 
 function getDefaultCampusCareStatus() {
@@ -969,17 +995,17 @@ function getDefaultCampusCareStatus() {
 }
 function getCampusStatus(id) { return state.campusCareStatuses.find(s => s.id === id) || getDefaultCampusCareStatus(); }
 function isCampusCompleted(task) { return !!task.statusId && /completed|complete|done/i.test(getCampusStatus(task.statusId).name || task.statusName || ""); }
-function campusTaskInUserScope(task, user = state.session) { return userSchoolMatchesScope(task.schoolIds || (task.schoolId ? [task.schoolId] : []), user); }
+function campusTaskInUserScope(task, user = state.session) { return userSchoolMatchesScope(task.schoolIds || (task.schoolId ? [task.schoolId] : []), user) && recordMatchesActiveSchool(task); }
 function campusDate(value) { try { const d=value?.toDate?value.toDate():new Date(value||Date.now()); return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${String(d.getFullYear()).slice(-2)}`; } catch(err){ return ""; } }
 function campusTime(value) { try { const d=value?.toDate?value.toDate():new Date(value||Date.now()); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); } catch(err){ return ""; } }
 function campusShortStamp(value) { try { const d=value?.toDate?value.toDate():new Date(value||Date.now()); return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }).toLowerCase()}`; } catch(err){ return ""; } }
-function campusDiscussionInUserScope(d, user = state.session) { return userSchoolMatchesScope(d.schoolIds || (d.schoolId ? [d.schoolId] : []), user); }
-function activeCampusDiscussions() { return state.campusCareDiscussions.filter(d=>d.active!==false && !d.removedAt && campusDiscussionInUserScope(d)); }
+function campusDiscussionInUserScope(d, user = state.session) { return userSchoolMatchesScope(d.schoolIds || (d.schoolId ? [d.schoolId] : []), user) && recordMatchesActiveSchool(d); }
+function activeCampusDiscussions() { return state.campusCareDiscussions.filter(d=>d.active!==false && !d.removedAt && !d.completedAt && campusDiscussionInUserScope(d)); }
 function campusNoteList(list=[]) { return [...list].sort((a,b)=>new Date(a.at||0)-new Date(b.at||0)); }
 function notificationSettingEnabled(user, key) { const settings=user?.notificationSettings||{}; return settings[key] === true; }
 function notificationAllowedForUser(user, key) { return hasToolPermission(user, "notifications", key) || hasFullDevAccess(user); }
 function usersAllowedForNotification(key, schoolIds=[]) { return state.users.filter(u => u.active !== false && notificationAllowedForUser(u, key) && notificationSettingEnabled(u, key) && userSchoolMatchesScope(schoolIds, u)); }
-function campusTaskSchoolIds(taskOrFormLoc) { return taskOrFormLoc?.schoolIds || (taskOrFormLoc?.schoolId ? [taskOrFormLoc.schoolId] : getUserSchoolIds(state.session)); }
+function campusTaskSchoolIds(taskOrFormLoc) { return recordSchoolIds(taskOrFormLoc); }
 async function createNotificationsForUsers(users, payload) {
   const unique = [...new Map(users.filter(Boolean).map(u => [u.uid, u])).values()];
   await Promise.all(unique.map(u => createNotification({ ...payload, toUids: [u.uid] }).catch(()=>{})));
@@ -1207,7 +1233,7 @@ function getAutoBirthdayImportantDates() {
 }
 
 function getAllImportantDateItems() {
-  return [...(state.importantDates || []), ...getAutoBirthdayImportantDates()]
+  return [...(state.importantDates || []).filter(d => !recordSchoolIds(d).length ? isSystemAdmin(state.session) : recordMatchesActiveSchool(d)), ...getAutoBirthdayImportantDates()]
     .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
 }
 
@@ -1374,7 +1400,7 @@ async function loadIllnessNoticeTemplates() {
 
 function userSchoolMatchesScope(schoolIds = [], user = state.session) {
   const scopedIds = Array.isArray(schoolIds) ? schoolIds.filter(Boolean) : [];
-  if (!scopedIds.length) return true;
+  if (!scopedIds.length) return isSystemAdmin(user);
   if (isSystemAdmin(user)) return true;
   const userIds = getUserSchoolIds(user);
   if (!userIds.length) return false;
@@ -1564,6 +1590,9 @@ async function updateSchool(form) {
 
 async function updateAppUser(form) {
   const uid = state.modal.user.uid;
+  const employeeId = cleanEmployeeId(form.employeeId?.value);
+  if (!employeeId) throw new Error("Assign an employee ID before saving.");
+  await assertEmployeeIdAvailable(employeeId, uid);
   const firstName = form.firstName.value.trim();
   const lastName = form.lastName.value.trim();
   const usedName = form.usedName?.value?.trim() || `${firstName} ${lastName}`;
@@ -1580,6 +1609,8 @@ async function updateAppUser(form) {
     displayName: `${firstName} ${lastName.slice(0, 1)}.`,
     usedName,
     profileImageData,
+    employeeId,
+    accountType: "team",
     ...(form.querySelector('[name="leaderSummary"]') ? { leaderSummary: form.leaderSummary.value.trim() } : {}),
     pin: form.pin.value.trim(),
     pinResetRequired: form.pin.value.trim() === "0000",
@@ -1782,7 +1813,7 @@ function getAvailableTools(user) {
   const canProcessMoney = hasToolPermission(user, "moneyRequests", "processApproved");
   const canEditVillageVoice = hasToolPermission(user, "villageVoice", "editFlyer");
   const canUseCampusCares = hasToolPermission(user, "campusCares", "submit") || hasToolPermission(user, "campusCares", "assigned") || hasToolPermission(user, "campusCares", "viewAll") || hasToolPermission(user, "campusCares", "manage");
-  const canUsePhotoPrint = hasFullDevAccess(user) || getUserRoleKeys(user).some(r => ["teacher", "mentor", "leader", "admin", "owner", "systemAdmin"].includes(r));
+  const canUsePhotoPrint = hasToolPermission(user, "photoPrint", "use") || hasFullDevAccess(user) || getUserRoleKeys(user).some(r => ["teacher", "mentor", "leader", "admin", "owner", "systemAdmin"].includes(r));
 
   if (canSubmitMoney || canApproveMoney || canProcessMoney || hasFullDevAccess(user)) {
     tools.push({
@@ -1797,6 +1828,9 @@ function getAvailableTools(user) {
     tools.push({ id: "campusCares", title: "Campus Cares", icon: "C", desc: "Submit, track, assign, and complete campus care tasks." });
   }
 
+  if (hasToolPermission(user,"appCamera","use") || hasFullDevAccess(user) || getUserRoleKeys(user).some(r=>["teacher","mentor","leader","owner","admin","systemAdmin"].includes(r))) {
+    tools.push({ id:"appCamera", title:"App Camera", icon:"📸", desc:"Capture, organize, and reuse school photos." });
+  }
   if (canUsePhotoPrint) {
     tools.push({ id: "photoPrint", title: "Photo Print and Edit", icon: "📷", desc: "Arrange classroom photos on standard copy paper, then print or save as PDF." });
   }
@@ -1814,8 +1848,8 @@ function getAvailableTools(user) {
     });
   }
 
-  tools.push({ id: "curriculum", title: "Curriculum", icon: "📚", desc: "Weekly themes, OLE kits, feedback, and printables." });
-  return tools;
+  if (hasToolPermission(user, "curriculum", "viewThemes") || hasToolPermission(user, "curriculum", "viewOle") || hasToolPermission(user, "curriculum", "submitFeedback") || hasFullDevAccess(user) || getUserRoleKeys(user).some(r => ["teacher","mentor","leader","owner","admin","systemAdmin"].includes(r))) tools.push({ id: "curriculum", title: "Curriculum", icon: "📚", desc: "Weekly themes, OLE kits, feedback, and printables." });
+  return tools.filter(tool => isToolActive(tool.id));
 }
 
 async function addBudgetCode(form) {
@@ -1925,6 +1959,26 @@ function selectedNewUserRole(form) {
   return form.isLeader?.checked ? "leader" : "teacher";
 }
 
+function cleanEmployeeId(raw) {
+  const id = String(raw ?? '').trim();
+  if (id && !/^\d+$/.test(id)) throw new Error('Employee ID must contain digits only.');
+  if (id.length > 24) throw new Error('Employee ID cannot exceed 24 digits.');
+  return id;
+}
+async function assertEmployeeIdAvailable(employeeId, excludeUid = '') {
+  if (!employeeId) return;
+  const snap = await getDocs(query(collection(db, 'users'), where('employeeId', '==', employeeId)));
+  if (snap.docs.some(d => d.id !== excludeUid)) throw new Error('This employee ID is already assigned to another team member.');
+}
+async function loginWithEmployeeId(form) {
+  const employeeId = cleanEmployeeId(form.employeeId.value);
+  if (!employeeId) throw new Error('Enter your employee ID.');
+  const matches = await getDocs(query(collection(db, 'users'), where('employeeId', '==', employeeId)));
+  const users = matches.docs.map(d => ({ uid:d.id, ...d.data() })).filter(u => u.active !== false && u.accountType !== 'family');
+  if (users.length !== 1) throw new Error(users.length ? 'Employee ID is duplicated. Contact an administrator.' : 'Employee ID not found. Ask your leader to assign your ID in Users.');
+  await loginUser(users[0], form.credential.value, !!form.stayLoggedIn?.checked);
+}
+
 async function addUser(form) {
   const firstName = form.firstName.value.trim();
   const lastName = form.lastName.value.trim();
@@ -1934,6 +1988,9 @@ async function addUser(form) {
   const roles = [role];
   const teamPosition = "Unassigned";
   const pin = "0000";
+  const employeeId = cleanEmployeeId(form.employeeId?.value);
+  if (!employeeId) throw new Error("Enter an employee ID before creating a team member.");
+  await assertEmployeeIdAvailable(employeeId);
 
   if (!firstName || !lastName) throw new Error("First and last name are required.");
   if (!selectedSchoolIds.length) throw new Error("Select at least one school.");
@@ -1956,6 +2013,8 @@ async function addUser(form) {
     leaderSummary: "",
     whatILike: {},
     fakeEmail,
+    employeeId,
+    accountType: "team",
     pin,
     teamPosition,
     role,
@@ -2123,40 +2182,92 @@ function uAvatarForShell(user) {
   return user?.profileImageData ? `<img class="vv-account-avatar" src="${user.profileImageData}" alt="" />` : `<span class="vv-account-avatar vv-initials">${escapeHtml(initials)}</span>`;
 }
 
-function renderLanding() {
+function renderPortalChoice() {
   state.currentView = "landing";
-  const recentUsers = getRecentRosterUsers();
-  const recentIds = new Set(recentUsers.map(u => u.uid));
-  const leaders = state.roster
-    .filter(u => getRosterGroup(u) === "leaders" && !recentIds.has(u.uid))
-    .sort(byName);
-  const staff = state.roster
-    .filter(u => getRosterGroup(u) === "staff" && !recentIds.has(u.uid))
-    .sort(byName);
-
   $app.innerHTML = `
-    <main class="shell">
+    <main class="portal-entry portal-entry-v215">
+      <div class="portal-glow portal-glow-one" aria-hidden="true"></div>
+      <div class="portal-glow portal-glow-two" aria-hidden="true"></div>
+      <header class="portal-entry-header">
+        <div class="portal-brand">${getOvaLogoHtml("portal-brand-mark", "OVA")}<span class="portal-brand-wordmark">Village Vibes<small>OAK VILLAGE ACADEMY</small></span></div>
+        <button class="theme-toggle-button secondary small" type="button" data-toggle-theme>${getThemePreference() === "dark" ? "☀️ Light" : "🌙 Dark"}</button>
+      </header>
+      <div class="portal-entry-intro">
+        <div class="portal-eyebrow"><span class="portal-eyebrow-dot"></span> YOUR COMMUNITY, CONNECTED</div>
+        <h1>One village.<br><em>Two ways to connect.</em></h1>
+        <p>Whether you're part of our team or part of our families, there's a place for you here.</p>
+      </div>
+      <div class="portal-entry-grid">
+        <button type="button" class="portal-entry-card portal-family-card" data-portal-choice="family">
+          <span class="portal-card-art portal-art-family" aria-hidden="true">
+            <svg viewBox="0 0 360 145" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="293" cy="25" r="56" fill="currentColor" opacity=".09"/><circle cx="72" cy="127" r="65" fill="currentColor" opacity=".07"/><path d="M113 92 180 38l67 54v47H113V92Z" fill="currentColor" opacity=".17"/><path d="M100 94 180 28l80 66" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/><path d="M131 88v51h98V88" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><path d="M168 139v-36h26v36" stroke="currentColor" stroke-width="6" stroke-linecap="round"/><path d="M149 98h9m44 0h9" stroke="currentColor" stroke-width="8" stroke-linecap="round"/><path d="M42 133c12-23 24-30 38-30s27 9 39 30M257 133c12-23 24-30 38-30s27 9 39 30" stroke="currentColor" opacity=".5" stroke-width="5" stroke-linecap="round"/></svg>
+          </span>
+          <span class="portal-card-kicker">FOR OUR FAMILIES</span>
+          <span class="portal-entry-name">Family Portal</span>
+          <span class="portal-entry-desc">A welcoming space for the people who make our village feel like home.</span>
+          <span class="portal-entry-cta">Enter Family Portal <span class="portal-arrow" aria-hidden="true">→</span></span>
+        </button>
+        <button type="button" class="portal-entry-card portal-team-card" data-portal-choice="team">
+          <span class="portal-card-art portal-art-team" aria-hidden="true">
+            <svg viewBox="0 0 360 145" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="292" cy="19" r="59" fill="currentColor" opacity=".08"/><circle cx="63" cy="137" r="65" fill="currentColor" opacity=".08"/><circle cx="180" cy="47" r="20" stroke="currentColor" stroke-width="7"/><circle cx="114" cy="69" r="15" stroke="currentColor" stroke-width="6"/><circle cx="246" cy="69" r="15" stroke="currentColor" stroke-width="6"/><path d="M135 132v-19c0-25 20-43 45-43s45 18 45 43v19H135ZM70 132v-14c0-19 16-34 35-34h14m122 0h14c19 0 35 15 35 34v14" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/><path d="m173 108 8 8 16-20" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="portal-card-kicker">FOR OUR TEAM</span>
+          <span class="portal-entry-name">Team Portal</span>
+          <span class="portal-entry-desc">Everything our educators and leaders need to stay connected and supported.</span>
+          <span class="portal-entry-cta">Enter Team Portal <span class="portal-arrow" aria-hidden="true">→</span></span>
+        </button>
+      </div>
+      <footer class="portal-entry-footer"><span>Growing together, every day.</span><span>Oak Village Academy <span aria-hidden="true">·</span> Village Vibes</span></footer>
+    </main>
+    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+  `;
+}
+
+function renderFamilyLogin() {
+  state.currentView = "landing";
+  $app.innerHTML = `
+    <main class="portal-login-shell portal-login-v217">
+      <div class="portal-login-top"><button type="button" class="secondary small" data-portal-back>← Back to portals</button><span class="portal-brand">${getOvaLogoHtml("portal-brand-mark", "OVA")} Village Vibes</span></div>
+      <section class="card portal-login-card">
+        <div class="portal-login-eyebrow">WELCOME TO OUR VILLAGE</div>
+        <div class="portal-login-icon" aria-hidden="true">⌂</div>
+        <h1>Welcome, families.</h1>
+        <p class="helper">Your connection to the Oak Village Academy community.</p>
+        <div class="portal-login-divider"><span>FAMILY PORTAL</span></div>
+        <form id="familyPortalLoginForm" class="stack" autocomplete="on">
+          <label>Email address<input name="email" type="email" autocomplete="username" required placeholder="you@example.com" /></label>
+          <label>Password<input name="password" type="password" autocomplete="current-password" required placeholder="Enter your password" /></label>
+          <button type="submit">Log In to Family Portal</button>
+        </form>
+        <p class="portal-family-note">Family accounts are not enabled yet. This login is a preview and does not grant access to team information.</p>
+      </section>
+    </main>
+    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
+  `;
+}
+
+function renderLanding() {
+  if (state.portalChoice === "choose") { renderPortalChoice(); return; }
+  if (state.portalChoice === "family") { renderFamilyLogin(); return; }
+  state.currentView = "landing";
+  $app.innerHTML = `
+    <main class="shell team-login-v217 team-id-login-v223">
       <section class="hero card login-hero">
-        <div class="logo-row">
-          <div class="logo">VV</div>
-          <div class="actions">
-            <button class="theme-toggle-button secondary small" type="button" data-toggle-theme>${getThemePreference() === "dark" ? "☀️ Light" : "🌙 Dark"}</button>
-          </div>
+        <button type="button" class="secondary small portal-team-back" data-portal-back>← Back to portals</button>
+        <div class="logo-row">${getOvaLogoHtml("logo", "OVA")}
+          <button class="theme-toggle-button secondary small" type="button" data-toggle-theme>${getThemePreference() === "dark" ? "☀️ Light" : "🌙 Dark"}</button>
         </div>
-        <div>
-          <h1>Village Vibes</h1>
-          <p class="helper">Choose your school, select your name, then log in.</p>
-        </div>
-        <label>School
-          <select id="schoolSelect">
-            ${state.schools.map(s => `<option value="${s.id}" ${s.id === state.selectedSchoolId ? "selected" : ""}>${s.name} (${s.code})</option>`).join("")}
-          </select>
-        </label>
-        <div class="card roster-card" style="box-shadow:none;">
-          ${recentUsers.length ? renderRosterSection("Recently Picked", recentUsers, "No recent users on this device yet.") : ""}
-          ${renderRosterSection("Leaders & Owners", leaders, "No leaders or owners for this school yet.")}
-          ${renderRosterSection("Mentors & Teachers", staff, "No mentors or teachers for this school yet.")}
-        </div>
+        <div class="team-id-intro"><div class="portal-login-eyebrow">OAK VILLAGE ACADEMY · TEAM PORTAL</div>
+          <h1>Welcome back, team.</h1><p class="helper">Sign in using your employee ID and your PIN or password.</p></div>
+        <form id="employeeIdLoginForm" class="team-id-form" autocomplete="on">
+          <label>Employee ID<input name="employeeId" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="24" autocomplete="username" placeholder="Enter your clock-in ID" required autofocus></label>
+          <label>PIN or password<input name="credential" type="password" autocomplete="current-password" placeholder="Enter your PIN or password" required></label>
+          <label class="stay-login-toggle"><input type="checkbox" name="stayLoggedIn" ${getStayLoggedInPreference()?'checked':''} /><span class="stay-switch" aria-hidden="true"></span><span class="stay-text">Stay logged in on this device</span></label>
+          <button type="submit">Log In to Team Portal</button>
+        </form>
+        <p class="helper team-id-help">Don't have an employee ID assigned yet? Ask your leader to add it under <strong>Leadership → Users → Team Members</strong>.</p>
+        <button type="button" class="secondary small" data-show-legacy-roster>Use previous name-based login (migration only)</button>
+        ${state.showLegacyRoster?`<div class="card roster-card"><label>School<select id="schoolSelect">${state.schools.map(sc=>`<option value="${sc.id}" ${sc.id===state.selectedSchoolId?'selected':''}>${escapeHtml(sc.name)}</option>`).join('')}</select></label>${renderRosterSection('Team Members',state.roster,'No team members at this school.')}</div>`:''}
       </section>
     </main>
     ${state.modal ? renderModal() : ""}
@@ -2216,9 +2327,54 @@ function moneyFieldInputType(type) {
 
 
 function getUserSchoolIds(user = state.session) {
-  return Array.isArray(user?.schoolIds) ? user.schoolIds : [];
+  return [...new Set([...(Array.isArray(user?.schoolIds) ? user.schoolIds : []), user?.schoolId].filter(Boolean))];
 }
 
+// School is the top-level context for new campus records. Never infer multiple schools for one record.
+function allowedSchoolIds(user = state.session) {
+  const assigned = getUserSchoolIds(user);
+  return (state.schools || []).filter(s => s.active !== false && (assigned.includes(s.id) || isSystemAdmin(user))).map(s => s.id);
+}
+function activeSchoolContext() {
+  const ids = allowedSchoolIds();
+  if (!ids.length) return "";
+  return ids.includes(state.selectedSchoolId) ? state.selectedSchoolId : ids[0];
+}
+function schoolContextField(name = "schoolId", selected = "") {
+  const ids = allowedSchoolIds();
+  const current = ids.includes(selected) ? selected : activeSchoolContext();
+  if (!ids.length) return `<p class="helper">No school assigned. Ask an administrator to assign a location.</p>`;
+  if (ids.length === 1) return `<input type="hidden" name="${name}" value="${escapeHtml(ids[0])}"><p class="helper">School: <strong>${escapeHtml(getSchoolNameById(ids[0]))}</strong></p>`;
+  return `<label>School / Location<select name="${name}" required>${ids.map(id=>`<option value="${escapeHtml(id)}" ${id===current?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select></label>`;
+}
+function requiredSchoolFromForm(form) {
+  const id = String(form.elements.namedItem('schoolId')?.value || activeSchoolContext());
+  if (!id || !allowedSchoolIds().includes(id)) throw new Error('Select a school assigned to your account.');
+  return id;
+}
+// Centralized school guard: reject records with missing/foreign school scope rather than treating them as global.
+function recordSchoolIds(record) {
+  if (!record) return [];
+  const ids = Array.isArray(record.schoolIds) ? record.schoolIds : [];
+  return [...new Set([...ids, record.schoolId].filter(Boolean))];
+}
+function requireRecordSchoolAccess(record, { allowLegacy = false } = {}) {
+  const ids = recordSchoolIds(record);
+  if (!ids.length) {
+    if (allowLegacy && isSystemAdmin(state.session)) return;
+    throw new Error('This older record has no school assigned. Ask a system administrator to assign it before editing.');
+  }
+  if (!ids.some(id => allowedSchoolIds().includes(id))) throw new Error('This record belongs to a school outside your access.');
+}
+function requireRecordActiveSchool(record) {
+  requireRecordSchoolAccess(record);
+  if (!recordSchoolIds(record).includes(activeSchoolContext())) throw new Error('Switch to the record’s school before editing it.');
+}
+function recordMatchesActiveSchool(record) {
+  const id = activeSchoolContext();
+  if (!id) return false;
+  return recordSchoolIds(record).includes(id);
+}
 function getSchoolNameById(id) {
   return state.schools.find(s => s.id === id)?.name || "Unknown School";
 }
@@ -3206,16 +3362,15 @@ function renderLeadership() {
       </div>
 
       ${state.leadershipTab === "users" ? `
-        <div class="actions" style="justify-content:flex-start;">
-          <button data-modal="addUser">Add New Teacher/User</button>
-        </div>
-        <div class="name-grid admin-name-grid">
-          ${state.users.length ? state.users.map(u => `
-            <button class="name-button user-admin-button" data-edit-user="${u.uid}" type="button">
-              ${u.profileImageData ? `<img src="${u.profileImageData}" alt="" />` : `<b>${(u.firstName || "?").slice(0,1)}</b>`}
-              <span><strong>${u.firstName} ${u.lastName}</strong><small>${getUserUsedName(u)} · ${u.teamPosition || "No position"} · ${getPrimaryRole(u)}</small></span>
-            </button>
-          `).join("") : `<div class="empty grid-empty">No users yet.</div>`}
+        <div class="vv-users-portals">
+          <section class="vv-users-card"><div class="vv-users-card-head"><span class="vv-users-card-icon">♧</span><div><h3>Family Members</h3><p class="helper">Family accounts and access</p></div></div>
+            <p class="helper">Family account registration is not enabled yet. Family accounts will be managed separately from team members.</p>
+            <span class="vv-users-coming">Coming in a future update</span>
+          </section>
+          <section class="vv-users-card"><div class="vv-users-card-head"><span class="vv-users-card-icon">♙</span><div><h3>Team Members</h3><p class="helper">Employee IDs, roles, and school assignments</p></div></div>
+            <button type="button" data-modal="addUser">+ Add Team Member</button>
+            <div class="vv-users-list">${state.users.filter(u=>u.accountType!=='family').map(u=>`<button type="button" class="vv-users-row" data-edit-user="${u.uid}"><span><strong>${escapeHtml(u.firstName||'')} ${escapeHtml(u.lastName||'')}</strong><small>${escapeHtml(u.teamPosition||'Unassigned')} · ${escapeHtml(getPrimaryRole(u))}</small></span><span class="vv-users-id">${u.employeeId?'ID '+escapeHtml(u.employeeId):'ID needed'}</span></button>`).join('')||'<p class="empty">No team members yet.</p>'}</div>
+          </section>
         </div>
       ` : ""}
 
@@ -3392,6 +3547,7 @@ function renderImportantDatesLeadershipTab() {
     <div class="leadership-data-grid important-dates-layout">
       <form id="importantDateForm" class="mini-form card subtle-card important-date-add-card">
         <h3>Add Important Date</h3>
+        ${schoolContextField()}
         <label>Date<input type="date" name="date" required /></label>
         <label>Description<input name="description" placeholder="Pajama Day, Closed for Holiday, Family Night..." required /></label>
         <label class="check-row"><input type="checkbox" name="includeInVillageVoice" /> Include in Village Voice</label>
@@ -3857,26 +4013,35 @@ function renderPermissionsTab() {
 
 function renderToolsTab() {
   const tools = PERMISSION_TOOLS;
-  return `<div class="tools-admin-wrap">
-    ${tools.map(tool => {
-      const isOpen = state.expandedPermissionToolKey === tool.key;
-      const cfg = getToolConfig(tool.key);
-      return `<div class="permission-tool-accordion ${isOpen ? "open" : ""}">
-        <button type="button" class="permission-tool-summary" data-permission-tool-toggle="${tool.key}">
-          <span><strong>${cfg.name || tool.name}</strong><small>${tool.permissions.length} permission parts · image + access settings</small></span><b>${isOpen ? "−" : "+"}</b>
-        </button>
-        ${isOpen ? `<form class="tool-config-form" data-tool-config-form="${tool.key}">
+  const selected = tools.find(t => t.key === state.expandedPermissionToolKey) || tools[0];
+  if (!state.expandedPermissionToolKey) state.expandedPermissionToolKey = selected.key;
+  const cfg = getToolConfig(selected.key);
+  return `<div class="vv-permissions-page">
+    <div class="vv-permissions-intro"><div><h3>Permissions</h3><p class="helper">Choose a tool on the left to manage visibility, appearance, and role access. Inactive tools are hidden for everyone.</p></div><span class="vv-permissions-count">${tools.filter(t=>isToolActive(t.key)).length} of ${tools.length} active</span></div>
+    <div class="vv-permissions-split">
+      <aside class="vv-permissions-list">
+        <div class="vv-permissions-list-heading">TOOLS <span>${tools.length}</span></div>
+        ${tools.map(tool => `<div class="vv-permissions-list-row ${selected.key===tool.key?'selected':''}">
+          <button type="button" class="vv-permissions-select" data-permission-tool-toggle="${tool.key}"><strong>${escapeHtml(getToolConfig(tool.key).name||tool.name)}</strong><small>${tool.permissions.length} permissions</small></button>
+          <button type="button" class="vv-active-toggle ${isToolActive(tool.key)?'is-active':'is-inactive'}" data-toggle-tool-active="${tool.key}" aria-label="${isToolActive(tool.key)?'Deactivate':'Activate'} ${escapeHtml(tool.name)}" title="${isToolActive(tool.key)?'Deactivate':'Activate'} tool">${isToolActive(tool.key)?'Active':'Off'}</button>
+        </div>`).join("")}
+      </aside>
+      <section class="vv-permissions-detail">
+        <div class="vv-permissions-detail-head"><div><h3>${escapeHtml(cfg.name||selected.name)}</h3><p class="helper">${selected.permissions.length} access controls · ${isToolActive(selected.key)?'Visible to permitted users':'Hidden from all users'}</p></div>
+          <button type="button" class="vv-active-toggle vv-active-toggle-large ${isToolActive(selected.key)?'is-active':'is-inactive'}" data-toggle-tool-active="${selected.key}">${isToolActive(selected.key)?'● Active':'○ Inactive'}</button></div>
+        <form class="tool-config-form" data-tool-config-form="${selected.key}">
           <div class="tool-config-grid">
-            <label>Tool Name<input name="toolName" value="${cfg.name || tool.name}" /></label>
-            <label>Description<input name="toolDescription" value="${cfg.description || ""}" /></label>
-            <label>Tool Image<input name="toolImage" type="file" accept="image/*" data-tool-image-input="${tool.key}" /></label>
+            <label>Tool Name<input name="toolName" value="${escapeHtml(cfg.name||selected.name)}" /></label>
+            <label>Description<input name="toolDescription" value="${escapeHtml(cfg.description||"")}" /></label>
+            <label>Tool Image<input name="toolImage" type="file" accept="image/*" data-tool-image-input="${selected.key}" /></label>
             ${cfg.imageData ? `<img class="tool-config-preview" src="${cfg.imageData}" alt="Tool image" />` : `<div class="tool-config-preview empty">No image</div>`}
           </div>
-          <button type="button" class="small" data-save-tool-config="${tool.key}">Save Tool Settings</button>
+          <button type="button" class="small" data-save-tool-config="${selected.key}">Save Tool Settings</button>
         </form>
-        ${renderToolPermissionBody(tool)}` : ""}
-      </div>`;
-    }).join("")}
+        <div class="vv-permissions-access-head"><h4>Role & Position Access</h4><p class="helper">Grant individual permissions to roles, optionally limited by position.</p></div>
+        ${renderToolPermissionBody(selected)}
+      </section>
+    </div>
   </div>`;
 }
 
@@ -3902,6 +4067,7 @@ async function saveToolConfig(toolKey) {
     name: form?.toolName?.value?.trim() || PERMISSION_TOOLS.find(t=>t.key===toolKey)?.name || toolKey,
     description: form?.toolDescription?.value?.trim() || "",
     imageData: existing.imageData || "",
+    active: existing.active !== false,
     updatedAt: serverTimestamp()
   }, { merge: true });
   await loadAppTools();
@@ -6115,7 +6281,9 @@ function loadIllnessTemplate(id) {
 }
 
 async function addImportantDate(form) {
+  const schoolId = requiredSchoolFromForm(form);
   const payload = {
+    schoolId, schoolIds: [schoolId],
     date: form.date.value,
     description: form.description.value.trim(),
     includeInVillageVoice: !!form.includeInVillageVoice?.checked,
@@ -6130,6 +6298,7 @@ async function updateImportantDate(form) {
   const id = form.dataset.importantDateId;
   const existing = (state.importantDates || []).find(item => item.id === id);
   if (!id || !existing || existing.autoBirthday) throw new Error("That date cannot be edited here.");
+  requireRecordSchoolAccess(existing, { allowLegacy: true });
   const payload = {
     date: form.date.value,
     endDate: form.endDate.value || "",
@@ -6147,6 +6316,8 @@ async function updateImportantDate(form) {
 
 async function deleteImportantDate(id) {
   if (!id) return;
+  const existing = (state.importantDates || []).find(d => d.id === id);
+  requireRecordSchoolAccess(existing, { allowLegacy: true });
   if (!confirm("Delete this important date?")) return;
   await deleteDoc(doc(db, "importantDates", id));
   showToast("Important date deleted.");
@@ -6508,11 +6679,12 @@ async function hideCampusCareLocation(id){ await updateDoc(doc(db,"campusCareLoc
 async function hideCampusCareStatus(id){ await updateDoc(doc(db,"campusCareStatuses",id), { active:false, updatedAt:serverTimestamp() }); await loadCampusCaresAdmin(); }
 async function submitCampusCareRequest(form) {
   const loc = state.campusCareLocations.find(l=>l.id===form.buildingId.value);
-  const schoolIds = getUserSchoolIds(state.session);
+  const schoolId = requiredSchoolFromForm(form);
+  const schoolIds = [schoolId];
   const taskRef = doc(collection(db,"campusCareTasks"));
   const taskPayload = {
     usedName: form.usedName.value.trim(), submittedByUid: state.session.uid, submittedByName: getUserUsedName(state.session),
-    schoolIds, buildingId: form.buildingId.value, buildingName: loc?.building || "", sublocation: form.sublocation.value,
+    schoolId, schoolIds, buildingId: form.buildingId.value, buildingName: loc?.building || "", sublocation: form.sublocation.value,
     taskNeeded: form.taskNeeded.value.trim(), additionalInfo: form.additionalInfo.value.trim(),
     statusId: "", statusName: "", statusColor: "",
     assignedToUids: [], assignedToNames: [], leaderNotes: [], statusUpdates: [], active:true, createdAt: serverTimestamp(), updatedAt: serverTimestamp()
@@ -6527,6 +6699,8 @@ async function submitCampusCareRequest(form) {
 }
 async function updateCampusTaskStatus(taskId, statusId) {
   const task = state.campusCareTasks.find(t=>t.id===taskId);
+  if (!task) throw new Error("Campus Cares request not found.");
+  requireRecordActiveSchool(task);
   const s = getCampusStatus(statusId);
   await updateDoc(doc(db,"campusCareTasks",taskId), { statusId, statusName:s.name, statusColor:s.color, updatedAt: serverTimestamp() });
   if (task?.submittedByUid && task.submittedByUid !== state.session.uid) {
@@ -6539,6 +6713,8 @@ async function updateCampusTaskStatus(taskId, statusId) {
 }
 async function assignCampusTask(taskId, form) {
   const task = state.campusCareTasks.find(t=>t.id===taskId);
+  if (!task) throw new Error("Campus Cares request not found.");
+  requireRecordActiveSchool(task);
   const assignedToUids = Array.from(form.querySelectorAll('input[name="assignedToUids"]:checked')).map(i=>i.value);
   const names = assignedToUids.map(uid => getUserUsedName(state.users.find(u=>u.uid===uid))).filter(Boolean);
   await updateDoc(doc(db,"campusCareTasks",taskId), { assignedToUids, assignedToNames:names, updatedAt: serverTimestamp() });
@@ -6553,6 +6729,7 @@ async function assignCampusTask(taskId, form) {
 }
 async function saveCampusTaskNote(form) {
   const task = state.campusCareTasks.find(t=>t.id===form.taskId.value); if (!task) return;
+  requireRecordActiveSchool(task);
   const now = new Date().toISOString();
   const leaderNotes = [...(task.leaderNotes||[])];
   const statusUpdates = [...(task.statusUpdates||[])];
@@ -6583,24 +6760,208 @@ async function completeNukeCampusCareRequests(password) {
   if (!password) { state.modal = { ...state.modal, error: "Enter your password to delete Campus Cares requests." }; renderCurrentView(); return; }
   await signInWithEmailAndPassword(auth, state.session.fakeEmail, password);
   const snap = await getDocs(collection(db, "campusCareTasks"));
-  await Promise.all(snap.docs.map(d => deleteDoc(doc(db, "campusCareTasks", d.id))));
+  const targetSchool = activeSchoolContext();
+  if (!targetSchool) throw new Error('Select a school before deleting requests.');
+  const scoped = snap.docs.filter(d => recordSchoolIds(d.data()).includes(targetSchool));
+  await Promise.all(scoped.map(d => deleteDoc(doc(db, "campusCareTasks", d.id))));
   state.campusCareTasks = [];
   state.modal = null;
   await loadCampusCareTasks();
-  showToast(`Deleted ${snap.docs.length} Campus Cares request${snap.docs.length === 1 ? "" : "s"}.`);
+  showToast(`Deleted ${scoped.length} Campus Cares request${scoped.length === 1 ? "" : "s"} for ${getSchoolNameById(targetSchool)}.`);
   renderSystemAdmin();
 }
 
+const DISCUSSION_IMAGE_MAX_COUNT = 5;
+const DISCUSSION_IMAGE_MAX_BYTES = 180000;
+const discussionImageCache = new Map();
+async function compressDiscussionImage(file) {
+  if (!file || !file.type.startsWith('image/')) throw new Error('Choose an image file.');
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, 1280/bitmap.width, 720/bitmap.height);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width*scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height*scale));
+    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+    for (const quality of [0.72,0.6,0.48,0.35]) {
+      const data = canvas.toDataURL('image/jpeg',quality);
+      if (Math.ceil(data.length*3/4) <= DISCUSSION_IMAGE_MAX_BYTES) return data;
+    }
+    throw new Error('Image is still too large after compression. Try a different photo.');
+  } finally { bitmap.close(); }
+}
+async function loadDiscussionImages(d) {
+  if (!d) return;
+  const ids = (d.imageIds||[]).slice(0,DISCUSSION_IMAGE_MAX_COUNT);
+  const pending = ids.filter(id=>!discussionImageCache.has(id));
+  await Promise.all(pending.map(async id=>{
+    const snap=await getDoc(doc(db,'campusDiscussionImages',id));
+    if(snap.exists()) discussionImageCache.set(id,snap.data().dataUrl);
+  }));
+}
+// Live camera capture shared by discussions and the App Camera tool.
+// File inputs with capture=environment are only hints and open a file picker on many desktops.
+let vvLiveCameraStream = null;
+function closeVvLiveCamera() {
+  const overlay = document.getElementById('vv-live-camera-overlay');
+  if (vvLiveCameraStream) vvLiveCameraStream.getTracks().forEach(track => track.stop());
+  vvLiveCameraStream = null;
+  overlay?.remove();
+}
+async function openVvLiveCamera(destination) {
+  closeVvLiveCamera();
+  if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
+    showToast('Live camera requires HTTPS or localhost and a browser with camera support.');
+    return;
+  }
+  const overlay = document.createElement('div');
+  overlay.id = 'vv-live-camera-overlay';
+  overlay.className = 'vv-live-camera-overlay';
+  overlay.innerHTML = `<section class="vv-live-camera-dialog" role="dialog" aria-modal="true" aria-label="Take a photo"><header><h3>Take a Photo</h3><button type="button" class="secondary" data-vv-camera-close>✕ Close</button></header><video autoplay playsinline muted aria-label="Live camera preview"></video><p class="helper" data-vv-camera-status>Connecting to camera…</p><div class="vv-live-camera-actions"><button type="button" data-vv-camera-capture disabled>📷 Capture Photo</button><button type="button" class="secondary" data-vv-camera-switch hidden>Switch Camera</button></div></section>`;
+  document.body.appendChild(overlay);
+  const video = overlay.querySelector('video');
+  const status = overlay.querySelector('[data-vv-camera-status]');
+  const capture = overlay.querySelector('[data-vv-camera-capture]');
+  let facing = 'environment';
+  const connect = async () => {
+    if (vvLiveCameraStream) vvLiveCameraStream.getTracks().forEach(t => t.stop());
+    vvLiveCameraStream = null;
+    capture.disabled = true;
+    try {
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing}},audio:false}); }
+      catch (err) { if (err.name === 'OverconstrainedError') stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false}); else throw err; }
+      if (!overlay.isConnected) { stream.getTracks().forEach(t=>t.stop()); return; }
+      vvLiveCameraStream = stream;
+      video.srcObject = stream;
+      await video.play();
+      status.textContent = 'Position your camera, then capture.';
+      capture.disabled = false;
+      overlay.querySelector('[data-vv-camera-switch]').hidden = false;
+    } catch (err) {
+      console.error('Camera access failed:',err);
+      status.textContent = err.name === 'NotAllowedError' ? 'Camera permission denied. Allow camera access in your browser and try again.' : 'Camera unavailable. Check that a camera is connected and not in use by another application.';
+    }
+  };
+  overlay.querySelector('[data-vv-camera-close]').addEventListener('click', closeVvLiveCamera);
+  overlay.querySelector('[data-vv-camera-switch]').addEventListener('click', () => { facing = facing === 'environment' ? 'user' : 'environment'; connect(); });
+  capture.addEventListener('click', async () => {
+    if (!video.videoWidth || !video.videoHeight) { status.textContent='Waiting for camera video…'; return; }
+    capture.disabled=true;
+    const canvas=document.createElement('canvas');
+    const scale=Math.min(1,1280/video.videoWidth,720/video.videoHeight);
+    canvas.width=Math.max(1,Math.round(video.videoWidth*scale));
+    canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+    canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.78));
+    if (!blob) { status.textContent='Could not capture image. Try again.';capture.disabled=false;return; }
+    const file=new File([blob],`camera-${Date.now()}.jpg`,{type:'image/jpeg'});
+    closeVvLiveCamera();
+    try {
+      showAppLoading('Saving captured photo…');
+      if (destination==='gallery') {
+        const form=document.getElementById('appGalleryUploadForm');
+        if (!form) throw Error('Gallery form is no longer available.');
+        const transfer=new DataTransfer();transfer.items.add(file);
+        form.elements.namedItem('camera').files=transfer.files;
+        await saveAppGalleryPhotos(form);
+      } else {
+        const form=document.getElementById('campusDiscussionImagesForm');
+        if (!form) throw Error('Discussion is no longer open.');
+        const transfer=new DataTransfer();transfer.items.add(file);
+        form.elements.namedItem('cameraImages').files=transfer.files;
+        await saveDiscussionImages(form);
+      }
+    } catch(err) {console.error('Captured photo save failed:',err);showToast(err.message||'Could not save captured photo.');}
+    finally {hideAppLoading();}
+  });
+  await connect();
+}
+const appGalleryCache = { items:[], loadedSchool:'', selectedAlbum:'All' };
+async function loadAppGallery() {
+  const school=activeSchoolContext();
+  if(!school) {appGalleryCache.items=[];return;}
+  const snap=await getDocs(collection(db,'appGalleryImages'));
+  appGalleryCache.items=snap.docs.map(x=>({id:x.id,...x.data()})).filter(x=>x.schoolId===school).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+  appGalleryCache.loadedSchool=school;
+}
+function galleryAlbums(){return ['All',...new Set(appGalleryCache.items.map(x=>x.album||'General'))].filter(x=>x!=='All').sort();}
+function renderGalleryTiles(picker=false) {
+  const items=appGalleryCache.items.filter(x=>appGalleryCache.selectedAlbum==='All'||(x.album||'General')===appGalleryCache.selectedAlbum);
+  return items.map(x=>`<article class="vv-gallery-tile"><img src="${x.dataUrl}" alt="Gallery photo" loading="lazy"><div class="vv-gallery-tile-footer"><span>${escapeHtml(x.album||'General')}</span>${picker?`<button type="button" class="small" data-gallery-use="${x.id}">Use Photo</button>`:`<button type="button" class="danger small" data-gallery-delete="${x.id}">Delete</button>`}</div>${!picker?`<label class="vv-gallery-move">Move to album<input data-gallery-album="${x.id}" value="${escapeHtml(x.album||'General')}" maxlength="45" placeholder="Album name"><button type="button" class="small secondary" data-gallery-move="${x.id}">Move</button></label>`:''}</article>`).join('')||'<p class="helper">No photos in this album.</p>';
+}
+function renderDiscussionGalleryPicker(d){return `<div class="vv-gallery-picker"><div class="vv-gallery-picker-head"><strong>Choose from App Gallery</strong><button type="button" class="secondary small" data-gallery-picker-close>Close</button></div><p class="helper">Choose a saved photo to attach a separate copy. The gallery original stays available after completion.</p><div class="vv-gallery-grid">${renderGalleryTiles(true)}</div></div>`;}
+function renderAppCamera(){
+  state.currentView='appCamera';
+  $app.innerHTML=pageShell(`<section class="card vv-gallery-page"><div class="tool-heading-row"><div><h2>App Camera</h2><p class="helper">Capture and organize photos for ${escapeHtml(getSchoolNameById(activeSchoolContext()))}. Images are compressed before saving.</p></div>${allowedSchoolIds().length>1?`<select data-gallery-school>${allowedSchoolIds().map(id=>`<option value="${escapeHtml(id)}" ${activeSchoolContext()===id?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select>`:''}</div><div class="vv-photo-actions"><button type="button" data-gallery-capture="camera">📷 Take Photo</button><button type="button" class="secondary" data-gallery-capture="files">＋ Add Photos</button><span class="helper">${appGalleryCache.items.length} saved photos</span><span class="helper" data-gallery-file-count></span></div><form id="appGalleryUploadForm" class="vv-gallery-upload"><input type="file" name="camera" accept="image/*" capture="environment"><input type="file" name="files" accept="image/*" multiple><label>Album <input name="album" maxlength="45" value="General" placeholder="General"></label><button type="submit">Save Photos</button></form><div class="vv-gallery-filter"><label>Album <select data-gallery-filter>${galleryAlbums().map(a=>`<option ${appGalleryCache.selectedAlbum===a?'selected':''}>${escapeHtml(a)}</option>`).join('')}</select></label></div><div class="vv-gallery-grid">${renderGalleryTiles()}</div>${state.galleryDeleteConfirm?`<div class="vv-gallery-delete-confirm" role="group"><strong>Delete this photo permanently?</strong><p>This removes it from the App Gallery. Existing discussion attachments are separate.</p><div class="actions"><button type="button" class="danger" data-gallery-delete-confirm="${state.galleryDeleteConfirm}">Delete Photo</button><button type="button" class="secondary" data-gallery-delete-cancel>Cancel</button></div></div>`:''}</section>${state.toast?`<div class="toast">${state.toast}</div>`:''}`);
+}
+async function saveAppGalleryPhotos(form){
+ const schoolId=activeSchoolContext();if(!schoolId)throw Error('Choose a school first.');
+ const files=[...Array.from(form.camera.files||[]),...Array.from(form.files.files||[])];if(!files.length)throw Error('Select or take a photo first.');
+ if(files.length>12)throw Error('Upload up to 12 photos at once.');
+ const album=String(form.album.value||'General').trim().slice(0,45)||'General';
+ for(const file of files){const dataUrl=await compressDiscussionImage(file);await setDoc(doc(collection(db,'appGalleryImages')),{schoolId,album,dataUrl,createdByUid:state.session.uid,createdAt:serverTimestamp()});}
+ await loadAppGallery();renderAppCamera();showToast(`${files.length} photo(s) saved to ${album}.`);
+}
+async function useGalleryPhoto(id){
+ const d=state.campusCareDiscussions.find(x=>x.id===state.discussionGalleryPicker);requireRecordActiveSchool(d);
+ const img=appGalleryCache.items.find(x=>x.id===id&&x.schoolId===recordSchoolIds(d)[0]);if(!img)throw Error('Photo is not available for this school.');
+ if((d.imageIds||[]).length>=DISCUSSION_IMAGE_MAX_COUNT)throw Error('Discussion has reached the photo limit.');
+ const ref=doc(collection(db,'campusDiscussionImages'));
+ await setDoc(ref,{discussionId:d.id,schoolId:img.schoolId,dataUrl:img.dataUrl,createdByUid:state.session.uid,createdAt:serverTimestamp()});
+ try{await updateDoc(doc(db,'campusCareDiscussions',d.id),{imageIds:[...(d.imageIds||[]),ref.id],updatedAt:serverTimestamp()});}catch(e){await deleteDoc(ref);throw e;}
+ discussionImageCache.set(ref.id,img.dataUrl);state.discussionGalleryPicker='';await loadCampusCareDiscussions();renderCampusCaresTool();showToast('Photo attached from gallery.');
+}
+async function saveDiscussionImages(form) {
+  const d=state.campusCareDiscussions.find(x=>x.id===form.discussionId.value);
+  requireRecordActiveSchool(d);
+  if (d.completedAt) throw new Error('Completed discussions cannot accept new images.');
+  const files=[...Array.from(form.images.files||[]),...Array.from(form.cameraImages?.files||[])];
+  if(!files.length) throw new Error('Select one or more photos.');
+  const oldIds=d.imageIds||[];
+  if(oldIds.length+files.length>DISCUSSION_IMAGE_MAX_COUNT) throw new Error(`Up to ${DISCUSSION_IMAGE_MAX_COUNT} photos per discussion.`);
+  const compressed=await Promise.all(files.map(compressDiscussionImage));
+  const ids=[];
+  try {
+    for(const dataUrl of compressed) {
+      const ref=doc(collection(db,'campusDiscussionImages'));
+      await setDoc(ref,{ discussionId:d.id, schoolId:recordSchoolIds(d)[0], dataUrl, createdByUid:state.session.uid, createdAt:serverTimestamp() });
+      ids.push(ref.id);discussionImageCache.set(ref.id,dataUrl);
+    }
+    await updateDoc(doc(db,'campusCareDiscussions',d.id),{imageIds:[...oldIds,...ids],updatedAt:serverTimestamp()});
+  } catch(err) {
+    await Promise.allSettled(ids.map(id=>deleteDoc(doc(db,'campusDiscussionImages',id))));
+    throw err;
+  }
+  await loadCampusCareDiscussions();state.activeCampusDiscussionId=d.id;renderCampusCaresTool();showToast(`${ids.length} photo(s) added.`);
+}
+async function completeCampusDiscussion(id) {
+  const d=state.campusCareDiscussions.find(x=>x.id===id);
+  requireRecordActiveSchool(d);
+  if(d.completedAt) return;
+
+  // First mark completed. Keep image IDs until every delete succeeds, so cleanup can be retried.
+  await updateDoc(doc(db,'campusCareDiscussions',id),{completedAt:new Date().toISOString(),completedByUid:state.session.uid,updatedAt:serverTimestamp()});
+  const ids=d.imageIds||[];
+  const results=await Promise.allSettled(ids.map(x=>deleteDoc(doc(db,'campusDiscussionImages',x))));
+  const failed=ids.filter((_,i)=>results[i].status==='rejected');
+  await updateDoc(doc(db,'campusCareDiscussions',id),{imageIds:failed,imagesCleanupPending:failed.length>0,updatedAt:serverTimestamp()});
+  ids.filter(id=>!failed.includes(id)).forEach(id=>discussionImageCache.delete(id));
+  await loadCampusCareDiscussions();state.activeCampusDiscussionId='';renderCampusCaresTool();
+  showToast(failed.length?'Discussion completed, but some photos could not be deleted. Contact an administrator.':'Discussion completed and photos deleted.');
+}
+
 async function saveCampusDiscussion(form) {
-  const schoolIds = getUserSchoolIds(state.session);
+  const schoolId = requiredSchoolFromForm(form);
+  const schoolIds = [schoolId];
   const discussionRef = doc(collection(db,"campusCareDiscussions"));
   await setDoc(discussionRef, {
     title: form.title.value.trim(),
     description: form.description.value.trim(),
-    schoolIds,
+    schoolId, schoolIds,
     createdByUid: state.session.uid,
     createdByName: getUserUsedName(state.session),
-    notes: [], proposedSolution: "", approved:false, approvedByUid:"", approvedByName:"", approvedAt:"",
+    notes: [], imageIds:[], completedAt:"", proposedSolution: "", approved:false, approvedByUid:"", approvedByName:"", approvedAt:"",
     active:true, createdAt:serverTimestamp(), updatedAt:serverTimestamp()
   });
   await loadCampusCareDiscussions();
@@ -6613,6 +6974,7 @@ async function saveCampusDiscussion(form) {
 
 async function saveCampusDiscussionNote(form) {
   const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
+  requireRecordActiveSchool(discussion);
   const text = form.note.value.trim(); if(!text) return;
   const notes = [...(discussion.notes||[]), { text, byUid:state.session.uid, byName:getUserUsedName(state.session), at:new Date().toISOString() }];
   await updateDoc(doc(db,"campusCareDiscussions",discussion.id), { notes, updatedAt:serverTimestamp() });
@@ -6623,6 +6985,7 @@ async function saveCampusDiscussionNote(form) {
 
 async function saveCampusDiscussionSolution(form) {
   const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
+  requireRecordActiveSchool(discussion);
   await updateDoc(doc(db,"campusCareDiscussions",discussion.id), { proposedSolution: form.proposedSolution.value.trim(), updatedAt:serverTimestamp() });
   await loadCampusCareDiscussions();
   state.activeCampusDiscussionId = discussion.id;
@@ -6631,25 +6994,28 @@ async function saveCampusDiscussionSolution(form) {
 }
 
 async function approveCampusDiscussion(id) {
+  requireRecordActiveSchool(state.campusCareDiscussions.find(d=>d.id===id));
   await updateDoc(doc(db,"campusCareDiscussions",id), { approved:true, approvedByUid:state.session.uid, approvedByName:getUserUsedName(state.session), approvedAt:new Date().toISOString(), updatedAt:serverTimestamp() });
   await loadCampusCareDiscussions(); state.activeCampusDiscussionId=id; renderCampusCaresTool(); showToast("Solution approved.");
 }
 
 async function removeCampusDiscussion(form) {
   const id = form.discussionId.value;
+  requireRecordActiveSchool(state.campusCareDiscussions.find(d=>d.id===id));
   await updateDoc(doc(db,"campusCareDiscussions",id), { active:false, removedAt:new Date().toISOString(), removedByUid:state.session.uid, removedByName:getUserUsedName(state.session), removalReason:form.reason.value.trim(), updatedAt:serverTimestamp() });
   state.modal=null; state.activeCampusDiscussionId=""; await loadCampusCareDiscussions(); renderCampusCaresTool(); showToast("Discussion removed.");
 }
 
 async function createCampusTaskFromDiscussion(form) {
   const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
+  requireRecordActiveSchool(discussion);
   const loc = state.campusCareLocations.find(l=>l.id===form.buildingId.value);
   const taskRef = doc(collection(db,"campusCareTasks"));
   const leaderNotes = (discussion.notes||[]).map(n=>({ ...n, text:`Discussion note: ${n.text||""}` }));
   if (discussion.proposedSolution) leaderNotes.push({ text:`Proposed solution: ${discussion.proposedSolution}`, byUid:discussion.approvedByUid||state.session.uid, byName:discussion.approvedByName||getUserUsedName(state.session), at:new Date().toISOString() });
   await setDoc(taskRef, {
     usedName: discussion.createdByName || getUserUsedName(state.session), submittedByUid: discussion.createdByUid || state.session.uid, submittedByName: discussion.createdByName || getUserUsedName(state.session),
-    schoolIds: discussion.schoolIds || getUserSchoolIds(state.session), buildingId: form.buildingId.value, buildingName: loc?.building || "", sublocation: form.sublocation.value,
+    schoolId: recordSchoolIds(discussion)[0], schoolIds: [recordSchoolIds(discussion)[0]], buildingId: form.buildingId.value, buildingName: loc?.building || "", sublocation: form.sublocation.value,
     taskNeeded: form.taskNeeded.value.trim(), additionalInfo: form.additionalInfo.value.trim(), statusId:"", statusName:"", statusColor:"",
     assignedToUids: [], assignedToNames: [], leaderNotes, statusUpdates: [], sourceDiscussionId: discussion.id, active:true, createdAt:serverTimestamp(), updatedAt:serverTimestamp()
   });
@@ -6674,11 +7040,11 @@ function renderCampusCaresTool(){
   if(!tabs.length) tabs.push(['submitted','Tasks I Have Submitted']);
   if(!tabs.some(t=>t[0]===state.campusCaresTab)) state.campusCaresTab=tabs[0][0];
   const submitButton = canSubmit ? `<button type="button" data-open-campus-submit>Submit a Request</button>` : "";
-  $app.innerHTML=pageShell(`<section class="card"><div class="tool-heading-row"><h2>Campus Cares</h2>${submitButton}</div><div class="nav-tabs">${tabs.map(([k,l])=>`<button class="${state.campusCaresTab===k?'active':''}" data-campus-tab="${k}">${l}</button>`).join('')}</div>${state.campusCaresTab==='discussions'?renderCampusDiscussionsTab(canManage):renderCampusCareTable(state.campusCaresTab,canManage)}</section>${state.modal?renderModal():""}${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
+  $app.innerHTML=pageShell(`<section class="card"><div class="tool-heading-row"><h2>Campus Cares</h2>${allowedSchoolIds().length>1?`<label class="campus-school-picker">School <select data-campus-school-switch>${allowedSchoolIds().map(id=>`<option value="${escapeHtml(id)}" ${id===activeSchoolContext()?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select></label>`:`<span class="helper">${escapeHtml(getSchoolNameById(activeSchoolContext()))}</span>`}${submitButton}</div><div class="nav-tabs">${tabs.map(([k,l])=>`<button class="${state.campusCaresTab===k?'active':''}" data-campus-tab="${k}">${l}</button>`).join('')}</div>${state.campusCaresTab==='discussions'?renderCampusDiscussionsTab(canManage):renderCampusCareTable(state.campusCaresTab,canManage)}</section>${state.modal?renderModal():""}${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
 }
 function renderCampusCareSubmitForm(){
   const u=state.session||{}; const defaultBuilding=u.defaultCampusCareBuildingId||""; const loc=state.campusCareLocations.find(l=>l.id===defaultBuilding)||state.campusCareLocations[0]; const defaultSub=u.defaultCampusCareSublocation||"";
-  return `<form id="campusCareRequestForm" class="stack"><label>Used Name<input name="usedName" required value="${escapeHtml(getUserUsedName(u))}"></label><div class="grid two"><label>Building<select name="buildingId" data-campus-building required>${state.campusCareLocations.map(l=>`<option value="${l.id}" ${loc?.id===l.id?'selected':''}>${escapeHtml(l.building)}</option>`).join('')}</select></label><label>Sublocation<select name="sublocation" data-campus-sublocation required>${(loc?.sublocations||[]).map(sl=>`<option ${defaultSub===sl?'selected':''}>${escapeHtml(sl)}</option>`).join('')}</select></label></div><label>Task Needed<input name="taskNeeded" required maxlength="160" placeholder="What needs to be done?"></label><label>Additional Information <input name="additionalInfo" maxlength="240" placeholder="Optional details"></label><button>Submit Request</button></form>`;
+  return `<form id="campusCareRequestForm" class="stack">${schoolContextField()}<label>Used Name<input name="usedName" required value="${escapeHtml(getUserUsedName(u))}"></label><div class="grid two"><label>Building<select name="buildingId" data-campus-building required>${state.campusCareLocations.map(l=>`<option value="${l.id}" ${loc?.id===l.id?'selected':''}>${escapeHtml(l.building)}</option>`).join('')}</select></label><label>Sublocation<select name="sublocation" data-campus-sublocation required>${(loc?.sublocations||[]).map(sl=>`<option ${defaultSub===sl?'selected':''}>${escapeHtml(sl)}</option>`).join('')}</select></label></div><label>Task Needed<input name="taskNeeded" required maxlength="160" placeholder="What needs to be done?"></label><label>Additional Information <input name="additionalInfo" maxlength="240" placeholder="Optional details"></label><button>Submit Request</button></form>`;
 }
 function campusTasksForTab(tab){ let tasks=state.campusCareTasks.filter(t=>t.active!==false).filter(t=>campusTaskInUserScope(t)); if(tab==='submitted') tasks=tasks.filter(t=>t.submittedByUid===state.session.uid&&!isCampusCompleted(t)); if(tab==='assigned') tasks=tasks.filter(t=>(t.assignedToUids||[]).includes(state.session.uid)&&!isCampusCompleted(t)); if(tab==='all') tasks=tasks.filter(t=>!isCampusCompleted(t)); if(tab==='completed') tasks=tasks.filter(isCampusCompleted); return tasks; }
 function campusStatusDisplay(t) { const updates = campusNoteList(t.statusUpdates||[]); if (!updates.length) return `<span class="muted">No status update yet.</span>`; const latest=updates[updates.length-1]; return `<div class="inline-status-update"><strong>${escapeHtml(latest.byName||'Status')}</strong> <small>${campusShortStamp(latest.at)}</small><p>${escapeHtml(latest.text||'')}</p></div>`; }
@@ -6686,15 +7052,22 @@ function renderCampusCareTable(tab,canManage){ const tasks=campusTasksForTab(tab
 function renderCampusCareRow(t,canManage){ const st=getCampusStatus(t.statusId); const statusCell = canManage ? `<select data-campus-status-change="${t.id}"><option value="" ${!t.statusId?'selected':''}>No status</option>${state.campusCareStatuses.map(s=>`<option value="${s.id}" ${s.id===t.statusId?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}</select>` : escapeHtml(st.name || ""); const assignCell = canManage ? `<button type="button" class="small secondary" data-campus-assign="${t.id}">Assign (${(t.assignedToNames||[]).length})</button>` : escapeHtml((t.assignedToNames||[]).join(', ')); return `<tr style="background:${st.color||t.statusColor||''}"><td>${statusCell}</td><td>${campusDate(t.createdAt)}<br><small>${campusTime(t.createdAt)}</small></td><td>${escapeHtml(t.usedName||t.submittedByName||'')}</td><td>${escapeHtml(`${t.buildingName||''}, ${t.sublocation||''}`)}</td><td>${escapeHtml(t.taskNeeded||'')}</td><td>${escapeHtml(t.additionalInfo||'')}</td><td>${campusStatusDisplay(t)}${canManage?`<button type="button" class="small secondary" data-campus-notes="${t.id}">Notes / Status</button>`:''}</td><td>${assignCell}</td></tr>`; }
 
 function renderCampusDiscussionsTab(canManage) {
-  const discussions = activeCampusDiscussions();
-  const active = discussions.find(d=>d.id===state.activeCampusDiscussionId) || discussions[0];
-  const list = discussions.map(d=>`<button type="button" class="discussion-list-item ${active?.id===d.id?'active':''}" data-open-campus-discussion="${d.id}"><strong>${escapeHtml(d.title||'Discussion')}</strong><small>${escapeHtml(d.description||'')}</small>${d.approved?'<span class="pill good">Approved</span>':''}</button>`).join('') || '<div class="empty">No discussions yet.</div>';
-  return `<div class="campus-discussions"><aside class="discussion-list"><div class="tool-heading-row"><h3>Ongoing Discussions</h3><button type="button" class="small" data-modal="addCampusDiscussion">Add Discussion</button></div>${list}</aside><main class="discussion-detail">${active?renderCampusDiscussionDetail(active,canManage):'<div class="empty">Add a discussion to start talking through ideas and possible solutions.</div>'}</main></div>`;
+  const discussions=activeCampusDiscussions();
+  const active=discussions.find(d=>d.id===state.activeCampusDiscussionId)||discussions[0];
+  const list=discussions.map(d=>`<button type="button" class="vv-discussion-item ${active?.id===d.id?'selected':''}" data-open-campus-discussion="${d.id}"><span class="vv-discussion-item-title">${escapeHtml(d.title||'Discussion')}</span><span class="vv-discussion-item-meta">${escapeHtml(getSchoolNameById(d.schoolId||(d.schoolIds||[])[0]))}${(d.imageIds||[]).length?' · 📷 '+d.imageIds.length:''}</span><span class="vv-discussion-item-desc">${escapeHtml(d.description||'')}</span></button>`).join('')||'<div class="empty">No open discussions at this school.</div>';
+  return `<div class="vv-discussion-layout"><aside class="vv-discussion-sidebar"><div class="vv-discussion-sidebar-head"><h3>Ongoing Discussions</h3><button type="button" class="small" data-modal="addCampusDiscussion">+ Add</button></div><div class="vv-discussion-items">${list}</div></aside><main class="vv-discussion-main">${active?renderCampusDiscussionDetail(active,canManage):'<div class="vv-discussion-empty">Select a discussion or add a new one to get started.</div>'}</main></div>`;
 }
-function renderCampusDiscussionDetail(d, canManage) {
-  const notes = campusNoteList(d.notes||[]);
-  const bubble = n => `<div class="chat-note ${n.byUid===state.session.uid?'mine':'theirs'}"><div class="chat-note-line"><strong>${escapeHtml(n.byName||'')}</strong><small>${campusShortStamp(n.at)}</small><span>${escapeHtml(n.text||'')}</span></div></div>`;
-  return `<div class="discussion-panel"><div class="tool-heading-row"><div><h3>${escapeHtml(d.title||'Discussion')}</h3><p class="helper">${escapeHtml(d.description||'')}</p></div>${d.approved?`<span class="pill good">Approved by ${escapeHtml(d.approvedByName||'leader')}</span>`:''}</div><div class="chat-thread discussion-chat">${notes.map(bubble).join('')||'<p class="empty">No notes yet.</p>'}</div><form id="campusDiscussionNoteForm" class="chat-input-row"><input type="hidden" name="discussionId" value="${d.id}"><input name="note" placeholder="Add a note..." autocomplete="off" required><button>Add</button></form><form id="campusDiscussionSolutionForm" class="stack proposed-solution-box"><input type="hidden" name="discussionId" value="${d.id}"><label>Proposed Solution<textarea name="proposedSolution" rows="3">${escapeHtml(d.proposedSolution||'')}</textarea></label><div class="actions"><button type="submit">Save Proposed Solution</button>${canManage?`<button type="button" class="secondary" data-approve-campus-discussion="${d.id}">Approve</button><button type="button" class="secondary" data-convert-campus-discussion="${d.id}">Make Campus Cares Task</button><button type="button" class="danger" data-remove-campus-discussion="${d.id}">Remove</button>`:''}</div></form></div>`;
+function renderCampusDiscussionDetail(d,canManage) {
+  const notes=campusNoteList(d.notes||[]);
+  const bubble=n=>`<div class="chat-note ${n.byUid===state.session.uid?'mine':'theirs'}"><div class="chat-note-line"><strong>${escapeHtml(n.byName||'')}</strong><small>${campusShortStamp(n.at)}</small><span>${escapeHtml(n.text||'')}</span></div></div>`;
+  const images=(d.imageIds||[]).map(id=>discussionImageCache.get(id)?`<a href="${discussionImageCache.get(id)}" target="_blank" rel="noopener" title="Open full image"><img loading="lazy" src="${discussionImageCache.get(id)}" alt="Discussion attachment"></a>`:'<span class="helper">Photo loading…</span>').join('');
+  const confirmBox=state.confirmCompleteDiscussionId===d.id?`<div class="vv-discussion-confirm" role="group" aria-label="Confirm completion"><strong>Complete this discussion?</strong><span>Attached discussion photos will be permanently deleted. Gallery originals are kept.</span><div class="actions"><button type="button" class="danger small" data-confirm-discussion-complete="${d.id}">Yes, complete & delete attachments</button><button type="button" class="secondary small" data-cancel-discussion-complete>Cancel</button></div></div>`:'';
+  return `<div class="vv-discussion-detail"><div class="vv-discussion-titlebar"><div><span class="vv-discussion-school">${escapeHtml(getSchoolNameById(recordSchoolIds(d)[0]))}</span><h3>${escapeHtml(d.title||'Discussion')}</h3><p>${escapeHtml(d.description||'')}</p></div>${canManage?`<button type="button" class="vv-discussion-complete" data-complete-campus-discussion="${d.id}">✓ Mark Completed</button>`:''}</div>
+    ${confirmBox}
+    ${d.approved?`<p class="pill good">Approved by ${escapeHtml(d.approvedByName||'leader')}</p>`:''}
+    <section class="vv-discussion-section"><h4>Photos <small>${(d.imageIds||[]).length}/${DISCUSSION_IMAGE_MAX_COUNT}</small></h4>${images?`<div class="vv-discussion-photos">${images}</div>`:'<p class="helper">No photos attached yet.</p>'}<div class="vv-photo-actions"><button type="button" class="secondary small" data-discussion-photo-source="camera">📷 Camera</button><button type="button" class="secondary small" data-discussion-photo-source="files">＋ Upload</button><button type="button" class="secondary small" data-discussion-photo-source="gallery">▦ App Gallery</button></div><form id="campusDiscussionImagesForm" class="vv-discussion-upload vv-hidden-upload"><input type="hidden" name="discussionId" value="${d.id}"><input type="file" name="images" accept="image/*" multiple><input type="file" name="cameraImages" accept="image/*" capture="environment"><button type="submit" class="secondary small">Add Photos</button></form>${state.discussionGalleryPicker===d.id?renderDiscussionGalleryPicker(d):''}</section>
+    <section class="vv-discussion-section"><h4>Discussion Notes</h4><div class="chat-thread discussion-chat">${notes.map(bubble).join('')||'<p class="helper">No notes yet.</p>'}</div><form id="campusDiscussionNoteForm" class="chat-input-row"><input type="hidden" name="discussionId" value="${d.id}"><input name="note" placeholder="Add a note…" autocomplete="off" required><button>Add</button></form></section>
+    <section class="vv-discussion-section"><h4>Proposed Solution</h4><form id="campusDiscussionSolutionForm" class="stack"><input type="hidden" name="discussionId" value="${d.id}"><textarea name="proposedSolution" rows="3" placeholder="What would help resolve this?">${escapeHtml(d.proposedSolution||'')}</textarea><div class="actions"><button type="submit">Save Solution</button>${canManage?`<button type="button" class="secondary" data-approve-campus-discussion="${d.id}">Approve</button><button type="button" class="secondary" data-convert-campus-discussion="${d.id}">Make Campus Cares Task</button><button type="button" class="danger" data-remove-campus-discussion="${d.id}">Remove</button>`:''}</div></form></section></div>`;
 }
 
 function renderSystemAdmin() {
@@ -6712,7 +7085,7 @@ function renderSystemAdmin() {
         <button class="${state.adminTab === "schools" ? "active" : ""}" data-tab="schools">Schools</button>
         <button class="${state.adminTab === "positions" ? "active" : ""}" data-tab="positions">Positions</button>
         <button class="${state.adminTab === "roles" ? "active" : ""}" data-tab="roles">Roles</button>
-        <button class="${state.adminTab === "tools" ? "active" : ""}" data-tab="tools">Tools</button>
+        <button class="${state.adminTab === "tools" ? "active" : ""}" data-tab="tools">Permissions</button>
         <button class="${state.adminTab === "moneyRequests" ? "active" : ""}" data-tab="moneyRequests">Money Requests</button>
         <button class="${state.adminTab === "campusCares" ? "active" : ""}" data-tab="campusCares">Campus Cares</button>
         <button class="${state.adminTab === "notifications" ? "active" : ""}" data-tab="notifications">Notifications</button>
@@ -7088,7 +7461,7 @@ if (state.modal.type === "addMoneyRequestType" || state.modal.type === "editMone
   }
 
   if (state.modal.type === "addCampusDiscussion") {
-    return `<div class="modal-backdrop"><form class="modal card" id="campusDiscussionForm"><h2>Add Ongoing Discussion</h2><p class="helper">Use this for ongoing issues, recurring conversations, or recommendations that need discussion before becoming a task.</p><label>Short Description / Title<input name="title" required maxlength="120" placeholder="Example: Playground pickup flow"></label><label>Details<textarea name="description" rows="4" required placeholder="What should we talk through?"></textarea></label><div class="actions"><button>Add Discussion</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+    return `<div class="modal-backdrop"><form class="modal card" id="campusDiscussionForm"><h2>Add Ongoing Discussion</h2>${schoolContextField()}<p class="helper">Use this for ongoing issues, recurring conversations, or recommendations that need discussion before becoming a task.</p><label>Short Description / Title<input name="title" required maxlength="120" placeholder="Example: Playground pickup flow"></label><label>Details<textarea name="description" rows="4" required placeholder="What should we talk through?"></textarea></label><div class="actions"><button>Add Discussion</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
   }
   if (state.modal.type === "removeCampusDiscussion") {
     const d = state.modal.discussion || {};
@@ -7175,6 +7548,7 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
           <label>Last Name <input name="lastName" required value="${u.lastName || ""}" /></label>
         </div>
         <label>Used Name <input name="usedName" placeholder="What should people call this person?" value="${u.usedName || ""}" /></label>
+        <label>Employee ID <input name="employeeId" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="24" value="${escapeHtml(u.employeeId||'')}" placeholder="Clock-in number (any length)" required></label>
         <label>Team Position
           <select name="teamPosition" required>
             ${positionOptions.map(name => `<option value="${escapeHtml(name)}" ${(u.teamPosition || "Unassigned") === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}
@@ -7222,6 +7596,7 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
           <label>Last Name <input name="lastName" required /></label>
         </div>
         <label>Used Name <input name="usedName" placeholder="What should people call this person?" /></label>
+        <label>Employee ID <input name="employeeId" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="24" placeholder="Clock-in number (any length)" required></label>
         <div>
           <strong>Locations</strong>
           <div class="grid two" style="margin-top:.5rem;">
@@ -8666,6 +9041,7 @@ async function loadCurriculumData(force=false) {
   state.curriculumLoadedAt = Date.now();
 }
 async function openCurriculum() {
+  if (!canOpenTool(state.session, "curriculum")) { renderHome(); return; }
   state.curriculumTab = state.curriculumTab || "weeklyThemes";
   await withAppLoading("Opening Curriculum...", async()=> {
     await Promise.all([loadWeeklyThemes(),loadCurriculumData(true)]);
@@ -8921,6 +9297,7 @@ function renderCurrentView() {
     return;
   }
 
+  if (state.currentView === "appCamera") {renderAppCamera();return;}
   if (state.currentView === "profile") {
     renderProfileHome();
     return;
@@ -8996,6 +9373,15 @@ $app.addEventListener("input", async (e) => {
 });
 
 $app.addEventListener("change", async (e) => {
+  if (e.target.matches('[data-campus-school-switch]')) {
+    if (!allowedSchoolIds().includes(e.target.value)) return;
+    state.selectedSchoolId = e.target.value;
+    saveLastSelectedSchool(state.selectedSchoolId);
+    state.activeCampusDiscussionId = '';
+    renderCampusCaresTool();
+    return;
+  }
+
   if (e.target.matches("[data-photo-print-upload]")) { await addPhotoPrintFiles(e.target.files); e.target.value = ""; return; }
   if (e.target.matches("[data-photo-text-prop]")) {
     const t = getSelectedPhotoPrintText();
@@ -9320,7 +9706,27 @@ $app.addEventListener("change", async (e) => {
   }
 });
 
+$app.addEventListener('change', async e=>{
+ if(e.target.matches('#campusDiscussionImagesForm input[type="file"]')&&e.target.files?.length){const form=e.target.closest('form');try{showAppLoading('Compressing and attaching photos...');await saveDiscussionImages(form);}catch(err){console.error(err);showToast(err.message||'Photo upload failed.');}finally{hideAppLoading();}}
+ if(e.target.matches('#appGalleryUploadForm input[type="file"]')){const label=document.querySelector('[data-gallery-file-count]');if(label)label.textContent=`${e.target.files?.length||0} photo(s) selected`; }
+ if(e.target.matches('[data-gallery-filter]')){appGalleryCache.selectedAlbum=e.target.value;renderAppCamera();}
+ if(e.target.matches('[data-gallery-school]')){if(!allowedSchoolIds().includes(e.target.value))return;state.selectedSchoolId=e.target.value;saveLastSelectedSchool(state.selectedSchoolId);await loadAppGallery();appGalleryCache.selectedAlbum='All';renderAppCamera();}
+});
 $app.addEventListener("click", async (e) => {
+  const portalPick = e.target.closest("[data-portal-choice]");
+  if (portalPick && !state.session) {
+    state.portalChoice = portalPick.dataset.portalChoice;
+    state.modal = null;
+    renderLanding();
+    return;
+  }
+  if (e.target.closest("[data-portal-back]") && !state.session) {
+    state.portalChoice = "choose";
+    state.modal = null;
+    renderLanding();
+    return;
+  }
+  if(e.target.closest('[data-show-legacy-roster]')){state.showLegacyRoster=!state.showLegacyRoster;renderLanding();return;}
   const loginUid = e.target.closest("[data-login-uid]")?.dataset.loginUid;
   const modalType = e.target.closest("[data-modal]")?.dataset.modal;
   const tab = e.target.closest("[data-tab]")?.dataset.tab;
@@ -9573,8 +9979,20 @@ $app.addEventListener("click", async (e) => {
   if (hideToolId) { await withAppLoading("Hiding tool...", async () => { const prefs=getToolPrefs(); prefs.hidden = Array.from(new Set([...(prefs.hidden || []), hideToolId])); prefs.bookmarks=(prefs.bookmarks||[]).filter(id=>id!==hideToolId); saveToolPrefs(prefs); renderHome(); }); return; }
   if (restoreToolId) { await withAppLoading("Restoring tool...", async () => { const prefs=getToolPrefs(); prefs.hidden=(prefs.hidden||[]).filter(id=>id!==restoreToolId); saveToolPrefs(prefs); renderHome(); }); return; }
 
+  const toggleToolActive = e.target.closest("[data-toggle-tool-active]")?.dataset.toggleToolActive;
+  if (toggleToolActive) {
+    if (!isSystemAdmin(state.session) || devPreviewActive()) { showToast("Only a system administrator can change rollout visibility."); return; }
+    await withAppLoading("Updating tool visibility...", async () => {
+      const active = !isToolActive(toggleToolActive);
+      await setDoc(doc(db, "appTools", toggleToolActive), { key: toggleToolActive, active, updatedAt: serverTimestamp() }, { merge: true });
+      await loadAppTools();
+      renderSystemAdmin();
+      showToast(`${PERMISSION_TOOLS.find(t=>t.key===toggleToolActive)?.name||toggleToolActive} ${active?'activated':'deactivated'}.`);
+    });
+    return;
+  }
   if (permissionToolToggle) {
-    state.expandedPermissionToolKey = state.expandedPermissionToolKey === permissionToolToggle ? "" : permissionToolToggle;
+    state.expandedPermissionToolKey = permissionToolToggle;
     renderSystemAdmin();
     return;
   }
@@ -9657,7 +10075,25 @@ $app.addEventListener("click", async (e) => {
   const delCampusStatus = e.target.closest("[data-delete-campus-status]")?.dataset.deleteCampusStatus;
   if (delCampusStatus) { if(confirm("Hide this status?")) await hideCampusCareStatus(delCampusStatus); renderSystemAdmin(); return; }
   const openCampusDiscussion = e.target.closest("[data-open-campus-discussion]")?.dataset.openCampusDiscussion;
-  if (openCampusDiscussion) { state.activeCampusDiscussionId = openCampusDiscussion; renderCampusCaresTool(); return; }
+  if (openCampusDiscussion) { state.activeCampusDiscussionId = openCampusDiscussion; await loadDiscussionImages(state.campusCareDiscussions.find(d=>d.id===openCampusDiscussion)); renderCampusCaresTool(); return; }
+  const galleryCapture=e.target.closest('[data-gallery-capture]')?.dataset.galleryCapture;
+  if(galleryCapture){if(galleryCapture==='camera') await openVvLiveCamera('gallery');else document.querySelector('#appGalleryUploadForm [name="files"]')?.click();return;}
+  const galleryDel=e.target.closest('[data-gallery-delete]')?.dataset.galleryDelete;
+  if(galleryDel){state.galleryDeleteConfirm=galleryDel;renderAppCamera();return;}
+  if(e.target.closest('[data-gallery-delete-cancel]')){state.galleryDeleteConfirm='';renderAppCamera();return;}
+  const galleryConfirm=e.target.closest('[data-gallery-delete-confirm]')?.dataset.galleryDeleteConfirm;
+  if(galleryConfirm){const img=appGalleryCache.items.find(x=>x.id===galleryConfirm);if(img&&img.schoolId===activeSchoolContext()){await deleteDoc(doc(db,'appGalleryImages',galleryConfirm));await loadAppGallery();}state.galleryDeleteConfirm='';renderAppCamera();showToast('Gallery photo deleted.');return;}
+  const galleryMove=e.target.closest('[data-gallery-move]')?.dataset.galleryMove;
+  if(galleryMove){const img=appGalleryCache.items.find(x=>x.id===galleryMove);const album=document.querySelector(`[data-gallery-album="${galleryMove}"]`)?.value.trim();if(img&&img.schoolId===activeSchoolContext()&&album){await updateDoc(doc(db,'appGalleryImages',galleryMove),{album:album.slice(0,45)});await loadAppGallery();renderAppCamera();showToast('Photo moved to album.');}return;}
+  const completeDiscussionId=e.target.closest("[data-complete-campus-discussion]")?.dataset.completeCampusDiscussion;
+  const source=e.target.closest('[data-discussion-photo-source]')?.dataset.discussionPhotoSource;
+  if(source){const form=document.getElementById('campusDiscussionImagesForm');if(source==='gallery'){appGalleryCache.selectedAlbum='All';await loadAppGallery();state.discussionGalleryPicker=form?.discussionId.value||'';renderCampusCaresTool();}else if(source==='camera'){await openVvLiveCamera('discussion');}else{form?.elements.namedItem('images')?.click();}return;}
+  if(e.target.closest('[data-gallery-picker-close]')){state.discussionGalleryPicker='';renderCampusCaresTool();return;}
+  const galleryUse=e.target.closest('[data-gallery-use]')?.dataset.galleryUse;if(galleryUse){await useGalleryPhoto(galleryUse);return;}
+  if(completeDiscussionId){state.confirmCompleteDiscussionId=completeDiscussionId;renderCampusCaresTool();return;}
+  if(e.target.closest('[data-cancel-discussion-complete]')){state.confirmCompleteDiscussionId='';renderCampusCaresTool();return;}
+  const confirmComplete=e.target.closest('[data-confirm-discussion-complete]')?.dataset.confirmDiscussionComplete;
+  if(confirmComplete){state.confirmCompleteDiscussionId='';await completeCampusDiscussion(confirmComplete);return;}
   const approveCampusDiscussionId = e.target.closest("[data-approve-campus-discussion]")?.dataset.approveCampusDiscussion;
   if (approveCampusDiscussionId) { await approveCampusDiscussion(approveCampusDiscussionId); return; }
   const removeCampusDiscussionId = e.target.closest("[data-remove-campus-discussion]")?.dataset.removeCampusDiscussion;
@@ -9796,8 +10232,10 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (toolId && !canOpenTool(state.session, toolId)) { showToast("This tool is not available for your account."); return; }
   if (toolId === "curriculum") { await openCurriculum(); return; }
   if (toolId === "campusCares") { await withAppLoading("Opening Campus Cares...", async () => { await refreshCampusCaresData(); const mode=getCampusCaresOpenPreference(); if (mode === "submitted") state.campusCaresTab = "submitted"; renderCampusCaresTool(); if (mode === "submitPopup") { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); } }); return; }
+  if (toolId === "appCamera") { await loadAppGallery();renderAppCamera();return; }
   if (toolId === "photoPrint") { await withAppLoading("Opening Photo Print and Edit...", async () => { await loadPhotoPrintWorkspace(); renderPhotoPrintTool(); }); return; }
   if (toolId === "villageVoice") { await withAppLoading("Opening Printables...", async () => { await refreshAdminData(); state.printableTab = state.printableTab || "villageVoice"; renderVillageVoiceTool(); }); return; }
   if (toolId === "moneyRequests") {
@@ -9979,7 +10417,7 @@ if (editRoleId) {
     return;
   }
   if (action === "logout") { await withAppLoading("Logging out...", async () => { await logout(); }); return; }
-  if (action === "curriculum") { await openCurriculum(); return; }
+  if (action === "curriculum") { if (!canOpenTool(state.session, "curriculum")) { showToast("Curriculum is not currently available."); return; } await openCurriculum(); return; }
   if (action === "profile") { state.modal = null; renderProfileHome(); return; }
   if (action === "home") { await withAppLoading("Loading home...", async () => renderHome()); return; }
   if (action === "onboarding") { await withAppLoading("Loading onboarding...", async () => renderOnboardingPage()); return; }
@@ -10784,6 +11222,12 @@ document.addEventListener("dblclick", (e) => {
 }, true);
 
 $app.addEventListener("submit", async (e) => {
+  if (e.target.id === "familyPortalLoginForm") {
+    e.preventDefault();
+    showToast("Family accounts are not enabled yet. The Family Portal login will be connected separately.");
+    return;
+  }
+
   e.preventDefault();
   const form = e.target;
   showAppLoading(form.id === "loginForm" ? "Logging in..." : "Saving...");
@@ -10800,6 +11244,9 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "campusCareLocationForm") { await saveCampusCareLocation(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
     if (form.id === "campusCareStatusForm") { await saveCampusCareStatus(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
     if (form.id === "campusCareNotesForm" || form.id === "campusCareLeaderNotesForm") { await saveCampusTaskNote(form); hideAppLoading(); return; }
+    if (form.id === "employeeIdLoginForm") { await loginWithEmployeeId(form); hideAppLoading(); return; }
+    if (form.id === "appGalleryUploadForm") {await saveAppGalleryPhotos(form);hideAppLoading();return;}
+    if (form.id === "campusDiscussionImagesForm") { await saveDiscussionImages(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionForm") { await saveCampusDiscussion(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionNoteForm") { await saveCampusDiscussionNote(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionSolutionForm") { await saveCampusDiscussionSolution(form); hideAppLoading(); return; }
