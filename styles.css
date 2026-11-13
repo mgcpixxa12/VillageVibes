@@ -5717,3 +5717,14 @@ input:focus,select:focus,textarea:focus {border-color:#87a88d;box-shadow:0 0 0 3
 .vv-live-camera-dialog video{display:block;width:100%;max-height:min(62vh,540px);object-fit:contain;background:#101610;border-radius:13px;transform:none}
 .vv-live-camera-dialog [data-vv-camera-status]{min-height:22px;margin:12px 0}
 .vv-live-camera-actions{display:flex;gap:12px;flex-wrap:wrap}
+
+/* v226: inline photo preview, removable attachments, camera burst workflow */
+.vv-discussion-photo-tile{position:relative;min-width:0}.vv-discussion-photo-open{display:block;width:100%;padding:0!important;background:transparent!important;border:0!important;cursor:zoom-in}.vv-discussion-photo-open img{width:100%}.vv-discussion-photo-remove{position:absolute;top:4px;right:4px;z-index:2;border-radius:50%!important;width:25px;height:25px;padding:0!important;display:grid;place-items:center;background:#fff!important;color:#92372d!important;border:1px solid #e5c8c5!important;box-shadow:0 2px 6px #0003;font-size:19px!important}.vv-discussion-photo-confirm{position:absolute;z-index:3;inset:0;background:var(--card,#fff);border:1px solid var(--border,#ddd);border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:5px;text-align:center;font-size:.75rem}.vv-discussion-photo-confirm>div{display:flex;gap:4px;flex-wrap:wrap;justify-content:center}.vv-discussion-photo-confirm button{font-size:.67rem!important;padding:4px!important}.vv-discussion-lightbox{position:fixed;inset:0;z-index:110000;background:rgba(8,17,12,.91);display:flex;align-items:center;justify-content:center;padding:55px 18px 18px}.vv-discussion-lightbox img{max-width:100%;max-height:100%;object-fit:contain;border-radius:10px}.vv-discussion-lightbox>button{position:absolute;right:18px;top:14px}.vv-discussion-heading-actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.vv-camera-continuous{display:inline-flex;align-items:center;gap:7px;margin-left:auto;font-size:.9rem;white-space:nowrap}
+
+/* v227: gallery quick report */
+.vv-gallery-report-check{display:flex;align-items:center;gap:7px;padding:0 9px 8px;font-size:.78rem;font-weight:600}
+.vv-gallery-report-check input{width:16px;height:16px}
+.vv-gallery-report-composer{margin:15px 0;padding:16px;border:1px solid var(--border,#dce6dc);border-radius:13px;background:var(--card,#fff)}
+.vv-gallery-report-composer form{display:grid;gap:12px;max-width:650px}
+.vv-gallery-report-composer label{display:grid;gap:5px}
+.vv-gallery-report-composer input,.vv-gallery-report-composer textarea{width:100%;box-sizing:border-box}

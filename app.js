@@ -6817,7 +6817,7 @@ async function openVvLiveCamera(destination) {
   const overlay = document.createElement('div');
   overlay.id = 'vv-live-camera-overlay';
   overlay.className = 'vv-live-camera-overlay';
-  overlay.innerHTML = `<section class="vv-live-camera-dialog" role="dialog" aria-modal="true" aria-label="Take a photo"><header><h3>Take a Photo</h3><button type="button" class="secondary" data-vv-camera-close>✕ Close</button></header><video autoplay playsinline muted aria-label="Live camera preview"></video><p class="helper" data-vv-camera-status>Connecting to camera…</p><div class="vv-live-camera-actions"><button type="button" data-vv-camera-capture disabled>📷 Capture Photo</button><button type="button" class="secondary" data-vv-camera-switch hidden>Switch Camera</button></div></section>`;
+  overlay.innerHTML = `<section class="vv-live-camera-dialog" role="dialog" aria-modal="true" aria-label="Take a photo"><header><h3>Take a Photo</h3><button type="button" class="secondary" data-vv-camera-close>✕ Close</button></header><video autoplay playsinline muted aria-label="Live camera preview"></video><p class="helper" data-vv-camera-status>Connecting to camera…</p><div class="vv-live-camera-actions"><button type="button" data-vv-camera-capture disabled>📷 Capture Photo</button><button type="button" class="secondary" data-vv-camera-switch hidden>Switch Camera</button><label class="vv-camera-continuous"><input type="checkbox" data-vv-camera-continuous> Continuous mode</label></div></section>`;
   document.body.appendChild(overlay);
   const video = overlay.querySelector('video');
   const status = overlay.querySelector('[data-vv-camera-status]');
@@ -6856,8 +6856,10 @@ async function openVvLiveCamera(destination) {
     const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.78));
     if (!blob) { status.textContent='Could not capture image. Try again.';capture.disabled=false;return; }
     const file=new File([blob],`camera-${Date.now()}.jpg`,{type:'image/jpeg'});
-    closeVvLiveCamera();
+    const continuous=overlay.querySelector('[data-vv-camera-continuous]').checked;
+    if(!continuous)closeVvLiveCamera();
     try {
+      status.textContent='Saving captured photo…';
       showAppLoading('Saving captured photo…');
       if (destination==='gallery') {
         const form=document.getElementById('appGalleryUploadForm');
@@ -6873,28 +6875,78 @@ async function openVvLiveCamera(destination) {
         await saveDiscussionImages(form);
       }
     } catch(err) {console.error('Captured photo save failed:',err);showToast(err.message||'Could not save captured photo.');}
-    finally {hideAppLoading();}
+    finally {hideAppLoading();if(continuous && overlay.isConnected){capture.disabled=false;status.textContent='Photo saved. Ready for another capture.';}}
   });
   await connect();
 }
-const appGalleryCache = { items:[], loadedSchool:'', selectedAlbum:'All' };
+const appGalleryCache = { items:[], loadedSchool:'', selectedAlbum:'All', reportIds:new Set() };
 async function loadAppGallery() {
   const school=activeSchoolContext();
   if(!school) {appGalleryCache.items=[];return;}
   const snap=await getDocs(collection(db,'appGalleryImages'));
   appGalleryCache.items=snap.docs.map(x=>({id:x.id,...x.data()})).filter(x=>x.schoolId===school).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
   appGalleryCache.loadedSchool=school;
+  appGalleryCache.reportIds=new Set([...appGalleryCache.reportIds].filter(id=>appGalleryCache.items.some(x=>x.id===id)));
 }
 function galleryAlbums(){return ['All',...new Set(appGalleryCache.items.map(x=>x.album||'General'))].filter(x=>x!=='All').sort();}
 function renderGalleryTiles(picker=false) {
   const items=appGalleryCache.items.filter(x=>appGalleryCache.selectedAlbum==='All'||(x.album||'General')===appGalleryCache.selectedAlbum);
-  return items.map(x=>`<article class="vv-gallery-tile"><img src="${x.dataUrl}" alt="Gallery photo" loading="lazy"><div class="vv-gallery-tile-footer"><span>${escapeHtml(x.album||'General')}</span>${picker?`<button type="button" class="small" data-gallery-use="${x.id}">Use Photo</button>`:`<button type="button" class="danger small" data-gallery-delete="${x.id}">Delete</button>`}</div>${!picker?`<label class="vv-gallery-move">Move to album<input data-gallery-album="${x.id}" value="${escapeHtml(x.album||'General')}" maxlength="45" placeholder="Album name"><button type="button" class="small secondary" data-gallery-move="${x.id}">Move</button></label>`:''}</article>`).join('')||'<p class="helper">No photos in this album.</p>';
+  return items.map(x=>`<article class="vv-gallery-tile"><img src="${x.dataUrl}" alt="Gallery photo" loading="lazy"><div class="vv-gallery-tile-footer"><span>${escapeHtml(x.album||'General')}</span>${picker?`<button type="button" class="small" data-gallery-use="${x.id}">Use Photo</button>`:`<button type="button" class="danger small" data-gallery-delete="${x.id}">Delete</button>`}</div>${!picker?`<label class="vv-gallery-report-check"><input type="checkbox" data-gallery-report-select="${x.id}" ${appGalleryCache.reportIds.has(x.id)?'checked':''}> Select photo</label><label class="vv-gallery-move">Move to album<input data-gallery-album="${x.id}" value="${escapeHtml(x.album||'General')}" maxlength="45" placeholder="Album name"><button type="button" class="small secondary" data-gallery-move="${x.id}">Move</button></label>`:''}</article>`).join('')||'<p class="helper">No photos in this album.</p>';
 }
 function renderDiscussionGalleryPicker(d){return `<div class="vv-gallery-picker"><div class="vv-gallery-picker-head"><strong>Choose from App Gallery</strong><button type="button" class="secondary small" data-gallery-picker-close>Close</button></div><p class="helper">Choose a saved photo to attach a separate copy. The gallery original stays available after completion.</p><div class="vv-gallery-grid">${renderGalleryTiles(true)}</div></div>`;}
 function renderAppCamera(){
   state.currentView='appCamera';
-  $app.innerHTML=pageShell(`<section class="card vv-gallery-page"><div class="tool-heading-row"><div><h2>App Camera</h2><p class="helper">Capture and organize photos for ${escapeHtml(getSchoolNameById(activeSchoolContext()))}. Images are compressed before saving.</p></div>${allowedSchoolIds().length>1?`<select data-gallery-school>${allowedSchoolIds().map(id=>`<option value="${escapeHtml(id)}" ${activeSchoolContext()===id?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select>`:''}</div><div class="vv-photo-actions"><button type="button" data-gallery-capture="camera">📷 Take Photo</button><button type="button" class="secondary" data-gallery-capture="files">＋ Add Photos</button><span class="helper">${appGalleryCache.items.length} saved photos</span><span class="helper" data-gallery-file-count></span></div><form id="appGalleryUploadForm" class="vv-gallery-upload"><input type="file" name="camera" accept="image/*" capture="environment"><input type="file" name="files" accept="image/*" multiple><label>Album <input name="album" maxlength="45" value="General" placeholder="General"></label><button type="submit">Save Photos</button></form><div class="vv-gallery-filter"><label>Album <select data-gallery-filter>${galleryAlbums().map(a=>`<option ${appGalleryCache.selectedAlbum===a?'selected':''}>${escapeHtml(a)}</option>`).join('')}</select></label></div><div class="vv-gallery-grid">${renderGalleryTiles()}</div>${state.galleryDeleteConfirm?`<div class="vv-gallery-delete-confirm" role="group"><strong>Delete this photo permanently?</strong><p>This removes it from the App Gallery. Existing discussion attachments are separate.</p><div class="actions"><button type="button" class="danger" data-gallery-delete-confirm="${state.galleryDeleteConfirm}">Delete Photo</button><button type="button" class="secondary" data-gallery-delete-cancel>Cancel</button></div></div>`:''}</section>${state.toast?`<div class="toast">${state.toast}</div>`:''}`);
+  $app.innerHTML=pageShell(`<section class="card vv-gallery-page"><div class="tool-heading-row"><div><h2>App Camera</h2><p class="helper">Capture and organize photos for ${escapeHtml(getSchoolNameById(activeSchoolContext()))}. Images are compressed before saving.</p></div>${allowedSchoolIds().length>1?`<select data-gallery-school>${allowedSchoolIds().map(id=>`<option value="${escapeHtml(id)}" ${activeSchoolContext()===id?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select>`:''}</div><div class="vv-photo-actions"><button type="button" data-gallery-capture="camera">📷 Take Photo</button><button type="button" class="secondary" data-gallery-capture="files">＋ Add Photos</button><button type="button" class="secondary" data-gallery-report-download>⬇ Download Selected Photos (${appGalleryCache.reportIds.size})</button><span class="helper">${appGalleryCache.items.length} saved photos</span><span class="helper" data-gallery-file-count></span></div><form id="appGalleryUploadForm" class="vv-gallery-upload"><input type="file" name="camera" accept="image/*" capture="environment"><input type="file" name="files" accept="image/*" multiple><label>Album <input name="album" maxlength="45" value="General" placeholder="General"></label><button type="submit">Save Photos</button></form><div class="vv-gallery-filter"><label>Album <select data-gallery-filter>${galleryAlbums().map(a=>`<option ${appGalleryCache.selectedAlbum===a?'selected':''}>${escapeHtml(a)}</option>`).join('')}</select></label></div><div class="vv-gallery-grid">${renderGalleryTiles()}</div>${state.galleryDeleteConfirm?`<div class="vv-gallery-delete-confirm" role="group"><strong>Delete this photo permanently?</strong><p>This removes it from the App Gallery. Existing discussion attachments are separate.</p><div class="actions"><button type="button" class="danger" data-gallery-delete-confirm="${state.galleryDeleteConfirm}">Delete Photo</button><button type="button" class="secondary" data-gallery-delete-cancel>Cancel</button></div></div>`:''}</section>${state.toast?`<div class="toast">${state.toast}</div>`:''}`);
 }
+
+// Download selected gallery images as a standards-compatible ZIP archive, with no external library.
+function galleryZipCrc32(bytes) {
+  let crc=0xffffffff;
+  for (const b of bytes) {crc^=b;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}
+  return (crc^0xffffffff)>>>0;
+}
+function galleryZipHeader(signature,length) {
+  const bytes=new Uint8Array(length);const view=new DataView(bytes.buffer);view.setUint32(0,signature,true);return {bytes,view};
+}
+function downloadSelectedGalleryPhotos() {
+  const selected=appGalleryCache.items.filter(x=>appGalleryCache.reportIds.has(x.id)&&x.schoolId===activeSchoolContext());
+  if(!selected.length)throw Error('Select at least one photo to download.');
+  const encoder=new TextEncoder(), parts=[], directory=[];
+  let offset=0;
+  selected.forEach((photo,index)=>{
+    const match=/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(photo.dataUrl||'');
+    if(!match)throw Error(`Photo ${index+1} has an unsupported format.`);
+    const binary=atob(match[2]),bytes=new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+    const ext=match[1]==='jpeg'?'jpg':match[1];
+    const filename=encoder.encode(`VillageVibes-photo-${String(index+1).padStart(2,'0')}.${ext}`);
+    const crc=galleryZipCrc32(bytes);
+    const local=galleryZipHeader(0x04034b50,30);
+    local.view.setUint16(4,20,true);local.view.setUint16(6,0x0800,true);
+    local.view.setUint16(8,0,true);local.view.setUint32(14,crc,true);
+    local.view.setUint32(18,bytes.length,true);local.view.setUint32(22,bytes.length,true);
+    local.view.setUint16(26,filename.length,true);
+    parts.push(local.bytes,filename,bytes);
+    const central=galleryZipHeader(0x02014b50,46);
+    central.view.setUint16(4,20,true);central.view.setUint16(6,20,true);
+    central.view.setUint16(8,0x0800,true);central.view.setUint16(10,0,true);
+    central.view.setUint32(16,crc,true);central.view.setUint32(20,bytes.length,true);
+    central.view.setUint32(24,bytes.length,true);central.view.setUint16(28,filename.length,true);
+    central.view.setUint32(42,offset,true);
+    directory.push(central.bytes,filename);
+    offset+=local.bytes.length+filename.length+bytes.length;
+  });
+  const directorySize=directory.reduce((n,x)=>n+x.length,0);
+  const end=galleryZipHeader(0x06054b50,22);
+  end.view.setUint16(8,selected.length,true);end.view.setUint16(10,selected.length,true);
+  end.view.setUint32(12,directorySize,true);end.view.setUint32(16,offset,true);
+  const blob=new Blob([...parts,...directory,end.bytes],{type:'application/zip'});
+  const url=URL.createObjectURL(blob),link=document.createElement('a');
+  link.href=url;link.download=`VillageVibes-Photos-${new Date().toISOString().slice(0,10)}.zip`;
+  document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  showToast(`${selected.length} photo(s) downloaded as a ZIP folder.`);
+}
+
 async function saveAppGalleryPhotos(form){
  const schoolId=activeSchoolContext();if(!schoolId)throw Error('Choose a school first.');
  const files=[...Array.from(form.camera.files||[]),...Array.from(form.files.files||[])];if(!files.length)throw Error('Select or take a photo first.');
@@ -6972,6 +7024,26 @@ async function saveCampusDiscussion(form) {
   showToast("Discussion added.");
 }
 
+async function editCampusDiscussion(form) {
+  const d=state.campusCareDiscussions.find(x=>x.id===form.discussionId.value);
+  requireRecordActiveSchool(d);
+  if(d.completedAt) throw Error('Completed discussions cannot be edited.');
+  const title=form.title.value.trim(), description=form.description.value.trim();
+  if(!title||!description) throw Error('Enter a title and details.');
+  await updateDoc(doc(db,'campusCareDiscussions',d.id),{title,description,updatedAt:serverTimestamp()});
+  state.modal=null;
+  await loadCampusCareDiscussions();renderCampusCaresTool();showToast('Discussion updated.');
+}
+async function deleteDiscussionImage(id) {
+  const d=state.campusCareDiscussions.find(x=>(x.imageIds||[]).includes(id));
+  requireRecordActiveSchool(d);
+  if(d.completedAt) throw Error('Completed discussions cannot be edited.');
+  // Remove the reference first so the attachment is no longer visible, then delete its data.
+  await updateDoc(doc(db,'campusCareDiscussions',d.id),{imageIds:(d.imageIds||[]).filter(x=>x!==id),updatedAt:serverTimestamp()});
+  try {await deleteDoc(doc(db,'campusDiscussionImages',id));discussionImageCache.delete(id);}
+  catch(err) {console.error('Orphaned image needs cleanup',id,err);showToast('Photo detached, but storage cleanup failed.');}
+  state.discussionImageRemoveConfirm='';await loadCampusCareDiscussions();renderCampusCaresTool();
+}
 async function saveCampusDiscussionNote(form) {
   const discussion = state.campusCareDiscussions.find(d=>d.id===form.discussionId.value); if(!discussion) return;
   requireRecordActiveSchool(discussion);
@@ -7060,9 +7132,9 @@ function renderCampusDiscussionsTab(canManage) {
 function renderCampusDiscussionDetail(d,canManage) {
   const notes=campusNoteList(d.notes||[]);
   const bubble=n=>`<div class="chat-note ${n.byUid===state.session.uid?'mine':'theirs'}"><div class="chat-note-line"><strong>${escapeHtml(n.byName||'')}</strong><small>${campusShortStamp(n.at)}</small><span>${escapeHtml(n.text||'')}</span></div></div>`;
-  const images=(d.imageIds||[]).map(id=>discussionImageCache.get(id)?`<a href="${discussionImageCache.get(id)}" target="_blank" rel="noopener" title="Open full image"><img loading="lazy" src="${discussionImageCache.get(id)}" alt="Discussion attachment"></a>`:'<span class="helper">Photo loading…</span>').join('');
+  const images=(d.imageIds||[]).map(id=>discussionImageCache.get(id)?`<div class="vv-discussion-photo-tile"><button type="button" class="vv-discussion-photo-open" data-discussion-image-view="${id}" aria-label="View photo"><img loading="lazy" src="${discussionImageCache.get(id)}" alt="Discussion attachment"></button><button type="button" class="vv-discussion-photo-remove" data-discussion-image-remove="${id}" aria-label="Remove photo" title="Remove photo">×</button>${state.discussionImageRemoveConfirm===id?`<div class="vv-discussion-photo-confirm"><strong>Remove photo?</strong><div><button type="button" class="danger small" data-discussion-image-delete="${id}">Remove</button><button type="button" class="secondary small" data-discussion-image-cancel>Cancel</button></div></div>`:''}</div>`:'<span class="helper">Photo loading…</span>').join('');
   const confirmBox=state.confirmCompleteDiscussionId===d.id?`<div class="vv-discussion-confirm" role="group" aria-label="Confirm completion"><strong>Complete this discussion?</strong><span>Attached discussion photos will be permanently deleted. Gallery originals are kept.</span><div class="actions"><button type="button" class="danger small" data-confirm-discussion-complete="${d.id}">Yes, complete & delete attachments</button><button type="button" class="secondary small" data-cancel-discussion-complete>Cancel</button></div></div>`:'';
-  return `<div class="vv-discussion-detail"><div class="vv-discussion-titlebar"><div><span class="vv-discussion-school">${escapeHtml(getSchoolNameById(recordSchoolIds(d)[0]))}</span><h3>${escapeHtml(d.title||'Discussion')}</h3><p>${escapeHtml(d.description||'')}</p></div>${canManage?`<button type="button" class="vv-discussion-complete" data-complete-campus-discussion="${d.id}">✓ Mark Completed</button>`:''}</div>
+  return `<div class="vv-discussion-detail"><div class="vv-discussion-titlebar"><div><span class="vv-discussion-school">${escapeHtml(getSchoolNameById(recordSchoolIds(d)[0]))}</span><h3>${escapeHtml(d.title||'Discussion')}</h3><p>${escapeHtml(d.description||'')}</p></div>${canManage?`<div class="vv-discussion-heading-actions"><button type="button" class="secondary small" data-discussion-edit="${d.id}">✎ Edit</button><button type="button" class="vv-discussion-complete" data-complete-campus-discussion="${d.id}">✓ Mark Completed</button></div>`:''}</div>
     ${confirmBox}
     ${d.approved?`<p class="pill good">Approved by ${escapeHtml(d.approvedByName||'leader')}</p>`:''}
     <section class="vv-discussion-section"><h4>Photos <small>${(d.imageIds||[]).length}/${DISCUSSION_IMAGE_MAX_COUNT}</small></h4>${images?`<div class="vv-discussion-photos">${images}</div>`:'<p class="helper">No photos attached yet.</p>'}<div class="vv-photo-actions"><button type="button" class="secondary small" data-discussion-photo-source="camera">📷 Camera</button><button type="button" class="secondary small" data-discussion-photo-source="files">＋ Upload</button><button type="button" class="secondary small" data-discussion-photo-source="gallery">▦ App Gallery</button></div><form id="campusDiscussionImagesForm" class="vv-discussion-upload vv-hidden-upload"><input type="hidden" name="discussionId" value="${d.id}"><input type="file" name="images" accept="image/*" multiple><input type="file" name="cameraImages" accept="image/*" capture="environment"><button type="submit" class="secondary small">Add Photos</button></form>${state.discussionGalleryPicker===d.id?renderDiscussionGalleryPicker(d):''}</section>
@@ -7462,6 +7534,10 @@ if (state.modal.type === "addMoneyRequestType" || state.modal.type === "editMone
 
   if (state.modal.type === "addCampusDiscussion") {
     return `<div class="modal-backdrop"><form class="modal card" id="campusDiscussionForm"><h2>Add Ongoing Discussion</h2>${schoolContextField()}<p class="helper">Use this for ongoing issues, recurring conversations, or recommendations that need discussion before becoming a task.</p><label>Short Description / Title<input name="title" required maxlength="120" placeholder="Example: Playground pickup flow"></label><label>Details<textarea name="description" rows="4" required placeholder="What should we talk through?"></textarea></label><div class="actions"><button>Add Discussion</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
+  }
+  if (state.modal.type === "editCampusDiscussion") {
+    const d=state.modal.discussion;
+    return `<div class="modal-backdrop"><form class="modal card" id="editCampusDiscussionForm"><h2>Edit Ongoing Discussion</h2><input type="hidden" name="discussionId" value="${escapeHtml(d.id)}"><p class="helper">${escapeHtml(getSchoolNameById(recordSchoolIds(d)[0]))} · School cannot be changed after creation.</p><label>Title<input name="title" maxlength="120" required value="${escapeHtml(d.title||'')}"></label><label>Details<textarea name="description" rows="5" required>${escapeHtml(d.description||'')}</textarea></label><div class="actions"><button type="submit">Save Changes</button><button type="button" class="secondary" data-close-modal>Cancel</button></div></form></div>`;
   }
   if (state.modal.type === "removeCampusDiscussion") {
     const d = state.modal.discussion || {};
@@ -9709,6 +9785,7 @@ $app.addEventListener("change", async (e) => {
 $app.addEventListener('change', async e=>{
  if(e.target.matches('#campusDiscussionImagesForm input[type="file"]')&&e.target.files?.length){const form=e.target.closest('form');try{showAppLoading('Compressing and attaching photos...');await saveDiscussionImages(form);}catch(err){console.error(err);showToast(err.message||'Photo upload failed.');}finally{hideAppLoading();}}
  if(e.target.matches('#appGalleryUploadForm input[type="file"]')){const label=document.querySelector('[data-gallery-file-count]');if(label)label.textContent=`${e.target.files?.length||0} photo(s) selected`; }
+ if(e.target.matches('[data-gallery-report-select]')){const id=e.target.dataset.galleryReportSelect;if(e.target.checked)appGalleryCache.reportIds.add(id);else appGalleryCache.reportIds.delete(id);renderAppCamera();return;}
  if(e.target.matches('[data-gallery-filter]')){appGalleryCache.selectedAlbum=e.target.value;renderAppCamera();}
  if(e.target.matches('[data-gallery-school]')){if(!allowedSchoolIds().includes(e.target.value))return;state.selectedSchoolId=e.target.value;saveLastSelectedSchool(state.selectedSchoolId);await loadAppGallery();appGalleryCache.selectedAlbum='All';renderAppCamera();}
 });
@@ -10074,8 +10151,18 @@ $app.addEventListener("click", async (e) => {
   if (delCampusLocation) { if(confirm("Hide this location?")) await hideCampusCareLocation(delCampusLocation); renderSystemAdmin(); return; }
   const delCampusStatus = e.target.closest("[data-delete-campus-status]")?.dataset.deleteCampusStatus;
   if (delCampusStatus) { if(confirm("Hide this status?")) await hideCampusCareStatus(delCampusStatus); renderSystemAdmin(); return; }
+  const viewDiscussionImage=e.target.closest('[data-discussion-image-view]')?.dataset.discussionImageView;
+  if(viewDiscussionImage){const src=discussionImageCache.get(viewDiscussionImage);if(src){const overlay=document.createElement('div');overlay.className='vv-discussion-lightbox';overlay.setAttribute('role','dialog');overlay.setAttribute('aria-modal','true');overlay.setAttribute('aria-label','Photo preview');const img=document.createElement('img');img.src=src;img.alt='Discussion photo enlarged';const close=document.createElement('button');close.type='button';close.className='secondary';close.textContent='✕ Close';close.addEventListener('click',()=>overlay.remove());overlay.addEventListener('click',event=>{if(event.target===overlay)overlay.remove();});overlay.append(close,img);document.body.appendChild(overlay);}return;}
+  const removeDiscussionImage=e.target.closest('[data-discussion-image-remove]')?.dataset.discussionImageRemove;
+  if(removeDiscussionImage){state.discussionImageRemoveConfirm=removeDiscussionImage;renderCampusCaresTool();return;}
+  if(e.target.closest('[data-discussion-image-cancel]')){state.discussionImageRemoveConfirm='';renderCampusCaresTool();return;}
+  const deleteDiscussionImageId=e.target.closest('[data-discussion-image-delete]')?.dataset.discussionImageDelete;
+  if(deleteDiscussionImageId){await deleteDiscussionImage(deleteDiscussionImageId);return;}
+  const editDiscussionId=e.target.closest('[data-discussion-edit]')?.dataset.discussionEdit;
+  if(editDiscussionId){const d=state.campusCareDiscussions.find(x=>x.id===editDiscussionId);requireRecordActiveSchool(d);state.modal={type:'editCampusDiscussion',discussion:d};renderCampusCaresTool();return;}
   const openCampusDiscussion = e.target.closest("[data-open-campus-discussion]")?.dataset.openCampusDiscussion;
   if (openCampusDiscussion) { state.activeCampusDiscussionId = openCampusDiscussion; await loadDiscussionImages(state.campusCareDiscussions.find(d=>d.id===openCampusDiscussion)); renderCampusCaresTool(); return; }
+  if(e.target.closest('[data-gallery-report-download]')){downloadSelectedGalleryPhotos();return;}
   const galleryCapture=e.target.closest('[data-gallery-capture]')?.dataset.galleryCapture;
   if(galleryCapture){if(galleryCapture==='camera') await openVvLiveCamera('gallery');else document.querySelector('#appGalleryUploadForm [name="files"]')?.click();return;}
   const galleryDel=e.target.closest('[data-gallery-delete]')?.dataset.galleryDelete;
@@ -11247,6 +11334,7 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "employeeIdLoginForm") { await loginWithEmployeeId(form); hideAppLoading(); return; }
     if (form.id === "appGalleryUploadForm") {await saveAppGalleryPhotos(form);hideAppLoading();return;}
     if (form.id === "campusDiscussionImagesForm") { await saveDiscussionImages(form); hideAppLoading(); return; }
+    if (form.id === "editCampusDiscussionForm") { await editCampusDiscussion(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionForm") { await saveCampusDiscussion(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionNoteForm") { await saveCampusDiscussionNote(form); hideAppLoading(); return; }
     if (form.id === "campusDiscussionSolutionForm") { await saveCampusDiscussionSolution(form); hideAppLoading(); return; }
