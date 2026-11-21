@@ -1,0 +1,57 @@
+Village Vibes v266 — Packaging cleanup only
+
+Removed from release (backed up separately):
+- VISUAL_REFRESH_V263.md: Historical notes / changelog; not referenced by running app
+- OLE_V202_README.md: Historical notes / changelog; not referenced by running app
+- V265_NOTES.md: Historical notes / changelog; not referenced by running app
+- CURRICULUM_V198.md: Historical notes / changelog; not referenced by running app
+- onboarding-schedule.json: Standalone import/reference JSON; not fetched by application
+- HUDDLE_V243.md: Historical notes / changelog; not referenced by running app
+- V223_NOTES.md: Historical notes / changelog; not referenced by running app
+- UI_CHANGELOG.md: Historical notes / changelog; not referenced by running app
+- CURRICULUM_V197.md: Historical notes / changelog; not referenced by running app
+- OLE_V208_README.md: Historical notes / changelog; not referenced by running app
+- OLE_V201_README.md: Historical notes / changelog; not referenced by running app
+- NOTIFICATIONS_V262_AUDIT.md: Historical notes / changelog; not referenced by running app
+- SCHOOL_SCOPE_AUDIT_V222.md: Historical notes / changelog; not referenced by running app
+- patch_v126.py: Old development patch script; not loaded by application
+- FUTURE_TOOL_RULES.md: Historical notes / changelog; not referenced by running app
+- HUDDLE_V233.md: Historical notes / changelog; not referenced by running app
+- TEACHER_BIO_V196.md: Historical notes / changelog; not referenced by running app
+- ONBOARDING_V231.md: Historical notes / changelog; not referenced by running app
+- family_calendar_2026_important_dates_import.json: Standalone import/reference JSON; not fetched by application
+- PERFORMANCE_AUDIT.md: Historical notes / changelog; not referenced by running app
+- ONBOARDING_V230.md: Historical notes / changelog; not referenced by running app
+- V264_FIX_NOTES.md: Historical notes / changelog; not referenced by running app
+- curriculum_themes_2026_import.json: Standalone import/reference JSON; not fetched by application
+- HUDDLE_V238.md: Historical notes / changelog; not referenced by running app
+- patch.py: Old development patch script; not loaded by application
+- OLE_V200_README.md: Historical notes / changelog; not referenced by running app
+- form-assets/theme-night.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-spring.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-ocean.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-classroom.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-summer.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-meadow.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-candy.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-lavender.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-sky.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-minimal.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/garden-harvest.webp: Legacy garden art not referenced in current runtime
+- form-assets/theme-rainbow.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/garden-leaves.webp: Legacy garden art not referenced in current runtime
+- form-assets/theme-autumn.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-forest.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-citrus.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-mountain.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-garden.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-winter.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-celebration.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/README.txt: Obsolete art notes referring to unused assets
+- form-assets/theme-desert.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- form-assets/theme-holiday.svg: Old SVG theme artwork; runtime selects corresponding WebP images
+- tools/money-requests.js: Unused 86-byte stub; actual Money Requests implementation is in app.js
+
+Preserved: all runtime JS/CSS/HTML, Firestore rules, dynamic WebP themes, oak silhouettes, all tool logos, onboarding images, README, and local server script.
+
+No app logic changed. Runtime testing on Firebase not performed.

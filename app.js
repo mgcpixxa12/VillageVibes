@@ -1,3 +1,8 @@
+import {createVillageForms} from "./village-forms.js?v=262";
+import {createHuddle} from "./huddle.js?v=262";
+import {createWorkspace} from "./onboarding-workspace.js?v=231";
+import {CONTENT} from "./onboarding-content.js?v=231";
+import { OVA_SCHEDULE } from "./onboarding-schedule.js?v=231";
 import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import {
   getAuth,
@@ -13,6 +18,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 import {
   getFirestore,
+  onSnapshot,
   collection,
   doc,
   getDoc,
@@ -23,10 +29,10 @@ import {
   query,
   where,
   orderBy,
-  serverTimestamp
+  serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v189-profile-navigation-refinement";
+const VV_APP_VERSION = "v265-transparent-logos";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -296,12 +302,14 @@ function orderToolsForHome(tools) {
   const idx = new Map((prefs.order || []).map((id, i) => [id, i]));
   return [...tools].sort((a,b)=>(idx.has(a.id)?idx.get(a.id):999)-(idx.has(b.id)?idx.get(b.id):999) || String(a.title).localeCompare(String(b.title)));
 }
+const TOOL_LOGO_ASSETS = {"moneyRequests": "moneyRequests", "campusCares": "campusCares", "photoPrint": "photoPrint", "coreChampion": "coreChampion", "villageVoice": "villageVoice", "curriculum": "curriculum", "villageForms": "villageForms", "huddle": "huddle", "appCamera": "appCamera", "onboarding": "onboarding", "calendar": "calendar", "permissions": "permissions", "oleKits": "oleKits"};
+function toolLogoAsset(id){const key=TOOL_LOGO_ASSETS[id];return key?`tool-logos/${key}.png`:"";}
 function renderToolTile(tool, extraClass = "") {
   const t = getToolDisplay(tool);
   const bookmarked = isToolBookmarked(t.id);
   return `<div class="home-tool-wrap ${extraClass}" draggable="true" data-drag-tool="${t.id}" data-tool-card="${t.id}">
     <button class="tool-tile square-tool-tile" data-tool="${t.id}" type="button">
-      ${t.imageData ? `<img class="tool-tile-image" src="${t.imageData}" alt="${t.title}" />` : `<div class="tool-icon">${t.icon}</div>`}
+      ${t.imageData ? `<img class="tool-tile-image" src="${t.imageData}" alt="${escapeHtml(t.title)}" />` : toolLogoAsset(t.id) ? `<img class="tool-tile-image vv-fresh-tool-icon" src="${toolLogoAsset(t.id)}" alt="" loading="lazy" />` : `<div class="tool-icon">${t.icon}</div>`}
       <h3>${t.title}</h3>
     </button>
     <div class="tool-tile-controls">
@@ -312,7 +320,8 @@ function renderToolTile(tool, extraClass = "") {
     </div>
   </div>`;
 }
-function getUnreadNotificationCount() { return state.notifications.filter(n => n.read !== true).length; }
+function getUnreadNotificationCount() { return state.notifications.filter(n => !notificationRead(n)).length; }
+function notificationRead(n){return n.readBy?.includes(state.session?.uid) || (!n.readBy && n.read === true);}
 
 function saveLastSelectedSchool(schoolId) {
   if (!schoolId) return;
@@ -417,6 +426,16 @@ const PERMISSION_TOOLS = [
     ]
   },
   {
+    key: "villageForms",
+    name: "Village Forms",
+    permissions: [{key:"manage",label:"Build and publish forms",description:"Create templates, assign forms, and review responses"}]
+  },
+  {
+    key: "huddle",
+    name: "The Huddle",
+    permissions: [{key:"vote",label:"Vote on solutions",description:"Leadership voting"},{key:"approve",label:"Approve and assign solutions",description:"DOSO / owner approval"}]
+  },
+  {
     key: "campusCares",
     name: "Campus Cares",
     permissions: [
@@ -434,7 +453,9 @@ const PERMISSION_TOOLS = [
       { key: "campusAssigned", label: "Campus Cares: Tasks Assigned To Me", description: "Can turn on alerts when a Campus Cares task is assigned to them." },
       { key: "campusNotes", label: "Campus Cares: Notes On Visible Tasks", description: "Can turn on alerts when leader notes are added to tasks they can see." },
       { key: "campusSchoolSubmitted", label: "Campus Cares: New School Requests", description: "Can turn on alerts when any Campus Cares task is submitted for their assigned school location(s)." },
-      { key: "moneyRequests", label: "Money Requests Notifications", description: "Can turn on alerts for Money Request activity they are allowed to see." }
+      { key: "moneyRequests", label: "Money Requests Notifications", description: "Can turn on alerts for Money Request activity they are allowed to see." },
+      { key: "villageForms", label: "Village Forms", description: "New published forms, collaborator invitations and new responses to forms you manage." },
+      { key: "huddle", label: "The Huddle", description: "New discussions, participants, proposals and decisions involving you." }
     ]
   },
   {
@@ -587,7 +608,7 @@ function renderLikeDatalist(key) {
 }
 
 const WHAT_I_LIKE_FIELDS = [
-  ["dietary", "Special Dietary Restrictions or Allergies"],
+
   ["restaurants", "Favorite Restaurants / Places to Eat"],
   ["drinks", "Favorite Drinks"],
   ["shops", "Favorite Places to Shop"],
@@ -663,27 +684,12 @@ function renderWhatILikeDisplay(user = {}, compact = false) {
   return `<div class="likes-grid ${compact ? "compact-likes-grid" : ""}">${items.map(([label, values]) => `<div class="like-tile"><small>${escapeHtml(label)}</small><strong>${values.map(value => `<span>${escapeHtml(value)}</span>`).join("")}</strong></div>`).join("")}</div>`;
 }
 
+const ONBOARDING_STEPS = ["Confirm identity", "Welcome wagon", "Education & bio", "What I like", "Paperwork & finish"];
 function getOnboardingMissingItems(user = {}) {
-  const missing = [];
-  if (!String(user.usedName || "").trim()) missing.push("Confirm or add your used name");
-  if (!String(user.birthday || "").trim()) missing.push("Add your birthday");
-  const educationItems = normalizeEducationList(user.educationList || user.education);
-  if (!educationItems.length) missing.push("Add education");
-  if (!String(user.whyEarlyEducation || "").trim()) missing.push("Fill out Why I Chose Early Education");
-  const likes = getWhatILike(user);
-  if (!Object.values(likes).some(v => Array.isArray(v) ? v.length : String(v || "").trim())) missing.push("Add at least one What I Like item");
-  return missing;
+  return [...ONBOARDING_STEPS.filter((_,i) => !(user.onboardingPrototypeSteps || []).includes(i)), ...OVA_SCHEDULE.flatMap(d=>d.tasks.filter(t=>!t.breakOnly && !user.onboardingScheduleProgress?.[t.id]).map(t=>t.id))];
 }
-
 function getOnboardingStatusHtml(user = {}) {
-  const checks = [
-    [!!String(user.usedName || "").trim(), "Profile details"],
-    [!!String(user.birthday || "").trim(), "Birthday"],
-    [normalizeEducationList(user.educationList || user.education).length > 0, "Education"],
-    [!!String(user.whyEarlyEducation || "").trim(), "Why I chose education"],
-    [Object.values(getWhatILike(user)).some(v => Array.isArray(v) ? v.length : String(v || "").trim()), "What I like"]
-  ];
-  return `<div class="onboarding-mini-checklist">${checks.map(([ok, label]) => `<span class="${ok ? "done" : "todo"}">${ok ? "✓" : "○"} ${escapeHtml(label)}</span>`).join("")}</div>`;
+  return `<div class="onboarding-mini-checklist">${ONBOARDING_STEPS.map((label,i)=>`<span>${(user.onboardingPrototypeSteps||[]).includes(i)?"✓":"○"} ${label}</span>`).join("")}</div>`;
 }
 
 function isOnboardingRequired(user = {}) {
@@ -1002,9 +1008,14 @@ function campusShortStamp(value) { try { const d=value?.toDate?value.toDate():ne
 function campusDiscussionInUserScope(d, user = state.session) { return userSchoolMatchesScope(d.schoolIds || (d.schoolId ? [d.schoolId] : []), user) && recordMatchesActiveSchool(d); }
 function activeCampusDiscussions() { return state.campusCareDiscussions.filter(d=>d.active!==false && !d.removedAt && !d.completedAt && campusDiscussionInUserScope(d)); }
 function campusNoteList(list=[]) { return [...list].sort((a,b)=>new Date(a.at||0)-new Date(b.at||0)); }
-function notificationSettingEnabled(user, key) { const settings=user?.notificationSettings||{}; return settings[key] === true; }
-function notificationAllowedForUser(user, key) { return hasToolPermission(user, "notifications", key) || hasFullDevAccess(user); }
+function notificationSettingEnabled(user, key) { const settings=user?.notificationSettings||{}; return settings[key] !== false; }
+function notificationAllowedForUser(user, key) { return ["villageForms","huddle"].includes(key) ? user?.accountType !== "family" : hasToolPermission(user, "notifications", key) || hasFullDevAccess(user); }
 function usersAllowedForNotification(key, schoolIds=[]) { return state.users.filter(u => u.active !== false && notificationAllowedForUser(u, key) && notificationSettingEnabled(u, key) && userSchoolMatchesScope(schoolIds, u)); }
+async function notifyParticipants(toolKey, recipients, title, body, schoolIds=[],targetTab=""){
+  const unique=[...new Set((recipients||[]).filter(id=>id&&id!==state.session?.uid))];
+  const eligible=unique.filter(id=>{const u=state.users.find(u=>u.uid===id);return u&&u.active!==false&&notificationSettingEnabled(u,toolKey)&&notificationAllowedForUser(u,toolKey);});
+  await Promise.all(eligible.map(id=>createNotification({title,body,toolKey,targetTab,toUids:[id],schoolIds})));
+}
 function campusTaskSchoolIds(taskOrFormLoc) { return recordSchoolIds(taskOrFormLoc); }
 async function createNotificationsForUsers(users, payload) {
   const unique = [...new Map(users.filter(Boolean).map(u => [u.uid, u])).values()];
@@ -1409,6 +1420,7 @@ function userSchoolMatchesScope(schoolIds = [], user = state.session) {
 
 function userMatchesNotification(n) {
   if (!state.session) return false;
+  if (n.toUids?.includes(state.session.uid)) return true;
   if (!userSchoolMatchesScope(n.schoolIds || (n.schoolId ? [n.schoolId] : []), state.session)) return false;
   if ((n.toUids || []).includes(state.session.uid)) return true;
   const roleKeys = getUserRoleKeys(state.session);
@@ -1416,20 +1428,40 @@ function userMatchesNotification(n) {
   return (n.toRoles || []).some(r => roleKeys.includes(normalizeRoleKey(r))) || (position && (n.toPositions || []).includes(position));
 }
 
+let notificationUnsubscribe=null, notificationSubscriberUid=null;
+function watchNotifications(){
+  const currentUid=state.session?.uid;
+  if(notificationSubscriberUid===currentUid)return;
+  notificationUnsubscribe?.();notificationUnsubscribe=null;notificationSubscriberUid=currentUid||null;
+  if(!currentUid)return;
+  notificationUnsubscribe=onSnapshot(collection(db,"notifications"),snapshot=>{
+    if(state.session?.uid!==currentUid)return;
+    state.notifications=snapshot.docs.map(d=>({id:d.id,...d.data()}))
+      .filter(n=>n.cleared!==true&&!n.clearedBy?.includes(currentUid))
+      .filter(userMatchesNotification)
+      .sort((a,b)=>(b.createdAt?.toMillis?.()||0)-(a.createdAt?.toMillis?.()||0)).slice(0,40);
+    const badge=document.querySelector(".notification-button");
+    if(badge){const count=getUnreadNotificationCount();badge.innerHTML=`🔔${count?`<span>${count}</span>`:""}`;badge.setAttribute("aria-label",count?`Notifications, ${count} unread`:"Notifications");}
+    if(state.notificationsOpen){const panel=document.querySelector(".notification-panel");if(panel){const tmp=document.createElement("div");tmp.innerHTML=renderNotificationsPanel();panel.replaceWith(tmp.firstElementChild);}}
+  },err=>console.warn("Notification updates unavailable:",err));
+}
 async function loadNotifications() {
   try {
     const snap = await getDocs(collection(db, "notifications"));
-    state.notifications = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(n => n.cleared !== true).filter(userMatchesNotification).sort((a,b)=>{
+    state.notifications = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(n => n.cleared !== true && !n.clearedBy?.includes(state.session?.uid)).filter(userMatchesNotification).sort((a,b)=>{
       const at = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
       const bt = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
       return bt-at;
     }).slice(0, 30);
-  } catch (err) { state.notifications = []; }
+  } catch (err) { console.warn("Could not refresh notifications:",err); }
+  watchNotifications();
 }
 
 async function createNotification(payload) {
   await setDoc(doc(collection(db, "notifications")), {
     read: false,
+    readBy: [],
+    clearedBy: [],
     createdAt: serverTimestamp(),
     ...payload
   });
@@ -1510,6 +1542,7 @@ async function loginUser(user, credential, stayLoggedIn = false) {
 
   if (fresh.pinResetRequired || credential === "0000" || fresh.onboardingRequired === true) {
     state.modal = null;
+    state.onboardingStep = Math.max(0, ONBOARDING_STEPS.findIndex((_,i)=>!(fresh.onboardingPrototypeSteps||[]).includes(i)));
     renderOnboardingPage();
     return;
   }
@@ -1807,6 +1840,8 @@ function hasToolPermission(user, toolKey, permissionKey) {
 
 function getAvailableTools(user) {
   const tools = [];
+  if(user?.accountType!=="family") tools.push({id:"villageForms",title:"Village Forms",icon:"📝",desc:"Build forms, use templates and collect responses."});
+  if(user?.accountType!=="family") tools.push({id:"huddle",title:"The Huddle",icon:"💬",desc:"Collaborate, propose solutions and assign approved tasks."});
 
   const canSubmitMoney = hasToolPermission(user, "moneyRequests", "submit");
   const canApproveMoney = hasToolPermission(user, "moneyRequests", "approvePending");
@@ -2055,16 +2090,17 @@ async function resetUserForOnboarding(uid) {
   const target = await readUser(uid);
   if (!target) throw new Error("User not found.");
   const resetPatch = {
-    pin: "0000",
-    pinResetRequired: true,
     onboardingRequired: true,
-    birthday: "",
+    onboardingPrototypeSteps: [],
+    onboardingScheduleProgress: {},
+    onboardingRunId: crypto.randomUUID(),
+    onboardingActiveTask: null,
+    onboardingWelcome: {},
     educationList: [],
     education: "",
     earlyEducationStart: "",
     whyEarlyEducation: "",
     whatILike: {},
-    teamPosition: "Unassigned",
     updatedAt: serverTimestamp()
   };
   await updateDoc(doc(db, "users", uid), resetPatch);
@@ -2074,7 +2110,7 @@ async function resetUserForOnboarding(uid) {
     state.session = { ...state.session, ...resetPatch, updatedAt: new Date().toISOString() };
     state.onboardingStep = 0;
   }
-  showToast("User reset. They can test onboarding again with PIN 0000.");
+  showToast("User reset. They can test onboarding again using their existing login.");
 }
 
 async function deleteAppUser(uid) {
@@ -2090,14 +2126,15 @@ async function deleteAppUser(uid) {
 
 function renderNotificationsPanel() {
   return `<div class="notification-panel card">
-    <strong>Notifications</strong>
+    <div class="notification-heading"><strong>Notifications</strong><span>${getUnreadNotificationCount()} unread</span></div>
     ${state.notifications.length ? state.notifications.map(n => `
-      <button type="button" class="notification-row ${n.read ? "" : "unread"}" data-open-notification="${n.id}">
-        <b>${n.title || "Notification"}</b>
-        <span>${n.body || ""}</span>
+      <button type="button" class="notification-row ${notificationRead(n) ? "" : "unread"}" data-open-notification="${n.id}">
+        <b>${escapeHtml(n.title || "Notification")}</b>
+        <span>${escapeHtml(n.body || "")}</span>
+        <small>${n.createdAt?.toDate?.()?.toLocaleString?.()||"Recently"}</small>
       </button>
     `).join("") : `<div class="empty">No notifications yet.</div>`}
-    ${state.notifications.length ? `<button type="button" class="clear-notifications-link" data-clear-notifications>Clear Notifications</button>` : ""}
+    ${state.notifications.length ? `<div class="notification-footer"><button type="button" class="clear-notifications-link" data-clear-notifications>Clear my notifications</button><button type="button" class="secondary small" data-action="notificationSettings">Preferences</button></div>` : ""}
   </div>`;
 }
 
@@ -2141,7 +2178,7 @@ function pageShell(content) {
   const pageTitles = { profile: "My profile", curriculum: "Curriculum", home: "Home", leadership: "Leadership", ownersPanel: "Owners", systemAdmin: "System admin" };
   const currentTitle = pageTitles[state.currentView] || "Workspace";
   const pinnedTools = getAvailableTools(state.session).filter(t => isToolBookmarked(t.id));
-  const pinnedHtml = pinnedTools.map(t => `<button type="button" class="vv-nav-link ${state.currentView === t.id ? 'is-current' : ''}" data-tool="${escapeHtml(t.id)}"><span class="vv-nav-icon">${t.icon}</span><span>${escapeHtml(getToolDisplay(t).title)}</span></button>`).join('');
+  const pinnedHtml = pinnedTools.map(t => `<button type="button" class="vv-nav-link ${state.currentView === t.id ? 'is-current' : ''}" data-tool="${escapeHtml(t.id)}"><span class="vv-nav-icon">${toolLogoAsset(t.id) ? `<img src="${toolLogoAsset(t.id)}" alt="" class="vv-nav-tool-logo" />` : t.icon}</span><span>${escapeHtml(getToolDisplay(t).title)}</span></button>`).join('');
   const navHtml = navigation.filter(item => item[3]).map(([action, icon, label]) =>
     `<button type="button" class="vv-nav-link ${state.currentView === action ? "is-current" : ""}" data-action="${action}" ${state.currentView === action ? 'aria-current="page"' : ""}><span class="vv-nav-icon" aria-hidden="true">${icon}</span><span>${label}</span></button>`
   ).join("");
@@ -2291,8 +2328,8 @@ function renderHome() {
   $app.innerHTML = pageShell(`
     <section class="grid">
       <div class="card home-welcome-card">
-        <h2>Welcome, ${state.session.firstName}</h2>
-        <p class="helper">Your tools are customized to this device. Drag tools to reorder, bookmark favorites, or hide tools you do not use.</p>
+        <div class="vv-welcome-kicker">YOUR VILLAGE · YOUR WORKSPACE</div><h2>Welcome, ${escapeHtml(state.session.firstName || "friend")} <span aria-hidden="true">✦</span></h2>
+        <p class="helper">Everything you need to keep your village thriving, all in one place. Pin your favorites, rearrange your tools, and make this space your own.</p>
       </div>
 
       ${bookmarked.length ? `<div class="bookmark-bar card slim-card"><strong>Bookmarked</strong><div class="bookmark-tools">${bookmarked.map(t => `<button class="bookmark-chip" data-tool="${t.id}" type="button">${t.title}</button>`).join("")}</div></div>` : ""}
@@ -2800,6 +2837,7 @@ async function saveReceiptForMoneyRequest(form) {
     receipts: [...(request.receipts || []), receipt],
     updatedAt: serverTimestamp()
   });
+  notifyParticipants("moneyRequests",[request.submittedByUid],"Receipt added","A receipt was added to your money request.",[request.requestSchoolId].filter(Boolean),"myRequests").catch(console.warn);
   await loadMoneyRequests();
   showToast("Receipt saved.");
   renderMoneyRequestsTool();
@@ -2924,6 +2962,10 @@ async function approveMoneyRequests(ids, stage, passwordVerified = false) {
       ownerApprovedByName: `${state.session?.firstName || ""} ${state.session?.lastName || ""}`.trim(),
       ownerApprovedAt: serverTimestamp(), updatedAt: serverTimestamp()
     });
+  }
+  if(!isDoso){
+    const requests=ids.map(id=>state.moneyRequests.find(r=>r.id===id)).filter(Boolean);
+    for(const req of requests)notifyParticipants("moneyRequests",[req.submittedByUid],"Money request approved","Your money request has received final approval.",[req.requestSchoolId].filter(Boolean),"myRequests").catch(console.warn);
   }
   if (isDoso) {
     const approvedSchoolIds = Array.from(new Set(ids.map(id => state.moneyRequests.find(r => r.id === id)?.requestSchoolId).filter(Boolean)));
@@ -6499,99 +6541,55 @@ async function updateSelfProfile(form) {
 function renderOnboardingPage() {
   state.currentView = "onboarding";
   const u = state.session || {};
-  const step = Math.max(0, Math.min(Number(state.onboardingStep || 0), 3));
-  const stepLabels = ["Confirm Info", "Birthday", "Education + Story", "What I Like"];
-  const schools = (u.schoolIds || (u.schoolId ? [u.schoolId] : []));
-  const schoolNames = schools.map(id => state.schools.find(s => s.id === id)?.name || id).filter(Boolean);
+  const done = u.onboardingPrototypeSteps || [];
+  if(done.length===5 && !state.obReviewProfile){renderScheduleOnboarding();return;}
+  const step = Math.max(0,Math.min(Number(state.onboardingStep ?? 0),4));
+  const extra = u.onboardingWelcome || {};
+  const input = (name,label,value="") => `<label>${label}<input name="${name}" maxlength="160" value="${escapeHtml(value)}"></label>`;
+  const schools = (u.schoolIds || []).map(id=>state.schools.find(s=>s.id===id)?.name || id).join(", ");
   let body = "";
-  if (step === 0) {
-    body = `<div class="grid two"><label>First Name<input name="firstName" required value="${escapeHtml(u.firstName || "")}"></label><label>Last Name<input name="lastName" required value="${escapeHtml(u.lastName || "")}"></label></div><label>Used Name<input name="usedName" required placeholder="What should people call you?" value="${escapeHtml(u.usedName || "")}"></label><div><strong>School / Location</strong><p class="helper">Current: ${escapeHtml(schoolNames.join(", ") || "Not set")}</p><div class="grid two" style="margin-top:.5rem;">${state.schools.map(school => `<label style="display:flex;align-items:center;gap:.5rem;"><input style="width:auto;" type="checkbox" name="schoolIds" value="${school.id}" ${schools.includes(school.id) ? "checked" : ""}> ${escapeHtml(school.name)} (${escapeHtml(school.code || "")})</label>`).join("")}</div></div>`;
-  } else if (step === 1) {
-    body = `<p class="helper">Choose your birthday from dropdowns. The year starts near age 18 so it is quicker to scroll.</p>${renderBirthdayDropdowns(u.birthday || "")}`;
-  } else if (step === 2) {
-    body = `${renderEducationBuilder(u)}<label>Why I Chose Childcare<textarea name="whyEarlyEducation" rows="5" placeholder="What made you choose childcare?">${escapeHtml(u.whyEarlyEducation || "")}</textarea></label>`;
-  } else {
-    body = `<p class="helper">Add the favorites families and leaders may need for your What I Like page.</p>${renderWhatILikeFields(u)}`;
-  }
-  const missing = getOnboardingMissingItems(u);
-  $app.innerHTML = pageShell(`
-    <section class="onboarding-page onboarding-slider-page">
-      <div class="card onboarding-hero-card">
-        <p class="eyebrow">Onboarding</p>
-        <h1>Welcome to OVA!</h1>
-        <p>Complete each step to finish setting up your profile.</p>
-      </div>
-      <div class="onboarding-slide-dots">${stepLabels.map((label, i) => `<button type="button" class="${i === step ? "active" : i < step ? "done" : ""}" data-onboarding-go-step="${i}">${i < step ? "✓" : i + 1} ${escapeHtml(label)}</button>`).join("")}</div>
-      <form class="card onboarding-step-card onboarding-slide-card" id="onboardingStepForm" data-onboarding-step="${step}">
-        <div class="onboarding-step-head"><span class="onboarding-check">${step + 1}</span><div><h2>${escapeHtml(stepLabels[step])}</h2><p class="helper">${step === 0 ? "Confirm this information or edit it before moving on." : "Save this step to continue."}</p></div></div>
-        ${body}
-        ${modalErrorHtml()}
-        <div class="actions sticky-modal-actions">
-          ${step > 0 ? `<button type="button" class="secondary" data-onboarding-prev>Back</button>` : ""}
-          <button>${step === 3 ? "Finish Onboarding" : step === 0 ? "Confirm & Continue" : "Save & Continue"}</button>
-        </div>
-      </form>
-      ${missing.length ? `<div class="card missing-box"><strong>Still needed:</strong><ul>${missing.map(m => `<li>${escapeHtml(m)}</li>`).join("")}</ul></div>` : ""}
-    </section>
-    ${state.modal ? renderModal() : ""}
-    ${renderPhotoContextMenu()}
-    ${renderPhotoPrintDuplicatePrompt()}
-    ${state.toast ? `<div class="toast">${state.toast}</div>` : ""}
-  `);
+  if(step===0) body = `${input("firstName","First name",u.firstName)}${input("lastName","Last name",u.lastName)}${input("usedName","Preferred name",u.usedName)}<p class="helper">Leadership assigns your school, role and employee ID.</p><div class="card"><strong>School:</strong> ${escapeHtml(schools||"Awaiting assignment")}<br><strong>Position:</strong> ${escapeHtml(u.teamPosition||"Awaiting assignment")}</div>${u.pinResetRequired?'<label>New login PIN<input name="newPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required></label>':''}`;
+  if(step===1) body = `${input("title","Preferred title (optional)",extra.title)}<label>Uniform shirt size<select name="shirtSize"><option value="">Prefer not to answer</option>${["S","M","L","XL","XXL","Other"].map(x=>`<option ${extra.shirtSize===x?'selected':''}>${x}</option>`).join('')}</select></label>${input("origin","General area you are from (optional; no address)",extra.origin)}<label>Familiar with the local area?<select name="localFamiliarity">${["","Yes","No"].map(x=>`<option value="${x}" ${extra.localFamiliarity===x?'selected':''}>${x||'Prefer not to answer'}</option>`).join('')}</select></label>${input("excited","What excites you about this position?",extra.excited)}`;
+  if(step===2) body = `${renderEducationBuilder(u)}${input("earlyEducationStart","Year you started in early childhood education",u.earlyEducationStart)}${input("whyEarlyEducation","Why did you choose early education?",u.whyEarlyEducation)}${input("typicalDay","What does a typical day in your classroom look like?",extra.typicalDay)}`;
+  if(step===3) body = `<p class="helper">Optional gift preferences. Do not enter allergies, health information or personal contact details.</p>${renderWhatILikeFields(u)}`;
+  if(step===4) body = `<p>Review your onboarding progress. The sample paperwork below can be printed with your name already filled in. Sensitive fields and signatures remain blank.</p><div class="card"><h3>Prototype paperwork</h3><p>Welcome Wagon · Staff Bio · Emergency Information · Team Safety Contract</p><button type="button" class="secondary" data-prototype-print>Print sample paperwork</button><p class="helper">Sample layouts only; not official forms or signed agreements.</p></div><p class="helper">The next section contains the actual 15-day OVA training schedule. Official form generation and individual checklist transcription remain pending.</p>`;
+  $app.innerHTML = pageShell(`<section class="onboarding-page onboarding-slider-page"><div class="card onboarding-hero-card"><p class="eyebrow">Prototype onboarding · Step ${step+1} of 5</p><h1>Welcome to OVA!</h1><p>${done.length} of 5 steps saved. You can return to saved steps.</p><progress max="5" value="${done.length}" style="width:100%"></progress><p class="helper">Do not enter sensitive information. Use fictional details for testing.</p></div><div class="onboarding-slide-dots">${ONBOARDING_STEPS.map((label,i)=>`<button type="button" class="${i===step?'active':done.includes(i)?'done':''}" data-onboarding-go-step="${i}" ${i>step&&!done.includes(i)?'disabled':''}>${done.includes(i)?'✓':i+1} ${label}</button>`).join('')}</div><form class="card onboarding-step-card" id="onboardingStepForm" data-onboarding-step="${step}"><h2>${ONBOARDING_STEPS[step]}</h2>${body}${modalErrorHtml()}<div class="actions">${step?'<button type="button" class="secondary" data-onboarding-prev>Back</button>':''}<button>${step===4?'Continue to training schedule':'Save & Continue'}</button></div></form></section>${state.modal?renderModal():''}${state.toast?`<div class="toast">${state.toast}</div>`:''}`);
 }
-
 async function saveOnboardingStep(form) {
-  if (!state.session?.uid) throw new Error("No user is logged in.");
-  const step = Number(form.dataset.onboardingStep || 0);
-  const payload = { updatedAt: serverTimestamp() };
-  if (step === 0) {
-    const firstName = form.firstName.value.trim();
-    const lastName = form.lastName.value.trim();
-    const usedName = form.usedName.value.trim();
-    const schoolIds = getFormSchoolIds(form);
-    if (!firstName || !lastName || !usedName) throw new Error("First name, last name, and used name are required.");
-    if (!schoolIds.length) throw new Error("Select at least one location.");
-    payload.firstName = firstName;
-    payload.lastName = lastName;
-    payload.displayName = `${firstName} ${lastName.slice(0, 1)}.`;
-    payload.usedName = usedName;
-    payload.schoolIds = schoolIds;
-  } else if (step === 1) {
-    const birthday = collectBirthdayFromForm(form);
-    if (!birthday) throw new Error("Choose your full birthday.");
-    payload.birthday = birthday;
-  } else if (step === 2) {
-    const educationList = collectEducationEntries(form);
-    const why = form.whyEarlyEducation?.value?.trim() || "";
-    if (!educationList.length) throw new Error("Add at least one education item.");
-    if (!why) throw new Error("Add why you chose childcare.");
-    payload.educationList = educationList;
-    payload.education = educationList.map(educationDisplayText).join("; ");
-    payload.whyEarlyEducation = why;
-  } else {
-    const likes = collectWhatILike(form);
-    if (!Object.values(likes).some(v => Array.isArray(v) ? v.length : String(v || "").trim())) throw new Error("Add at least one What I Like item.");
-    payload.whatILike = likes;
-  }
-  await updateDoc(doc(db, "users", state.session.uid), payload);
-  state.session = await readUser(state.session.uid);
-  state.users = state.users.map(u => u.uid === state.session.uid ? { ...u, ...state.session } : u);
-  if (step < 3) {
-    state.onboardingStep = step + 1;
-    renderOnboardingPage();
-    return;
-  }
-  if (isOnboardingComplete(state.session)) {
-    await updateDoc(doc(db, "users", state.session.uid), { onboardingRequired: false, pinResetRequired: false, updatedAt: serverTimestamp() });
-    state.session = await readUser(state.session.uid);
-    showToast("Onboarding complete.");
-    renderHome();
-  } else {
-    showToast("Saved. Finish the remaining items to complete onboarding.");
-    renderOnboardingPage();
-  }
+  const u=state.session; if(!u?.uid) throw new Error("Sign in first.");
+  const step=Number(form.dataset.onboardingStep);
+  const val=n=>String(form.elements.namedItem(n)?.value||"").trim().slice(0,160);
+  const done=[...new Set([...(u.onboardingPrototypeSteps||[]),step])];
+  const payload={updatedAt:serverTimestamp(),onboardingPrototypeSteps:done};
+  if(step===0){const firstName=val('firstName'),lastName=val('lastName');if(!firstName||!lastName)throw new Error('First and last name are required.');Object.assign(payload,{firstName,lastName,usedName:val('usedName')||firstName,displayName:`${firstName} ${lastName[0]}.`});if(u.pinResetRequired){const pin=val('newPin');if(!/^\d{4}$/.test(pin)||pin==='0000')throw new Error('Choose a four-digit PIN other than 0000.');Object.assign(payload,{pin,pinResetRequired:false});}}
+  if(step===1) payload.onboardingWelcome={...(u.onboardingWelcome||{}),title:val('title'),shirtSize:val('shirtSize'),origin:val('origin'),localFamiliarity:val('localFamiliarity'),excited:val('excited')};
+  if(step===2){payload.educationList=collectEducationEntries(form);payload.education=payload.educationList.map(educationDisplayText).join('; ');payload.earlyEducationStart=val('earlyEducationStart');payload.whyEarlyEducation=val('whyEarlyEducation');payload.onboardingWelcome={...(u.onboardingWelcome||{}),typicalDay:val('typicalDay')};}
+  if(step===3) payload.whatILike=collectWhatILike(form);
+  if(step===4){if(done.length!==5)throw new Error('Complete all earlier steps first.');payload.onboardingRequired=true;payload.pinResetRequired=false;}
+  await updateDoc(doc(db,'users',u.uid),payload);state.session=await readUser(u.uid);state.users=state.users.map(x=>x.uid===u.uid?state.session:x);
+  if(step<4){state.onboardingStep=step+1;renderOnboardingPage();return;}
+  state.onboardingStep=0;state.obReviewProfile=false;state.modal=null;renderOnboardingPage();
 }
-
+function scheduleTasks(){return OVA_SCHEDULE.flatMap(d=>d.tasks.filter(t=>!t.breakOnly));}
+function scheduleText(text){return escapeHtml(text).replace(/https?:\/\/[^\s<]+/g, url=>`<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`).replace(/\n/g,"<br>");}
+function scheduleCount(u){return scheduleTasks().filter(t=>u.onboardingScheduleProgress?.[t.id]).length;}
+function renderScheduleOnboarding(){
+ state.currentView="onboarding";
+ const u=state.session, progress=u.onboardingScheduleProgress||{}, total=scheduleTasks().length, count=scheduleCount(u);
+ const day=OVA_SCHEDULE.find(d=>d.day===state.onboardingDay)||OVA_SCHEDULE.find(d=>d.tasks.some(t=>!t.breakOnly&&!progress[t.id]))||OVA_SCHEDULE[0];
+ state.onboardingDay=day.day;
+ $app.innerHTML=pageShell(`<section class="onboarding-page"><div class="card"><p class="eyebrow">OVA · Three-week onboarding</p><h1>Your training schedule</h1><p>${count} of ${total} scheduled activities marked complete</p><progress style="width:100%" max="${total}" value="${count}"></progress><p class="helper">Source: OVA Onboarding Schedule, 11/16/2026. Open each activity to review materials, complete checks, and join shared sessions. Prototype only; official paperwork remains offline. Never enter credentials, medical or payroll details here.</p><button class="secondary" data-ob-profile-review>Review onboarding questionnaire</button></div><div class="ob-day-grid">${OVA_SCHEDULE.map(d=>{const tasks=d.tasks.filter(t=>!t.breakOnly);return `<button class="${d.day===day.day?'':'secondary'}" data-ob-day="${d.day}">Day ${d.day}<small>${tasks.filter(t=>progress[t.id]).length}/${tasks.length}</small></button>`}).join('')}</div><div class="card"><h2>Week ${Math.ceil(day.day/5)} · Day ${day.day}</h2>${day.tasks.map(t=>`<article class="ob-task"><div class="ob-task-top"><strong>${escapeHtml(t.time)}</strong><span>${t.breakOnly?'Scheduled break':progress[t.id]?'✓ Complete':'Not complete'}</span></div><div class="ob-instructions">${scheduleText(t.text)}</div>${t.breakOnly?'':`<button class="${progress[t.id]?'secondary':''}" data-ob-task="${t.id}">${progress[t.id]?'Review activity':'Start Activity'}</button>`}</article>`).join('')}<div class="actions">${day.day>1?`<button class="secondary" data-ob-day="${day.day-1}">Previous day</button>`:''}${day.day<15?`<button data-ob-day="${day.day+1}">Next day</button>`:''}</div></div><div class="card"><h3>Finish onboarding</h3><p>${count===total?'All scheduled activities are marked complete. This is not official clearance.':'Finish all scheduled activities first.'}</p><button data-finish-onboarding ${count!==total?'disabled':''}>Finish test onboarding</button></div></section>${state.modal?renderModal():''}`);
+}
+async function toggleScheduleTask(id){
+ const uid=state.session.uid; if(!scheduleTasks().some(t=>t.id===id))return;
+ const fresh=await readUser(uid);const progress={...(fresh.onboardingScheduleProgress||{})};if(progress[id])delete progress[id];else progress[id]=new Date().toISOString();
+ await updateDoc(doc(db,"users",uid),{onboardingScheduleProgress:progress,updatedAt:serverTimestamp()});state.session=await readUser(uid);state.users=state.users.map(x=>x.uid===uid?state.session:x);renderScheduleOnboarding();
+}
+function printPrototypeOnboarding(){
+ const u=state.session||{}, w=u.onboardingWelcome||{}, esc=escapeHtml, name=esc([u.firstName,u.lastName].filter(Boolean).join(' '));
+ const html=`<h1>Welcome Wagon — SAMPLE</h1><p>Team member: ${name}</p><p>Preferred name: ${esc(u.usedName||'')}</p><p>Shirt size: ${esc(w.shirtSize||'')}</p><p>Mentor: __________________</p><h1>Staff Bio — SAMPLE</h1><p>Name: ${name}</p><p>Education: ${esc(u.education||'')}</p><p>Why childcare: ${esc(u.whyEarlyEducation||'')}</p><p>Typical day: ${esc(w.typicalDay||'')}</p><h1>Emergency Information — SAMPLE</h1><p>Name: ${name}</p><p>Address: _________________________________</p><p>Phone: __________________ Email: __________________</p><p>Emergency contact: _________________________________</p><h1>Team Safety Contract — SAMPLE</h1><p>Printed name: ${name}</p><p>Signature: __________________ Date: __________</p><p>Prototype only — not the official OVA forms.</p>`;
+ const frame=document.createElement('iframe');frame.style.cssText='position:fixed;width:1px;height:1px;opacity:0;pointer-events:none';document.body.append(frame);frame.contentDocument.open();frame.contentDocument.write(`<html><head><title>OVA prototype paperwork</title><style>body{font:16px Arial;padding:30px}h1{font-size:22px;margin-top:28px}p{margin:18px 0}</style></head><body>${html}</body></html>`);frame.contentDocument.close();frame.contentWindow.focus();frame.contentWindow.print();setTimeout(()=>frame.remove(),60000);
+}
 async function completeOnboardingIfReady() {
   const fresh = await readUser(state.session.uid);
   state.session = fresh;
@@ -6602,6 +6600,7 @@ async function completeOnboardingIfReady() {
   }
   await updateDoc(doc(db, "users", fresh.uid), { onboardingRequired: false, pinResetRequired: false, updatedAt: serverTimestamp() });
   state.session = await readUser(fresh.uid);
+  state.modal=(state.session.passwordRequired||roleRequiresPassword(getPrimaryRole(state.session)))&&!state.session.passwordSet?{type:"forcePasswordSetup"}:null;
   showToast("Onboarding complete.");
   renderHome();
 }
@@ -7021,6 +7020,7 @@ async function saveCampusDiscussion(form) {
   state.modal = null;
   state.campusCaresTab = "discussions";
   renderCampusCaresTool();
+  createNotificationsForUsers(usersAllowedForNotification("campusNotes",schoolIds).filter(u=>u.uid!==state.session.uid),{title:"New campus discussion",body:"A new discussion was opened for your campus.",tool:"campusCares",targetTab:"discussions",schoolIds}).catch(console.warn);
   showToast("Discussion added.");
 }
 
@@ -7052,6 +7052,7 @@ async function saveCampusDiscussionNote(form) {
   await updateDoc(doc(db,"campusCareDiscussions",discussion.id), { notes, updatedAt:serverTimestamp() });
   await loadCampusCareDiscussions();
   state.activeCampusDiscussionId = discussion.id;
+  createNotificationsForUsers(usersAllowedForNotification("campusNotes",recordSchoolIds(discussion)).filter(u=>u.uid!==state.session.uid),{title:"Campus discussion updated",body:"A new note was added to a campus discussion.",tool:"campusCares",targetTab:"discussions",schoolIds:recordSchoolIds(discussion)}).catch(console.warn);
   renderCampusCaresTool();
 }
 
@@ -7107,7 +7108,7 @@ function renderCampusCaresTool(){
   if(canSubmit) tabs.push(['submitted','Tasks I Have Submitted']);
   if(canAssigned) tabs.push(['assigned','Tasks Assigned To Me']);
   if(canViewAll) tabs.push(['all','All Tasks']);
-  if(canViewAll || canManage || canSubmit) tabs.push(['discussions','Ongoing Discussions']);
+
   if(canManage) tabs.push(['completed','Completed Tasks']);
   if(!tabs.length) tabs.push(['submitted','Tasks I Have Submitted']);
   if(!tabs.some(t=>t[0]===state.campusCaresTab)) state.campusCaresTab=tabs[0][0];
@@ -7618,7 +7619,7 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
     if (isEdit) {
       return `
       <div class="modal-backdrop"><form class="modal card profile-edit-modal" id="editUserForm">
-        <h2>Edit User</h2>
+        <h2>Edit User</h2><div class="card"><strong>Onboarding progress</strong><p>${scheduleCount(u)} / ${scheduleTasks().length} scheduled activities · ${(u.onboardingPrototypeSteps||[]).length}/5 questionnaire steps</p><details><summary>Coach sessions / completed activities</summary>${canUseSystemAdmin(state.session)||canUseLeadership(state.session)?`<button type="button" data-ob-coach="${escapeHtml(u.uid)}">Join employee’s active activity</button>`:""}${OVA_SCHEDULE.map(d=>`<p>Day ${d.day}: ${d.tasks.filter(t=>!t.breakOnly&&u.onboardingScheduleProgress?.[t.id]).length}/${d.tasks.filter(t=>!t.breakOnly).length}</p>`).join('')}</details></div>
         <div class="grid two">
           <label>First Name <input name="firstName" required value="${u.firstName || ""}" /></label>
           <label>Last Name <input name="lastName" required value="${u.lastName || ""}" /></label>
@@ -7657,7 +7658,7 @@ if (state.modal.type === "addUser" || state.modal.type === "editUser") {
         <div class="actions">
           <button>Save Changes</button>
           <button type="button" class="secondary" data-reset-pin="${u.uid}">Reset PIN</button>
-          <button type="button" class="secondary" data-reset-user-onboarding="${u.uid}">Reset User</button>
+          ${canUseSystemAdmin(state.session)?`<button type="button" class="secondary" data-reset-user-onboarding="${u.uid}">Reset Onboarding (Testing)</button>`:""}
           <button type="button" class="danger" data-delete-user="${u.uid}">Delete</button>
           <button type="button" class="secondary" data-close-modal>Cancel</button>
         </div>
@@ -7737,7 +7738,7 @@ function renderNotificationSettings(){
   state.currentView="notificationSettings";
   const tool = PERMISSION_TOOLS.find(t=>t.key==="notifications");
   const settings = state.session?.notificationSettings || {};
-  const rows = (tool?.permissions || []).filter(p=>notificationAllowedForUser(state.session,p.key)).map(p=>`<label class="notification-setting-row"><input type="checkbox" name="${p.key}" ${settings[p.key]===true?'checked':''}> <span><strong>${escapeHtml(p.label)}</strong><small>${escapeHtml(p.description)}</small></span></label>`).join("");
+  const rows = (tool?.permissions || []).filter(p=>notificationAllowedForUser(state.session,p.key)).map(p=>`<label class="notification-setting-row"><input type="checkbox" name="${p.key}" ${settings[p.key]!==false?'checked':''}> <span><strong>${escapeHtml(p.label)}</strong><small>${escapeHtml(p.description)}</small></span></label>`).join("");
   $app.innerHTML = pageShell(`<section class="card"><h2>Notifications</h2><p class="helper">Choose the alerts you want. System Admin controls which notification types each role/position is allowed to choose.</p><form id="notificationSettingsForm" class="stack">${rows || '<div class="empty">No notification options are currently available for your role.</div>'}<div class="actions"><button>Save Notifications</button><button type="button" class="secondary" data-action="home">Back Home</button></div></form></section>${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
 }
 async function saveNotificationSettings(form){
@@ -9401,6 +9402,8 @@ function renderCurrentView() {
     return;
   }
   if (state.currentView === "coreChampion") { renderCoreChampionTool(); return; }
+  if (state.currentView === "villageForms") { if(!document.getElementById("village-forms-root")) villageForms.open().catch(showToast); return; }
+  if (state.currentView === "huddle") { if(!document.getElementById("huddle-root")) huddle.open().catch(showToast); return; }
   if (state.currentView === "campusCares") { renderCampusCaresTool(); return; }
   if (state.currentView === "photoPrint") { renderPhotoPrintTool(); return; }
   if (state.currentView === "notificationSettings") { renderNotificationSettings(); return; }
@@ -9790,6 +9793,10 @@ $app.addEventListener('change', async e=>{
  if(e.target.matches('[data-gallery-school]')){if(!allowedSchoolIds().includes(e.target.value))return;state.selectedSchoolId=e.target.value;saveLastSelectedSchool(state.selectedSchoolId);await loadAppGallery();appGalleryCache.selectedAlbum='All';renderAppCamera();}
 });
 $app.addEventListener("click", async (e) => {
+  // Village Forms owns its internal controls. Do not interpret its data-tab attributes as System Admin tabs.
+  if (e.target.closest("#village-forms-root")) return;
+  const coachBtn=e.target.closest('[data-ob-coach]');
+  if(coachBtn){try{if(!canUseLeadership(state.session)&&!canUseSystemAdmin(state.session))throw Error('Leadership access required');const target=await readUser(coachBtn.dataset.obCoach);const id=target.onboardingActiveTask;if(!id||!scheduleTasks().some(t=>t.id===id))throw Error('Employee must start a guided activity first');if(!canUseSystemAdmin(state.session)&&!(target.schoolIds||[]).some(x=>(state.session.schoolIds||[]).includes(x)))throw Error('Different school');await obWorkspace.open(scheduleTasks().find(t=>t.id===id),target,true);}catch(err){showToast(err.message);}return;}
   const portalPick = e.target.closest("[data-portal-choice]");
   if (portalPick && !state.session) {
     state.portalChoice = portalPick.dataset.portalChoice;
@@ -9827,6 +9834,10 @@ $app.addEventListener("click", async (e) => {
   const deleteCertificateId = e.target.closest("[data-delete-certificate]")?.dataset.deleteCertificate;
   const printableTab = e.target.closest("[data-printable-tab]")?.dataset.printableTab;
   const clearBrandingLogo = e.target.closest("[data-clear-branding-logo]");
+  if(e.target.closest("[data-ob-profile-review]")){state.obReviewProfile=true;state.onboardingStep=0;renderOnboardingPage();return;}
+  const obDay=e.target.closest("[data-ob-day]")?.dataset.obDay;if(obDay){state.onboardingDay=Number(obDay);renderScheduleOnboarding();return;}
+  const obTask=e.target.closest("[data-ob-task]")?.dataset.obTask;if(obTask){try{await obWorkspace.open(scheduleTasks().find(t=>t.id===obTask),state.session);}catch(err){showToast(err.message);}return;}
+  if(e.target.closest("[data-prototype-print]")){printPrototypeOnboarding();return;}
   const onboardingPrev = e.target.closest("[data-onboarding-prev]");
   const onboardingGoStep = e.target.closest("[data-onboarding-go-step]")?.dataset.onboardingGoStep;
   const leaderCheckbox = e.target.closest("[data-new-user-leader-checkbox]");
@@ -9839,7 +9850,7 @@ $app.addEventListener("click", async (e) => {
   if (e.target.closest("[data-photo-print-open-upload]")) { document.querySelector("[data-photo-print-upload]")?.click(); return; }
   if (e.target.closest("[data-photo-zoom-reset]")) { setPhotoPrintZoom(1); return; }
   if (onboardingPrev) { state.onboardingStep = Math.max(0, Number(state.onboardingStep || 0) - 1); renderOnboardingPage(); return; }
-  if (onboardingGoStep !== undefined) { state.onboardingStep = Math.max(0, Math.min(Number(onboardingGoStep || 0), 3)); renderOnboardingPage(); return; }
+  if (onboardingGoStep !== undefined) { state.onboardingStep = Math.max(0, Math.min(Number(onboardingGoStep || 0), 4)); renderOnboardingPage(); return; }
   if (modalType === "forcePinChange") { state.modal = { type: "forcePinChange" }; renderCurrentView(); return; }
   if (printableTab) {
     state.printableTab = printableTab;
@@ -10037,15 +10048,19 @@ $app.addEventListener("click", async (e) => {
     return;
   }
   if (e.target.closest("[data-toggle-theme]")) { await withAppLoading("Switching theme...", async () => { toggleThemePreference(); renderCurrentView(); }); return; }
-  if (e.target.closest("[data-toggle-notifications]")) { await withAppLoading("Opening notifications...", async () => { state.notificationsOpen = !state.notificationsOpen; renderCurrentView(); }); return; }
-  if (e.target.closest("[data-clear-notifications]")) { await withAppLoading("Clearing notifications...", async () => { await Promise.all(state.notifications.map(n => updateDoc(doc(db, "notifications", n.id), { read: true, cleared: true }))); state.notificationsOpen = false; await loadNotifications(); renderCurrentView(); }); return; }
+  if (e.target.closest("[data-toggle-notifications]")) { state.notificationsOpen = !state.notificationsOpen; renderCurrentView(); return; }
+  if (e.target.closest("[data-clear-notifications]")) { await withAppLoading("Clearing notifications...", async () => { await Promise.all(state.notifications.map(n => updateDoc(doc(db, "notifications", n.id), { clearedBy: arrayUnion(state.session.uid), readBy: arrayUnion(state.session.uid) }))); state.notificationsOpen = false; await loadNotifications(); renderCurrentView(); }); return; }
   const openNotificationId = e.target.closest("[data-open-notification]")?.dataset.openNotification;
   if (openNotificationId) {
-    await updateDoc(doc(db, "notifications", openNotificationId), { read: true });
+    await updateDoc(doc(db, "notifications", openNotificationId), { readBy: arrayUnion(state.session.uid) });
     const n = state.notifications.find(x => x.id === openNotificationId);
     state.notificationsOpen = false;
     await loadNotifications();
-    if (n?.toolKey === "moneyRequests") { state.moneyRequestsTab = getNotificationTargetTab(n); renderMoneyRequestsTool(); } else renderCurrentView();
+    if (n?.toolKey === "moneyRequests") { state.moneyRequestsTab = getNotificationTargetTab(n); renderMoneyRequestsTool(); }
+    else if(n?.toolKey==="villageForms"){ await villageForms.open(); }
+    else if(n?.toolKey==="huddle"){ await huddle.open(); }
+    else if(n?.tool==="campusCares"){ state.campusCaresTab=n.targetTab||"submitted";renderCampusCaresTool(); }
+    else renderCurrentView();
     return;
   }
   if (saveToolConfigKey) { await withAppLoading("Saving tool settings...", async () => { await saveToolConfig(saveToolConfigKey); renderSystemAdmin(); }); return; }
@@ -10321,6 +10336,8 @@ $app.addEventListener("click", async (e) => {
 
   if (toolId && !canOpenTool(state.session, toolId)) { showToast("This tool is not available for your account."); return; }
   if (toolId === "curriculum") { await openCurriculum(); return; }
+  if (toolId === "villageForms") { state.currentView="villageForms"; await villageForms.open(); return; }
+  if (toolId === "huddle") { state.currentView="huddle"; await huddle.open(); return; }
   if (toolId === "campusCares") { await withAppLoading("Opening Campus Cares...", async () => { await refreshCampusCaresData(); const mode=getCampusCaresOpenPreference(); if (mode === "submitted") state.campusCaresTab = "submitted"; renderCampusCaresTool(); if (mode === "submitPopup") { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); } }); return; }
   if (toolId === "appCamera") { await loadAppGallery();renderAppCamera();return; }
   if (toolId === "photoPrint") { await withAppLoading("Opening Photo Print and Edit...", async () => { await loadPhotoPrintWorkspace(); renderPhotoPrintTool(); }); return; }
@@ -10751,8 +10768,11 @@ if (editRoleId) {
     return;
   }
   if (resetUserOnboarding) {
-    const warning = "Reset this user for onboarding testing? This will set their PIN back to 0000, send them through onboarding again, clear birthday, education, why childcare, What I Like, and move their position back to Unassigned. It will not delete their name, login, role, or locations.";
-    if (confirm(warning)) await resetUserForOnboarding(resetUserOnboarding);
+    const warning = "Reset onboarding progress and questionnaire answers for this user? Their login, role, position and locations will remain unchanged.";
+    if (!canUseSystemAdmin(state.session)) { showToast("System administrator access required."); return; }
+    if (!confirm(warning)) return;
+    await resetUserForOnboarding(resetUserOnboarding);
+    if(state.session.uid===resetUserOnboarding){state.modal=null;state.onboardingDay=1;renderOnboardingPage();return;}
     await refreshAdminData();
     const user = state.users.find(u => u.uid === resetUserOnboarding) || await readUser(resetUserOnboarding);
     state.modal = { type: "editUser", user };
@@ -11653,3 +11673,26 @@ const profileCropObserver = new MutationObserver(() => {
   if (img?.complete && img.naturalWidth) updateProfileCropPreview();
 });
 profileCropObserver.observe(document.body, { childList: true, subtree: true });
+
+const obWorkspace=createWorkspace({catalog:CONTENT,escape:escapeHtml,actor:()=>state.session,start:async(user,task)=>{await updateDoc(doc(db,"users",user.uid),{onboardingActiveTask:task.id});},error:e=>showToast(e.message||String(e)),listen:(key,cb,err)=>onSnapshot(doc(db,"onboardingSessions",key),snap=>cb(snap.data()||{}),err),write:(key,patch)=>setDoc(doc(db,"onboardingSessions",key),patch,{merge:true}),complete:async id=>{const uid=state.session.uid;await updateDoc(doc(db,"users",uid),{["onboardingScheduleProgress."+id]:new Date().toISOString(),onboardingActiveTask:null,updatedAt:serverTimestamp()});state.session=await readUser(uid);renderScheduleOnboarding();}});
+
+const villageForms = createVillageForms({db,collection,doc,getDocs,getDoc,setDoc,updateDoc,deleteDoc,esc:escapeHtml,user:()=>state.session,users:()=>state.users,name:getUserUsedName,schools:()=>state.schools,canManage:()=>hasFullDevAccess(state.session)||getUserRoleKeys(state.session).some(r=>['leader','lead','doso','owner','admin','systemadmin','dev'].includes(String(r).toLowerCase())),shell:()=>{$app.innerHTML=pageShell('<section id="village-forms-root"></section><div id="huddle-toast" role="status"></div>');},toast:showToast,
+  notify:(event,f)=>{const ids=event==="response"?[f.createdBy,...(f.collaborators||[]).map(c=>c.id)]:event==="published"?[...(f.audienceIds||[]),...(f.collaborators||[]).map(c=>c.id)]:[...(f.collaborators||[]).map(c=>c.id)];return notifyParticipants("villageForms",ids,event==="response"?"New form response":event==="published"?"Form published":"Form collaboration invitation",event==="response"?`A response was submitted to ${f.title}.`:`${f.title} is ready in Village Forms.`,f.schoolIds||[],"forms");}
+});
+const huddle = createHuddle({db,collection,doc,getDocs,getDoc,setDoc,updateDoc,query,where,runTransaction,onSnapshot,deleteDoc,esc:escapeHtml,user:()=>state.session,users:()=>state.users,name:getUserUsedName,schools:()=>state.schools,locations:()=>state.campusCareLocations,schoolName:getSchoolNameById,legacy:()=>state.campusCareDiscussions.filter(d=>campusDiscussionInUserScope(d)),compress:compressDiscussionImage,timestamp:serverTimestamp,assignable:(u,s)=>userSchoolMatchesScope([s],u)&&(hasToolPermission(u,'campusCares','assigned')||hasToolPermission(u,'campusCares','manage')),can:k=>{const defaults=hasViewedRole(state.session,k==='approve'?['doso','owner','admin','systemadmin','dev']:['leader','lead','doso','owner','admin','systemadmin','dev']);const r=state.roles.find(r=>getUserRoleKeys(getViewedRoleUser(state.session)).includes(normalizeRoleKey(r.key)));return defaults&&(!r?.permissions?.huddle?.[k]||hasToolPermission(state.session,'huddle',k));},prepare:async()=>{await Promise.all([loadAllUsers(),loadCampusCaresAdmin(),loadCampusCareDiscussions()]);},shell:()=>{$app.innerHTML=pageShell('<section id="huddle-root" class="card"></section><div id="huddle-toast" role="status"></div>');},notify:(event,h,ids)=>notifyParticipants("huddle",ids,event==="new"?"New Huddle":event==="proposal"?"New Huddle proposal":event==="approval"?"Huddle decision":"Huddle update",`An update is available in ${h.title}.`,h.schoolIds||[],"open"),
+toast:m=>{const t=document.getElementById('huddle-toast');if(t){t.textContent=m;setTimeout(()=>{t.textContent=''},5000);}}});
+
+
+// Close notification tray on any outside click, Escape or focus change.
+document.addEventListener("pointerdown",event=>{
+  if(!state.notificationsOpen)return;
+  if(event.target.closest(".notification-panel,[data-toggle-notifications]"))return;
+  state.notificationsOpen=false;
+  document.querySelector(".notification-panel")?.remove();
+},true);
+document.addEventListener("keydown",event=>{
+  if(event.key==="Escape"&&state.notificationsOpen){
+    state.notificationsOpen=false;document.querySelector(".notification-panel")?.remove();
+    document.querySelector("[data-toggle-notifications]")?.focus();
+  }
+});
