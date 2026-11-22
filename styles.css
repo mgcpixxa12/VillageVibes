@@ -6385,3 +6385,98 @@ body {
  .home-tool-wrap .tool-tile-controls .mini-icon-button{width:25px!important;height:25px!important;min-width:25px!important;min-height:25px!important}
  .square-tool-tile .vv-fresh-tool-icon{width:53px!important;height:53px!important}
 }
+
+/* v267 shortcuts and hidden tools */
+.vv-hidden-tool-list{display:grid;gap:10px;margin-top:12px}.vv-hidden-tool-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:10px;border:1px solid var(--border, #8884);border-radius:10px}.vv-hidden-tool-row p{margin:4px 0 0}.vv-shortcut-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.vv-shortcut{display:inline-flex;align-items:center;gap:3px}.vv-shortcut-folder{position:relative;border:1px solid var(--border,#8884);border-radius:8px;padding:7px}.vv-shortcut-folder summary{cursor:pointer}.vv-shortcut-dropdown{display:flex;flex-direction:column;gap:7px;padding:9px;min-width:180px}.vv-shortcut-bar .bookmark-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+
+/* v269 consistent checkbox/radio geometry and label alignment */
+#app input[type="checkbox"], #app input[type="radio"], .vf-shell input[type="checkbox"], .vf-shell input[type="radio"] {
+  appearance:auto!important; -webkit-appearance:auto!important;
+  display:inline-block!important; box-sizing:border-box!important;
+  width:18px!important; height:18px!important; min-width:18px!important; min-height:18px!important;
+  max-width:18px!important; max-height:18px!important; flex:0 0 18px!important;
+  margin:0!important; padding:0!important; vertical-align:middle!important;
+  accent-color:#24765a; cursor:pointer;
+}
+#app label:has(>input[type="checkbox"]), #app label:has(>input[type="radio"]),
+#app .check-row, #app .checkbox-grid label,
+.vf-shell label:has(>input[type="checkbox"]), .vf-shell label:has(>input[type="radio"]) {
+  display:inline-flex!important; align-items:center!important; justify-content:flex-start!important;
+  gap:10px!important; text-align:left!important;
+}
+#app .checkbox-grid {gap:12px;}
+.vv-formula-toolbar {display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:10px 0;}
+.vv-formula-toolbar button {min-width:38px;}
+.vv-formula-amount {display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}
+.vv-formula-amount input {width:90px!important;min-width:65px!important;}
+.vv-formula-preview {font-size:.86rem;font-weight:600;margin:8px 0 0;}
+.vv-formula-invalid {color:#b63b3b;}
+
+/* v271 budget cards and natural formula controls */
+.vv-budget-code-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:12px}
+.vv-budget-code-card{min-width:0;padding:14px;display:flex;flex-direction:column;gap:10px}
+.vv-budget-code-card .name-button{width:100%;text-align:left}
+.vv-budget-campus{border-top:1px solid var(--border,rgba(120,120,120,.3));padding-top:8px}
+.vv-budget-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 12px;margin:8px 0}
+.vv-budget-metrics span{display:flex;flex-direction:column;font-size:.8rem;opacity:.9;gap:2px}
+.vv-budget-metrics strong{font-size:1rem;opacity:1}
+.vv-budget-balance-hint{grid-column:1/-1;padding:10px;border:1px solid var(--border,rgba(120,120,120,.3));border-radius:10px;margin-top:8px}
+.vv-formula-easy,.vv-formula-easy-row{display:flex;flex-wrap:wrap;align-items:end;gap:9px;margin:10px 0}
+.vv-formula-easy-row label{flex:1 1 110px;min-width:100px}
+.vv-formula-easy-row input,.vv-formula-easy-row select{width:100%;max-width:100%}
+.vv-formula-easy details{width:100%}
+.vv-formula-easy summary{cursor:pointer;margin:8px 0}
+@media(max-width:520px){.vv-budget-metrics{grid-template-columns:1fr 1fr}.vv-formula-easy-row label{flex:1 1 100%}}
+
+/* v272: budget figures blend into existing code list and request rows */
+.name-button .vv-budget-mini-row{display:flex;flex-wrap:wrap;align-items:center;gap:5px 14px;margin-top:5px;font-size:.78rem;font-weight:400;opacity:.9}
+.name-button .vv-budget-mini-row strong{font-size:inherit;font-weight:700;color:inherit}
+.name-button .vv-budget-campus-name{font-weight:600;opacity:.8}
+.vv-budget-balance-hint{grid-column:1/-1;margin-top:3px;padding:0;border:0;border-radius:0;background:transparent;font-size:.8rem;opacity:.85}
+.vv-budget-balance-hint strong{font-weight:700}
+
+/* v273: collapsed, unobtrusive budget figures */
+.vv-budget-code-card{min-width:0}
+.vv-budget-code-card>.name-button{width:100%}
+.vv-budget-details{padding:0 10px 7px;font-size:.78rem}
+.vv-budget-details>summary{cursor:pointer;color:var(--muted,#777);font-size:.78rem;padding:5px 0;list-style:revert}
+.vv-budget-details .vv-budget-mini-row{display:flex;gap:7px 14px;flex-wrap:wrap;padding:4px 0}
+
+/* v275 budget access controls */
+.vv-budget-access-role{padding:9px 0;border-top:1px solid var(--border-color,rgba(128,128,128,.2))}
+.vv-budget-position-options{display:flex;gap:6px 14px;flex-wrap:wrap;margin:5px 0 0 24px;align-items:center}
+.vv-budget-position-options .check-row{font-size:.82rem;margin:0}
+
+/* v276 budget analytics */
+.vv-analytics-dashboard{display:grid;gap:14px;margin-top:14px}
+.vv-analytics-controls,.vv-analytics-chart-controls{display:flex;align-items:end;gap:12px;flex-wrap:wrap}
+.vv-analytics-controls label,.vv-analytics-chart-controls label{display:grid;gap:4px;font-size:.82rem;min-width:140px}
+.vv-analytics-controls select,.vv-analytics-chart-controls select{max-width:230px}
+.vv-analytics-period-nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;justify-content:center}
+.vv-analytics-period-nav strong{font-size:.86rem;text-align:center}
+.vv-analytics-period-nav button{padding:7px 11px;min-width:36px}
+.vv-analytics-chart-controls h3{margin:0 auto 0 0}
+.vv-analytics-bars{display:grid;gap:12px;margin-top:15px}
+.vv-analytics-bar-row{min-width:0}
+.vv-analytics-bar-heading{display:flex;justify-content:space-between;gap:12px;font-size:.82rem;margin-bottom:5px}
+.vv-analytics-bar-heading span{overflow-wrap:anywhere}
+.vv-analytics-track{height:12px;background:var(--border);border-radius:10px;overflow:hidden}
+.vv-analytics-track>div{height:100%;border-radius:10px;background:var(--accent,#318a79);min-width:0}
+.vv-analytics-pie-wrap{display:flex;gap:24px;flex-wrap:wrap;align-items:center;margin:18px 0}
+.vv-analytics-pie{width:210px;height:210px;border-radius:50%;display:grid;place-items:center;flex:none}
+.vv-analytics-pie>div{border-radius:50%;width:120px;height:120px;background:var(--card);display:flex;flex-direction:column;justify-content:center;align-items:center;font-weight:700;font-size:1.1rem;text-align:center}
+.vv-analytics-pie small{font-size:.72rem;font-weight:400}
+.vv-analytics-legend{display:grid;gap:8px;flex:1;min-width:200px}
+.vv-analytics-legend>div{display:flex;align-items:center;gap:8px;font-size:.83rem}
+.vv-analytics-legend i{width:12px;height:12px;flex:none;border-radius:3px}
+.vv-analytics-legend span{flex:1}
+.vv-analytics-table-scroll{overflow-x:auto;margin-top:12px}
+.vv-analytics-table{border-collapse:collapse;width:100%;font-size:.8rem;white-space:nowrap}
+.vv-analytics-table th,.vv-analytics-table td{padding:9px;border-bottom:1px solid var(--border);text-align:right}
+.vv-analytics-table th:first-child,.vv-analytics-table td:first-child{text-align:left}
+@media(max-width:600px){.vv-analytics-period-nav{order:3;flex-basis:100%}.vv-analytics-pie{width:180px;height:180px}}
+
+/* v280: uniform square artwork and tile footprint, including Events */
+.home-tool-wrap .square-tool-tile{aspect-ratio:1/1!important;min-height:0!important;width:100%!important;box-sizing:border-box!important}
+.home-tool-wrap .square-tool-tile .tool-tile-image{width:78px!important;height:78px!important;max-width:78px!important;max-height:78px!important;object-fit:contain!important;flex-shrink:0!important}
+@media(max-width:600px){.home-tool-wrap .square-tool-tile .tool-tile-image{width:60px!important;height:60px!important}}

@@ -1,3 +1,4 @@
+import {createEvents} from "./events-tool.js?v=282";
 import {createVillageForms} from "./village-forms.js?v=262";
 import {createHuddle} from "./huddle.js?v=262";
 import {createWorkspace} from "./onboarding-workspace.js?v=231";
@@ -23,6 +24,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  addDoc,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -32,7 +34,7 @@ import {
   serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v265-transparent-logos";
+const VV_APP_VERSION = "v280-event-library";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -302,19 +304,20 @@ function orderToolsForHome(tools) {
   const idx = new Map((prefs.order || []).map((id, i) => [id, i]));
   return [...tools].sort((a,b)=>(idx.has(a.id)?idx.get(a.id):999)-(idx.has(b.id)?idx.get(b.id):999) || String(a.title).localeCompare(String(b.title)));
 }
-const TOOL_LOGO_ASSETS = {"moneyRequests": "moneyRequests", "campusCares": "campusCares", "photoPrint": "photoPrint", "coreChampion": "coreChampion", "villageVoice": "villageVoice", "curriculum": "curriculum", "villageForms": "villageForms", "huddle": "huddle", "appCamera": "appCamera", "onboarding": "onboarding", "calendar": "calendar", "permissions": "permissions", "oleKits": "oleKits"};
+const TOOL_LOGO_ASSETS = {"moneyRequests": "moneyRequests", "campusCares": "campusCares", "photoPrint": "photoPrint", "coreChampion": "coreChampion", "villageVoice": "villageVoice", "curriculum": "curriculum", "villageForms": "villageForms", "huddle": "huddle", "appCamera": "appCamera", "onboarding": "onboarding", "calendar": "calendar", "permissions": "permissions", "oleKits": "oleKits", "events": "events"};
 function toolLogoAsset(id){const key=TOOL_LOGO_ASSETS[id];return key?`tool-logos/${key}.png`:"";}
 function renderToolTile(tool, extraClass = "") {
   const t = getToolDisplay(tool);
   const bookmarked = isToolBookmarked(t.id);
   return `<div class="home-tool-wrap ${extraClass}" draggable="true" data-drag-tool="${t.id}" data-tool-card="${t.id}">
     <button class="tool-tile square-tool-tile" data-tool="${t.id}" type="button">
-      ${t.imageData ? `<img class="tool-tile-image" src="${t.imageData}" alt="${escapeHtml(t.title)}" />` : toolLogoAsset(t.id) ? `<img class="tool-tile-image vv-fresh-tool-icon" src="${toolLogoAsset(t.id)}" alt="" loading="lazy" />` : `<div class="tool-icon">${t.icon}</div>`}
+      ${t.imageData ? `<img class="tool-tile-image" src="${t.imageData}" alt="${escapeHtml(t.title)}" />` : t.id !== "events" && toolLogoAsset(t.id) ? `<img class="tool-tile-image vv-fresh-tool-icon" src="${toolLogoAsset(t.id)}" alt="" loading="lazy" />` : `<div class="tool-icon">${t.icon}</div>`}
       <h3>${t.title}</h3>
     </button>
     <div class="tool-tile-controls">
       ${t.id === "campusCares" ? `<button class="mini-icon-button" type="button" title="Tool settings" aria-label="Campus Cares settings" data-campus-open-menu>⋯</button>` : ""}
       <button class="mini-icon-button" type="button" title="${bookmarked ? "Unpin" : "Pin to sidebar"}" aria-label="${bookmarked ? "Unpin" : "Pin to sidebar"} ${escapeHtml(t.title)}" data-bookmark-tool="${t.id}">${bookmarked ? "★" : "☆"}</button>
+      <button class="mini-icon-button" type="button" title="Add shortcut" aria-label="Add shortcut to ${escapeHtml(t.title)}" data-add-shortcut="${escapeHtml(t.id)}">↗</button>
       <button class="mini-icon-button" type="button" title="Hide tool" aria-label="Hide ${escapeHtml(t.title)}" data-hide-tool="${t.id}">×</button>
       ${t.id === "campusCares" ? `<div class="tool-tile-menu" data-campus-open-menu-panel><strong>Open Campus Cares to:</strong><button type="button" data-campus-open-mode="submitPopup">Submit Request popup</button><button type="button" data-campus-open-mode="tool">Open the tool</button><button type="button" data-campus-open-mode="submitted">View Your Submissions</button></div>` : ""}
     </div>
@@ -383,6 +386,13 @@ function renderRosterSection(title, users, emptyText = "No users found.") {
 }
 
 const PERMISSION_TOOLS = [
+  { key: "events", name: "Events", permissions: [
+    {key:"view",label:"View Events",description:"Browse event tiles and read planning and history records for assigned campuses."},
+    {key:"manage",label:"Manage Events",description:"Add, edit, delete, and import events and upload event images for assigned campuses."}
+  ] },
+  { key: "campusEnrollment", name: "Campus Enrollment", permissions: [
+    { key: "manage", label: "Update campus enrollment", description: "Enter enrollment for a campus to calculate monthly budgets. Assign to DOSO only." }
+  ] },
   { key: "curriculum", name: "Curriculum", permissions: [
     { key: "viewThemes", label: "View Weekly Themes", description: "Read the weekly themes calendar." },
     { key: "editThemes", label: "Manage Weekly Themes", description: "Create and update weekly themes." },
@@ -527,6 +537,7 @@ let state = {
   campusCareTasks: [],
   campusCareDiscussions: [],
   budgetCodes: [],
+  campusEnrollments: {},
   importantDates: [],
   weeklyThemes: [],
   curriculumTab: "weeklyThemes",
@@ -555,6 +566,7 @@ let state = {
   adminTab: "schools",
   leadershipTab: "users",
   ownerTab: "budgetCodes",
+  budgetAnalytics: {period:"month", offset:0, school:"all", chart:"bars", metric:"spent"},
   moneyRequestsTab: "submit",
   campusCaresTab: "submit",
   expandedCampusCareId: "",
@@ -569,6 +581,7 @@ let state = {
   adminLoginOpen: false,
   devViewRoleKey: "",
   devViewPosition: "",
+  devViewSchoolId: "",
   editMoneyRequestId: "",
   onboardingStep: 0,
   publicShareView: null,
@@ -779,7 +792,7 @@ function getPrimaryRole(user) {
 }
 
 function devPreviewActive() {
-  return isSystemAdmin(state.session) && (!!state.devViewRoleKey || !!state.devViewPosition);
+  return isSystemAdmin(state.session) && (!!state.devViewRoleKey || !!state.devViewPosition || !!state.devViewSchoolId);
 }
 
 function hasFullDevAccess(user = state.session) {
@@ -795,7 +808,8 @@ function getPermissionUser(user = state.session) {
     roles: [state.devViewRoleKey || getPrimaryRole(user)].filter(Boolean),
     roleKeys: [state.devViewRoleKey || getPrimaryRole(user)].filter(Boolean),
     teamPosition: state.devViewPosition || user.teamPosition || user.position || "",
-    position: state.devViewPosition || user.position || user.teamPosition || ""
+    position: state.devViewPosition || user.position || user.teamPosition || "",
+    ...(state.devViewSchoolId ? { schoolIds: [state.devViewSchoolId], schoolId: state.devViewSchoolId } : {})
   };
 }
 
@@ -877,7 +891,7 @@ async function refreshAdminData({ maxAgeMs = 0 } = {}) {
       loadSchools(), loadAllUsers(), loadPositions(), loadRoles(),
       loadCoreChampionRounds(), loadMoneyRequestTypes(), loadMoneyRequests(),
       loadCampusCaresAdmin(), loadCampusCareTasks(), loadCampusCareDiscussions(),
-      loadBudgetCodes(), loadImportantDates(), loadWeeklyThemes(),
+      loadBudgetCodes(), loadCampusEnrollments(), loadImportantDates(), loadWeeklyThemes(),
       loadCertificates(), loadAppSettings(), loadAppTools(), loadNotifications(),
       loadVillageVoiceDraft(), loadPrintableDrafts(), loadIllnessNoticeTemplates()
     ]);
@@ -902,6 +916,7 @@ async function refreshMoneyRequestsData() {
     loadCampusCareTasks(),
     loadCampusCareDiscussions(),
     loadBudgetCodes(),
+    loadCampusEnrollments(),
     loadNotifications()
   ]);
 }
@@ -1412,7 +1427,7 @@ async function loadIllnessNoticeTemplates() {
 function userSchoolMatchesScope(schoolIds = [], user = state.session) {
   const scopedIds = Array.isArray(schoolIds) ? schoolIds.filter(Boolean) : [];
   if (!scopedIds.length) return isSystemAdmin(user);
-  if (isSystemAdmin(user)) return true;
+  if (isSystemAdmin(user) && !(user?.uid === state.session?.uid && devPreviewActive() && state.devViewSchoolId)) return true;
   const userIds = getUserSchoolIds(user);
   if (!userIds.length) return false;
   return scopedIds.some(id => userIds.includes(id));
@@ -1465,6 +1480,11 @@ async function createNotification(payload) {
     createdAt: serverTimestamp(),
     ...payload
   });
+}
+
+async function loadCampusEnrollments() {
+  const snap = await getDocs(collection(db, "campusEnrollments"));
+  state.campusEnrollments = Object.fromEntries(snap.docs.map(d => [d.id, d.data()]));
 }
 
 async function loadBudgetCodes() {
@@ -1843,6 +1863,7 @@ function getAvailableTools(user) {
   if(user?.accountType!=="family") tools.push({id:"villageForms",title:"Village Forms",icon:"📝",desc:"Build forms, use templates and collect responses."});
   if(user?.accountType!=="family") tools.push({id:"huddle",title:"The Huddle",icon:"💬",desc:"Collaborate, propose solutions and assign approved tasks."});
 
+  if (user?.accountType !== "family" && (hasToolPermission(user,"events","view") || hasToolPermission(user,"events","manage") || hasFullDevAccess(user) || (getUserRoleKeys(user).some(r=>["leader","owner","admin","systemadmin"].includes(r)) && !state.roles.some(role=>getUserRoleKeys(user).includes(normalizeRoleKey(role.key||role.name)) && role.permissions?.events)))) tools.push({id:"events",title:"Events",icon:"📅",desc:"School event planning and historical records."});
   const canSubmitMoney = hasToolPermission(user, "moneyRequests", "submit");
   const canApproveMoney = hasToolPermission(user, "moneyRequests", "approvePending");
   const canProcessMoney = hasToolPermission(user, "moneyRequests", "processApproved");
@@ -1887,12 +1908,91 @@ function getAvailableTools(user) {
   return tools.filter(tool => isToolActive(tool.id));
 }
 
+function calculateBudgetFormula(formula, enrollment) {
+  const source = String(formula || "").replace(/\s+/g, "");
+  if (!source) return null;
+  const tokens = source.match(/enrollment|(?:\d+(?:\.\d+)?|\.\d+)|[()+\-*/]/g) || [];
+  if (tokens.join("") !== source) return null;
+  let i = 0;
+  function factor() {
+    if (tokens[i] === "-") { i++; return -factor(); }
+    if (tokens[i] === "+") { i++; return factor(); }
+    if (tokens[i] === "(") { i++; const x = expression(); if (tokens[i++] !== ")") throw Error("Parentheses"); return x; }
+    const t = tokens[i++];
+    if (t === "enrollment") return enrollment;
+    if (t == null || !Number.isFinite(Number(t))) throw Error("Number");
+    return Number(t);
+  }
+  function term() { let x = factor(); while (tokens[i] === "*" || tokens[i] === "/") { const op = tokens[i++]; const y = factor(); x = op === "*" ? x * y : x / y; } return x; }
+  function expression() { let x = term(); while (tokens[i] === "+" || tokens[i] === "-") { const op = tokens[i++]; const y = term(); x = op === "+" ? x + y : x - y; } return x; }
+  try { const result = expression(); return i === tokens.length && Number.isFinite(result) && result >= 0 ? Math.round(result * 100) / 100 : null; } catch { return null; }
+}
+function readBudgetSettings(form) {
+  const formula = form.budgetFormula?.value.trim() || "";
+  if (formula && calculateBudgetFormula(formula, 100) === null) throw Error("Invalid budget formula. Use enrollment, numbers, +, -, *, /, and parentheses.");
+  return { budgetFormula: formula, monthlyRollover: !!form.monthlyRollover?.checked };
+}
+function getCampusEnrollment(schoolId) { return Math.max(0, Number(state.campusEnrollments[schoolId]?.enrollment || 0)); }
+function getMonthlyBudgetAllocation(code, schoolId) { return calculateBudgetFormula(code?.budgetFormula, getCampusEnrollment(schoolId)); }
+// Each campus/code has a manually established starting remaining balance.
+// At the first day of each subsequent month, add that month's allocation if rollover
+// is enabled; approved spending after the starting point reduces the balance.
+function budgetRequestDate(req) {
+  const raw = req.ownerApprovedAt || req.createdAt;
+  if (raw?.toDate) return raw.toDate();
+  if (raw?.seconds) return new Date(raw.seconds * 1000);
+  if (req.todayDate) { const d = new Date(req.todayDate + "T12:00:00"); if (!isNaN(d)) return d; }
+  return null;
+}
+function getBudgetBalance(code, schoolId) {
+  const monthly = getMonthlyBudgetAllocation(code, schoolId);
+  if (monthly === null) return null;
+  const now = new Date();
+  const savedAnchor = code?.startingBalances?.[schoolId];
+  // Without a manual starting amount, start with this month's calculated allocation.
+  // The default is implicit, so a manually set starting balance always takes precedence.
+  const anchor = savedAnchor && savedAnchor.remaining !== '' && savedAnchor.remaining != null
+    && Number.isFinite(Number(savedAnchor.remaining)) && /^\d{4}-\d{2}$/.test(savedAnchor.month || '')
+    ? savedAnchor
+    : {remaining:monthly, month:now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0'), setAt:new Date(now.getFullYear(),now.getMonth(),1).toISOString()};
+  const [startYear,startMonth] = anchor.month.split("-").map(Number);
+  const months = (now.getFullYear()-startYear)*12 + (now.getMonth()+1-startMonth);
+  if (months < 0) return {monthly,remaining:null,uninitialized:true};
+  const rollover = !!code.monthlyRollover;
+  const periodStart = rollover ? new Date(startYear,startMonth-1,1) : new Date(now.getFullYear(),now.getMonth(),1);
+  const anchorTime = anchor.setAt?.toDate ? anchor.setAt.toDate() : (anchor.setAt?.seconds ? new Date(anchor.setAt.seconds*1000) : new Date(anchor.setAt || periodStart));
+  const spendFrom = new Date(Math.max(periodStart.getTime(),anchorTime.getTime()));
+  let spent = 0;
+  for (const req of state.moneyRequests || []) {
+    if (req.requestSchoolId !== schoolId) continue;
+    if (normalizeMoneyRequestStatus(req.status) !== "finalApproved") continue;
+    const date = budgetRequestDate(req);
+    if (!date || date < spendFrom || date > now) continue;
+    spent += (req.items || []).filter(item => String(item.budgetCode || "").trim().toLowerCase() === String(code.code || "").trim().toLowerCase()).reduce((sum,item)=>sum+moneyAmountFromItem(item),0);
+  }
+  // The manually entered figure is the remaining balance at the moment it is set,
+  // so the initial month's allocation is already included in it.
+  const base = rollover ? Number(anchor.remaining) + months*monthly : (months===0 ? Number(anchor.remaining) : monthly);
+  return {monthly,remaining:Math.round((base-spent)*100)/100,uninitialized:false};
+}
+function renderBudgetBalanceForCode(code) {
+  const schools = state.schools.filter(sc => budgetCodeAppliesToSchool(code,sc.id));
+  return `<details class="vv-budget-details"><summary>View budget amounts</summary>${schools.map(sc=>{
+    const balance=getBudgetBalance(code,sc.id);
+    return `<div class="vv-budget-mini-row"><span class="vv-budget-campus-name">${escapeHtml(sc.name)}</span><span>Monthly <strong>${balance?formatCurrency(balance.monthly):'—'}</strong></span><span>Total remaining <strong>${balance?.remaining!=null?formatCurrency(balance.remaining):'Set starting balance'}</strong></span></div>`;
+  }).join("")}</details>`;
+}
+function renderCampusEnrollmentManager() {
+  return `<div class="card subtle-card"><h3>Campus enrollment</h3><p class="helper">The DOSO enters enrollment for their assigned campus. All monthly budget formulas use this number. Historical monthly snapshots are not yet implemented.</p><div class="grid two">${state.schools.filter(sc => allowedSchoolIds().includes(sc.id)).map(sc => `<form class="card" data-enrollment-form><input type="hidden" name="schoolId" value="${escapeHtml(sc.id)}"/><label>${escapeHtml(sc.name)}<input name="enrollment" type="number" min="0" step="1" required value="${getCampusEnrollment(sc.id)}" /></label><button type="submit">Save enrollment</button></form>`).join("")}</div></div>`;
+}
 async function addBudgetCode(form) {
   const schoolIds = Array.from(form.querySelectorAll('[name="budgetSchoolIds"]:checked')).map(i => i.value);
   const allSchools = form.allSchools?.checked !== false;
   await setDoc(doc(collection(db, "budgetCodes")), {
     code: form.code.value.trim(),
     category: form.category.value.trim(),
+    ...readBudgetSettings(form),
+    access: readBudgetAccess(form),
     allSchools,
     schoolIds: allSchools ? [] : schoolIds,
     active: true,
@@ -1905,9 +2005,24 @@ async function addBudgetCode(form) {
 async function updateBudgetCode(form) {
   const schoolIds = Array.from(form.querySelectorAll('[name="budgetSchoolIds"]:checked')).map(i => i.value);
   const allSchools = form.allSchools?.checked !== false;
+  const oldCode = state.modal.budgetCode;
+  const startingBalances = {...(oldCode.startingBalances || {})};
+  const now = new Date();
+  for (const school of state.schools) {
+    const field = form.elements.namedItem(`startingBalance_${school.id}`);
+    if (!field || !String(field.value).trim()) continue;
+    const amount = Number(field.value);
+    if (!Number.isFinite(amount) || amount < 0) throw Error("Starting remaining budget must be a nonnegative amount.");
+    if (Number(startingBalances[school.id]?.remaining) !== amount || !startingBalances[school.id]) {
+      startingBalances[school.id] = {remaining:amount,month:now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0"),setAt:now.toISOString()};
+    }
+  }
   await updateDoc(doc(db, "budgetCodes", state.modal.budgetCode.id), {
+    startingBalances,
     code: form.code.value.trim(),
     category: form.category.value.trim(),
+    ...readBudgetSettings(form),
+    access: readBudgetAccess(form),
     allSchools,
     schoolIds: allSchools ? [] : schoolIds,
     updatedAt: serverTimestamp()
@@ -2152,11 +2267,13 @@ function getNotificationTargetTab(n) {
 function renderDevPreviewControls() {
   if (!isSystemAdmin(state.session)) return "";
   const roleOptions = state.roles.map(r => `<option value="${r.key || r.name}" ${state.devViewRoleKey === (r.key || r.name) ? "selected" : ""}>${r.name}</option>`).join("");
+  const schoolOptions = state.schools.filter(s => s.active !== false).map(s => `<option value="${escapeHtml(s.id)}" ${state.devViewSchoolId === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
   const positionOptions = state.positions.map(p => `<option value="${p.name}" ${state.devViewPosition === p.name ? "selected" : ""}>${p.name}</option>`).join("");
   return `<div class="dev-preview-controls">
     <span>Preview as</span>
     <select data-dev-view-role><option value="">Actual role / full dev</option>${roleOptions}</select>
     <select data-dev-view-position><option value="">Actual position</option>${positionOptions}</select>
+    <select data-dev-view-school aria-label="Preview location"><option value="">All locations / actual assignment</option>${schoolOptions}</select>
     ${devPreviewActive() ? `<button class="secondary small" type="button" data-clear-dev-preview>Clear preview</button>` : ""}
   </div>`;
 }
@@ -2175,7 +2292,7 @@ function pageShell(content) {
     ["ownersPanel", "◇", "Owners", canUseOwnersPanel(state.session)],
     ["systemAdmin", "⚙", "System admin", canUseSystemAdmin(state.session)]
   ];
-  const pageTitles = { profile: "My profile", curriculum: "Curriculum", home: "Home", leadership: "Leadership", ownersPanel: "Owners", systemAdmin: "System admin" };
+  const pageTitles = { profile: "My profile", events: "Events", curriculum: "Curriculum", home: "Home", leadership: "Leadership", ownersPanel: "Owners", systemAdmin: "System admin" };
   const currentTitle = pageTitles[state.currentView] || "Workspace";
   const pinnedTools = getAvailableTools(state.session).filter(t => isToolBookmarked(t.id));
   const pinnedHtml = pinnedTools.map(t => `<button type="button" class="vv-nav-link ${state.currentView === t.id ? 'is-current' : ''}" data-tool="${escapeHtml(t.id)}"><span class="vv-nav-icon">${toolLogoAsset(t.id) ? `<img src="${toolLogoAsset(t.id)}" alt="" class="vv-nav-tool-logo" />` : t.icon}</span><span>${escapeHtml(getToolDisplay(t).title)}</span></button>`).join('');
@@ -2312,6 +2429,19 @@ function renderLanding() {
   `;
 }
 
+function renderShortcutBar(allTools) {
+  const prefs = getToolPrefs();
+  const shortcuts = (prefs.shortcuts || []).filter(s => allTools.some(t => t.id === s.toolId));
+  const folders = prefs.shortcutFolders || [];
+  return `<div class="card slim-card vv-shortcut-bar"><div class="vv-shortcut-heading"><strong>Shortcuts</strong><button class="secondary small" data-create-shortcut-folder type="button">+ Folder</button></div><div class="bookmark-tools">${shortcuts.filter(s=>!s.folderId).map(s=>`<span class="vv-shortcut"><button type="button" class="bookmark-chip" data-open-shortcut="${escapeHtml(s.toolId)}">${escapeHtml(s.label)}</button><button class="secondary small" data-edit-shortcut="${escapeHtml(s.id)}" aria-label="Edit shortcut">⋯</button></span>`).join("")}${folders.map(f=>`<details class="vv-shortcut-folder"><summary>📁 ${escapeHtml(f.name)}</summary><div class="vv-shortcut-dropdown">${shortcuts.filter(s=>s.folderId===f.id).map(s=>`<span class="vv-shortcut"><button type="button" class="bookmark-chip" data-open-shortcut="${escapeHtml(s.toolId)}">${escapeHtml(s.label)}</button><button class="secondary small" data-edit-shortcut="${escapeHtml(s.id)}">⋯</button></span>`).join("") || '<span class="helper">Empty folder</span>'}</div></details>`).join("")}</div></div>`;
+}
+function addShortcut(toolId, label) {
+  const tool = getAvailableTools(state.session).map(getToolDisplay).find(t=>t.id===toolId);
+  if (!tool) { showToast("Tool not available."); return; }
+  const prefs=getToolPrefs(); prefs.shortcuts=prefs.shortcuts||[];
+  if (prefs.shortcuts.some(s=>s.toolId===toolId)) { showToast("Shortcut already added."); return; }
+  prefs.shortcuts.push({id:crypto.randomUUID(),toolId,label:label||tool.title,folderId:""}); saveToolPrefs(prefs); showToast("Shortcut added.");
+}
 function renderHome() {
   if (state.session && isOnboardingRequired(state.session)) { renderOnboardingPage(); return; }
   state.currentView = "home";
@@ -2323,7 +2453,7 @@ function renderHome() {
   const visibleTools = allTools.filter(t => !(prefs.hidden || []).includes(t.id));
   const hiddenTools = allTools.filter(t => (prefs.hidden || []).includes(t.id));
   const search = String(state.homeToolSearch || "").trim().toLowerCase();
-  const searchedHidden = search ? hiddenTools.filter(t => `${t.title} ${t.desc}`.toLowerCase().includes(search)) : [];
+  const searchedHidden = search ? hiddenTools.filter(t => `${t.title} ${t.desc}`.toLowerCase().includes(search)) : hiddenTools;
 
   $app.innerHTML = pageShell(`
     <section class="grid">
@@ -2332,12 +2462,12 @@ function renderHome() {
         <p class="helper">Everything you need to keep your village thriving, all in one place. Pin your favorites, rearrange your tools, and make this space your own.</p>
       </div>
 
-      ${bookmarked.length ? `<div class="bookmark-bar card slim-card"><strong>Bookmarked</strong><div class="bookmark-tools">${bookmarked.map(t => `<button class="bookmark-chip" data-tool="${t.id}" type="button">${t.title}</button>`).join("")}</div></div>` : ""}
+      ${renderShortcutBar(allTools)}
 
       <div class="tool-home-actions">
         <input placeholder="Search hidden tools..." data-home-tool-search value="${state.homeToolSearch || ""}" />
       </div>
-      ${searchedHidden.length ? `<div class="card slim-card"><strong>Hidden tools</strong><div class="bookmark-tools">${searchedHidden.map(t => `<button class="secondary small" data-restore-tool="${t.id}" type="button">Restore ${t.title}</button>`).join("")}</div></div>` : ""}
+      ${hiddenTools.length ? `<details class="card slim-card"><summary><strong>Hidden tools (${hiddenTools.length})</strong></summary><div class="vv-hidden-tool-list">${searchedHidden.map(t => `<div class="vv-hidden-tool-row"><div><strong>${escapeHtml(t.title)}</strong><p class="helper">${escapeHtml(t.desc || "Open this tool from the dashboard.")}</p></div><button class="secondary small" data-restore-tool="${escapeHtml(t.id)}" type="button">Restore</button></div>`).join("") || `<p class="helper">No matching hidden tools.</p>`}</div></details>` : ""}
 
       <div class="tool-grid square-grid" data-tool-drop-zone>
         ${visibleTools.length ? visibleTools.map(t => renderToolTile(t)).join("") : `<div class="empty grid-empty">No tools are enabled for your role yet. Ask a system admin to enable a tool permission for your role.</div>`}
@@ -2364,13 +2494,14 @@ function moneyFieldInputType(type) {
 
 
 function getUserSchoolIds(user = state.session) {
+  if (user?.uid === state.session?.uid && devPreviewActive() && state.devViewSchoolId) return [state.devViewSchoolId];
   return [...new Set([...(Array.isArray(user?.schoolIds) ? user.schoolIds : []), user?.schoolId].filter(Boolean))];
 }
 
 // School is the top-level context for new campus records. Never infer multiple schools for one record.
 function allowedSchoolIds(user = state.session) {
   const assigned = getUserSchoolIds(user);
-  return (state.schools || []).filter(s => s.active !== false && (assigned.includes(s.id) || isSystemAdmin(user))).map(s => s.id);
+  return (state.schools || []).filter(s => s.active !== false && (assigned.includes(s.id) || (isSystemAdmin(user) && !(user?.uid === state.session?.uid && devPreviewActive() && state.devViewSchoolId)))).map(s => s.id);
 }
 function activeSchoolContext() {
   const ids = allowedSchoolIds();
@@ -2421,6 +2552,50 @@ function getDefaultRequestSchoolId() {
   return ids[0] || state.selectedSchoolId || state.schools[0]?.id || "";
 }
 
+// Per-budget visibility: old records default to all leaders and owners.
+// A role can allow every position or only a named subset.
+function budgetAccessForRole(code, roleKey) {
+  const access = code?.access;
+  if (!access || !Object.prototype.hasOwnProperty.call(access, roleKey)) return ['leader','owner'].includes(roleKey) ? ['__any__'] : [];
+  return Array.isArray(access[roleKey]) ? access[roleKey] : [];
+}
+function canUseBudgetCode(code, user = state.session) {
+  if (!user) return false;
+  if (isSystemAdmin(user) && !devPreviewActive()) return true;
+  const viewed = getPermissionUser(user);
+  const roleKeys = getUserRoleKeys(viewed).map(normalizeRoleKey);
+  const position = String(viewed?.teamPosition || viewed?.position || '').toLowerCase();
+  return state.roles.some(role => {
+    const key = normalizeRoleKey(role.key || role.name);
+    if (!roleKeys.includes(key)) return false;
+    const positions = budgetAccessForRole(code, key);
+    return positions.includes('__any__') || positions.some(p => String(p).toLowerCase() === position);
+  }) || roleKeys.some(key => {
+    const positions = budgetAccessForRole(code,key);
+    return positions.includes('__any__') || positions.some(p=>String(p).toLowerCase()===position);
+  });
+}
+function readBudgetAccess(form) {
+  const access = {};
+  state.roles.forEach(role => {
+    const key = normalizeRoleKey(role.key || role.name);
+    const enabled = form.querySelector(`[data-budget-role="${key}"]`)?.checked;
+    if (!enabled) { access[key] = []; return; }
+    const positions = Array.from(form.querySelectorAll(`[data-budget-position="${key}"]:checked`)).map(el=>el.value);
+    access[key] = positions.length ? positions : ['__any__'];
+  });
+  return access;
+}
+function renderBudgetAccessEditor(code) {
+  return `<div class="card subtle-card vv-budget-access"><h3>Who can use this budget?</h3><p class="helper">By default, all Leaders and Owners can select this budget in Money Requests. Uncheck a role to hide it, or select positions to limit access within a role.</p>
+  ${state.roles.map(role=>{
+    const key=normalizeRoleKey(role.key || role.name);
+    const positions=budgetAccessForRole(code,key);
+    const enabled=positions.length>0;
+    return `<div class="vv-budget-access-role"><label class="check-row"><input type="checkbox" data-budget-role="${escapeHtml(key)}" ${enabled?'checked':''}/> <strong>${escapeHtml(role.name || role.key)}</strong></label>
+      <div class="vv-budget-position-options"><span class="helper">Positions (leave all unchecked for any position):</span>${state.positions.map(pos=>`<label class="check-row"><input type="checkbox" data-budget-position="${escapeHtml(key)}" value="${escapeHtml(pos.name)}" ${enabled&&!positions.includes('__any__')&&positions.includes(pos.name)?'checked':''}/> ${escapeHtml(pos.name)}</label>`).join('')}</div></div>`;
+  }).join('')}</div>`;
+}
 function budgetCodeAppliesToSchool(code, schoolId) {
   if (!schoolId) return true;
   if (code.allSchools !== false) return true;
@@ -2430,7 +2605,7 @@ function budgetCodeAppliesToSchool(code, schoolId) {
 
 function getFilteredBudgetCodesForCurrentRequest() {
   const selected = document.querySelector('[name="requestSchoolId"]')?.value || getDefaultRequestSchoolId();
-  return state.budgetCodes.filter(c => budgetCodeAppliesToSchool(c, selected));
+  return state.budgetCodes.filter(c => budgetCodeAppliesToSchool(c, selected) && canUseBudgetCode(c));
 }
 
 function renderSchoolOptionsForUser(user = state.session, selected = "") {
@@ -2530,12 +2705,24 @@ function formatMoneyInput(input) {
   input.value = amount.toFixed(2);
 }
 
+function updateBudgetBalanceHint(input) {
+  const line = input.closest(".money-request-line"); if (!line) return;
+  let hint = line.querySelector("[data-budget-balance-hint]");
+  if (!hint) { hint = document.createElement("div"); hint.dataset.budgetBalanceHint = ""; hint.className="vv-budget-balance-hint"; line.appendChild(hint); }
+  const code = line.querySelector("[data-budget-code]")?.value.trim().toLowerCase();
+  const schoolId = document.querySelector('[name="requestSchoolId"]')?.value || getDefaultRequestSchoolId();
+  const match = getFilteredBudgetCodesForCurrentRequest().find(c => String(c.code || "").trim().toLowerCase() === code);
+  const balance = match ? getBudgetBalance(match, schoolId) : null;
+  hint.innerHTML = match ? `<span>Total remaining <strong>${balance?.remaining != null ? formatCurrency(balance.remaining) : 'Not set'}</strong></span>` : '';
+}
+
 function syncBudgetFromCode(input) {
   const line = input.closest(".money-request-line");
   const select = line?.querySelector("[data-budget-category]");
   if (!line || !select) return;
   const match = getFilteredBudgetCodesForCurrentRequest().find(c => String(c.code || "").trim().toLowerCase() === input.value.trim().toLowerCase());
   if (match) select.value = match.category || "";
+  updateBudgetBalanceHint(input);
 }
 
 function syncBudgetFromCategory(select) {
@@ -2544,6 +2731,7 @@ function syncBudgetFromCategory(select) {
   if (!line || !codeInput) return;
   const match = getFilteredBudgetCodesForCurrentRequest().find(c => String(c.category || "") === String(select.value || ""));
   if (match) codeInput.value = match.code || "";
+  updateBudgetBalanceHint(codeInput);
 }
 
 function formatMoneyDate(value) {
@@ -3001,6 +3189,14 @@ async function submitMoneyRequest(form) {
   });
 
   const requestSchoolId = form.requestSchoolId?.value || getDefaultRequestSchoolId();
+  // Recheck access on submit; a typed code must not bypass the selector filter.
+  for (const item of items) {
+    if (!item.budgetCode) continue;
+    const matching = state.budgetCodes.find(c => String(c.code || '').trim().toLowerCase() === item.budgetCode.toLowerCase());
+    if (!matching || !budgetCodeAppliesToSchool(matching,requestSchoolId) || !canUseBudgetCode(matching)) {
+      throw new Error('This budget code is not available to your role, position, or campus.');
+    }
+  }
   const permissionUser = getPermissionUser(state.session);
   const canAutoApproveDoso = hasToolPermission(permissionUser, "moneyRequests", "approvePending") && userSchoolMatchesScope([requestSchoolId], state.session);
   const newRequestRef = doc(collection(db, "moneyRequests"));
@@ -3121,15 +3317,19 @@ function renderBudgetCodeSchoolSummary(code) {
 
 function renderBudgetCodesManager() {
   return `
-    <div class="actions" style="justify-content:flex-start;">
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;">
       <button data-modal="addBudgetCode">Add Budget Code</button>
+      <button class="secondary" data-modal="bulkBudgetCodes">Update All Budget Codes</button>
     </div>
     <div class="name-grid admin-name-grid">
       ${state.budgetCodes.length ? state.budgetCodes.map(c => `
-        <button class="name-button" data-edit-budget-code="${c.id}" type="button">
-          ${c.category}
-          <span>${c.code} · ${renderBudgetCodeSchoolSummary(c)}</span>
-        </button>
+        <div class="vv-budget-code-card">
+          <button class="name-button" data-edit-budget-code="${escapeHtml(c.id)}" type="button">
+            ${escapeHtml(c.category || 'Untitled category')}
+            <span>${escapeHtml(c.code)} · ${escapeHtml(renderBudgetCodeSchoolSummary(c))} · ${escapeHtml(c.budgetFormula || 'No formula')} · ${c.monthlyRollover ? 'Rollover' : 'No rollover'}</span>
+          </button>
+          ${renderBudgetBalanceForCode(c)}
+        </div>
       `).join("") : `<div class="empty grid-empty">No budget codes yet.</div>`}
     </div>
   `;
@@ -3150,35 +3350,116 @@ function getRequestTotalNumber(request) {
   return (request.items || []).reduce((sum, item) => sum + moneyAmountFromItem(item), 0);
 }
 
+// Budget analytics: calendar-based periods and approval-date attribution.
+// Current formulas/enrollment are estimates for historical periods until snapshots exist.
+function budgetAnalyticsWindow(period, offset) {
+  const now=new Date(), d=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const addDays=(date,n)=>new Date(date.getFullYear(),date.getMonth(),date.getDate()+n);
+  let start,end;
+  if(period==="day"){start=addDays(d,offset);end=addDays(start,1);}
+  else if(period==="week"){start=addDays(d,-((d.getDay()+6)%7)+offset*7);end=addDays(start,7);}
+  else if(period==="month"){start=new Date(d.getFullYear(),d.getMonth()+offset,1);end=new Date(start.getFullYear(),start.getMonth()+1,1);}
+  else if(period==="half"){const half=Math.floor(d.getMonth()/6)+offset;start=new Date(d.getFullYear(),half*6,1);end=new Date(start.getFullYear(),start.getMonth()+6,1);}
+  else {start=new Date(d.getFullYear()+offset,0,1);end=new Date(start.getFullYear()+1,0,1);}
+  const fmt=x=>x.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"});
+  return {start,end,label:fmt(start)+" – "+fmt(addDays(end,-1)),months:(end.getFullYear()-start.getFullYear())*12+end.getMonth()-start.getMonth()};
+}
+function budgetAnalyticsPie(rows) {
+  const positive=rows.filter(r=>r.spent>0), total=positive.reduce((n,r)=>n+r.spent,0);
+  if(!total)return '<div class="empty">No approved spending with dates in this period.</div>';
+  const colors=["#318a79","#da9b47","#7d8ed1","#b86f96","#75a0bd","#b1a055","#a67c6b","#6fae90"];
+  let at=0;
+  const stops=positive.map((r,i)=>{const next=at+r.spent/total*100;const stop=`${colors[i%colors.length]} ${at.toFixed(3)}% ${next.toFixed(3)}%`;at=next;return stop;});
+  return `<div class="vv-analytics-pie-wrap"><div class="vv-analytics-pie" role="img" aria-label="Spending distribution" style="background:conic-gradient(${stops.join(",")})"><div>${formatCurrency(total)}<small>approved</small></div></div><div class="vv-analytics-legend">${positive.map((r,i)=>`<div><i style="background:${colors[i%colors.length]}"></i><span>${escapeHtml(r.label)}</span><strong>${(r.spent/total*100).toFixed(1)}%</strong></div>`).join("")}</div></div>`;
+}
 function renderBudgetAnalyticsPanel() {
-  const final = state.moneyRequests.filter(r => normalizeMoneyRequestStatus(r.status) === "finalApproved");
-  const bySchool = new Map();
-  const byBudget = new Map();
-  let grand = 0;
-  final.forEach(req => {
-    const school = getRequestSchoolName(req);
-    const reqTotal = getRequestTotalNumber(req);
-    grand += reqTotal;
-    bySchool.set(school, (bySchool.get(school) || 0) + reqTotal);
-    (req.items || []).forEach(item => {
-      const key = `${item.budgetCode || "No Code"} — ${item.budgetCategory || "No Category"}`;
-      byBudget.set(key, (byBudget.get(key) || 0) + moneyAmountFromItem(item));
-    });
-  });
-  const schoolRows = Array.from(bySchool.entries()).sort((a,b)=>b[1]-a[1]);
-  const budgetRows = Array.from(byBudget.entries()).sort((a,b)=>b[1]-a[1]);
-  return `
+  const cfg=state.budgetAnalytics || (state.budgetAnalytics={period:"month",offset:0,school:"all",chart:"bars",metric:"spent"});
+  const window=budgetAnalyticsWindow(cfg.period,cfg.offset);
+  const schools=state.schools.filter(sc=>cfg.school==="all"||sc.id===cfg.school);
+  const rows=[];
+  const now=new Date();
+  const months=window.months;
+  for(const code of state.budgetCodes)for(const school of schools){
+    if(!budgetCodeAppliesToSchool(code,school.id))continue;
+    const monthly=getMonthlyBudgetAllocation(code,school.id);
+    // Allocation for day/week is prorated over the overlapping calendar months.
+    let allocated=0;
+    if(monthly!==null){
+      let cursor=new Date(window.start);
+      while(cursor<window.end){
+        const next=new Date(cursor.getFullYear(),cursor.getMonth()+1,1);
+        const segmentEnd=new Date(Math.min(next.getTime(),window.end.getTime()));
+        const days=(segmentEnd-cursor)/86400000;
+        const daysInMonth=new Date(cursor.getFullYear(),cursor.getMonth()+1,0).getDate();
+        allocated+=monthly*days/daysInMonth;
+        cursor=segmentEnd;
+      }
+    }
+    const balance=getBudgetBalance(code,school.id);
+    rows.push({code,school,label:`${code.code||code.category||"Unnamed"} · ${school.name}`,spent:0,pending:0,allocated:monthly===null?null:allocated,remaining:balance?.remaining??null});
+  }
+  let undated=0, unmatched=0, approvedCount=0;
+  const requestTotal=(req)=>getRequestTotalNumber(req);
+  for(const req of state.moneyRequests){
+    const status=normalizeMoneyRequestStatus(req.status);
+    if(status!=="finalApproved")continue;
+    if(cfg.school!=="all"&&req.requestSchoolId!==cfg.school)continue;
+    const date=budgetRequestDate(req);
+    if(!date){undated++;continue;}
+    if(date<window.start||date>=window.end)continue;
+    approvedCount++;
+    for(const item of req.items||[]){
+      const amount=moneyAmountFromItem(item);
+      const row=rows.find(r=>r.school.id===req.requestSchoolId&&String(r.code.code||"").trim().toLowerCase()===String(item.budgetCode||"").trim().toLowerCase());
+      if(row)row.spent+=amount;else unmatched+=amount;
+    }
+  }
+  for(const req of state.moneyRequests){
+    const status=normalizeMoneyRequestStatus(req.status);
+    if(status==="finalApproved"||status==="denied")continue;
+    if(cfg.school!=="all"&&req.requestSchoolId!==cfg.school)continue;
+    const date=budgetRequestDate(req);
+    if(!date||date<window.start||date>=window.end)continue;
+    for(const item of req.items||[]){
+      const row=rows.find(r=>r.school.id===req.requestSchoolId&&String(r.code.code||"").trim().toLowerCase()===String(item.budgetCode||"").trim().toLowerCase());
+      if(row)row.pending+=moneyAmountFromItem(item);
+    }
+  }
+  const sum=key=>rows.reduce((n,r)=>n+(r[key]||0),0);
+  const allocated=sum("allocated"),spent=sum("spent"),pending=sum("pending");
+  const active=rows.filter(r=>r.spent>0).length;
+  const unused=rows.filter(r=>r.allocated!==null&&r.spent===0).length;
+  const utilization=allocated>0?spent/allocated*100:null;
+  const sorted=[...rows].sort((a,b)=>(cfg.metric==="remaining"?(b.remaining??-Infinity)-(a.remaining??-Infinity):cfg.metric==="utilization"?((b.allocated?b.spent/b.allocated:0)-(a.allocated?a.spent/a.allocated:0)):b.spent-a.spent));
+  const chartValue=r=>cfg.metric==="remaining"?Math.max(0,r.remaining||0):cfg.metric==="utilization"?(r.allocated?100*r.spent/r.allocated:0):r.spent;
+  const max=Math.max(1,...sorted.map(chartValue));
+  const fmtVal=r=>cfg.metric==="utilization"?(r.allocated?(r.spent/r.allocated*100).toFixed(1)+"%":"—"):formatCurrency(chartValue(r));
+  const chart=cfg.chart==="pie"?budgetAnalyticsPie(sorted):cfg.chart==="table"
+    ?`<div class="vv-analytics-table-scroll"><table class="vv-analytics-table"><thead><tr><th>Budget / Campus</th><th>Allocation*</th><th>Approved</th><th>Pending</th><th>Current remaining</th><th>Used*</th></tr></thead><tbody>${sorted.map(r=>`<tr><td>${escapeHtml(r.label)}</td><td>${r.allocated===null?"—":formatCurrency(r.allocated)}</td><td>${formatCurrency(r.spent)}</td><td>${formatCurrency(r.pending)}</td><td>${r.remaining===null?"—":formatCurrency(r.remaining)}</td><td>${r.allocated?(r.spent/r.allocated*100).toFixed(1)+"%":"—"}</td></tr>`).join("")}</tbody></table></div>`
+    :`<div class="vv-analytics-bars">${sorted.map(r=>`<div class="vv-analytics-bar-row"><div class="vv-analytics-bar-heading"><span>${escapeHtml(r.label)}</span><strong>${fmtVal(r)}</strong></div><div class="vv-analytics-track"><div style="width:${Math.min(100,Math.max(0,chartValue(r)/max*100))}%"></div></div></div>`).join("")||'<div class="empty">No budgets match these filters.</div>'}</div>`;
+  return `<div class="vv-analytics-dashboard">
+    <div class="vv-analytics-controls">
+      <label>Period<select data-budget-analytics-filter="period">${[["day","Day"],["week","Week"],["month","Month"],["half","Biannual (6 months)"],["year","Year"]].map(([v,l])=>`<option value="${v}" ${cfg.period===v?"selected":""}>${l}</option>`).join("")}</select></label>
+      <div class="vv-analytics-period-nav"><button type="button" data-budget-analytics-step="-1" aria-label="Previous period">‹</button><strong>${escapeHtml(window.label)}</strong><button type="button" data-budget-analytics-step="1" aria-label="Next period" ${cfg.offset>=0?"disabled":""}>›</button><button type="button" data-budget-analytics-reset>Today</button></div>
+      <label>Campus<select data-budget-analytics-filter="school"><option value="all">All campuses</option>${state.schools.map(sc=>`<option value="${escapeHtml(sc.id)}" ${cfg.school===sc.id?"selected":""}>${escapeHtml(sc.name)}</option>`).join("")}</select></label>
+    </div>
     <div class="analytics-grid">
-      <div class="metric-card"><strong>Total Approved Spending</strong><b>${formatCurrency(grand)}</b><span>${final.length} approved request(s)</span></div>
-      <div class="metric-card"><strong>Locations</strong><b>${schoolRows.length}</b><span>with approved spending</span></div>
-      <div class="metric-card"><strong>Budget Categories</strong><b>${budgetRows.length}</b><span>used by requests</span></div>
+      <div class="metric-card"><strong>Period allocation*</strong><b>${formatCurrency(allocated)}</b><span>Calculated from current enrollment</span></div>
+      <div class="metric-card"><strong>Approved spending</strong><b>${formatCurrency(spent)}</b><span>${approvedCount} approved request(s)</span></div>
+      <div class="metric-card"><strong>Pending requests</strong><b>${formatCurrency(pending)}</b><span>Not deducted from approved spending</span></div>
+      <div class="metric-card"><strong>Budget utilization*</strong><b>${utilization===null?"—":utilization.toFixed(1)+"%"}</b><span>${active} used · ${unused} unused budgets</span></div>
     </div>
-    <div class="grid two">
-      <div class="card subtle-card"><h3>Spending by Location</h3>${schoolRows.length ? schoolRows.map(([name,total]) => `<div class="analytics-row"><span>${name}</span><strong>${formatCurrency(total)}</strong></div>`).join("") : `<div class="empty">No approved spending yet.</div>`}</div>
-      <div class="card subtle-card"><h3>Spending by Budget</h3>${budgetRows.length ? budgetRows.map(([name,total]) => `<div class="analytics-row"><span>${name}</span><strong>${formatCurrency(total)}</strong></div>`).join("") : `<div class="empty">No budget spending yet.</div>`}</div>
+    <div class="card subtle-card">
+      <div class="vv-analytics-chart-controls"><h3>Budget breakdown</h3><label>Show<select data-budget-analytics-filter="metric"><option value="spent" ${cfg.metric==="spent"?"selected":""}>Approved spending</option><option value="remaining" ${cfg.metric==="remaining"?"selected":""}>Current remaining</option><option value="utilization" ${cfg.metric==="utilization"?"selected":""}>Utilization</option></select></label><label>View<select data-budget-analytics-filter="chart"><option value="bars" ${cfg.chart==="bars"?"selected":""}>Budget bars</option><option value="pie" ${cfg.chart==="pie"?"selected":""}>Pie chart (spending)</option><option value="table" ${cfg.chart==="table"?"selected":""}>Detailed table</option></select></label></div>
+      ${cfg.chart==="pie"&&cfg.metric!=="spent"?'<p class="helper">Pie chart shows the distribution of approved spending, regardless of the Show filter.</p>':""}
+      ${chart}
     </div>
-    <p class="helper">Next step later: once older-year data exists, this panel can compare current year vs. last year and show over/under trends by location and budget.</p>
-  `;
+    <div class="card subtle-card"><h3>Budget adjustment opportunities</h3>
+      <p class="helper">Review budgets with little or no spending before changing their allocation. Rollover balances may be useful reserves.</p>
+      ${rows.filter(r=>r.code.monthlyRollover&&r.allocated!==null&&r.spent<r.allocated*.25).sort((a,b)=>(b.remaining||0)-(a.remaining||0)).slice(0,8).map(r=>`<div class="analytics-row"><span>${escapeHtml(r.label)} <small>· rollover · ${r.allocated?(r.spent/r.allocated*100).toFixed(0):0}% used</small></span><strong>${r.remaining===null?"—":formatCurrency(r.remaining)} remaining</strong></div>`).join("")||'<div class="empty">No low-use rollover budgets in this period.</div>'}
+    </div>
+    <p class="helper">*Historical allocations and utilization are estimates based on current enrollment and formulas; monthly snapshots are not yet stored. Current remaining uses the existing rollover calculation and is not a historical balance. ${undated?`${undated} approved request(s) without usable dates were excluded. `:""}${unmatched?`${formatCurrency(unmatched)} in approved items could not be matched to a budget/campus and is excluded from totals. `:""}Period spending uses final approval dates where available. This is budget tracking, not a reconciled accounting ledger.</p>
+  </div>`;
 }
 
 function renderOwnersPanel() {
@@ -3396,6 +3677,7 @@ function renderLeadership() {
 
       <div class="nav-tabs">
         <button class="${state.leadershipTab === "users" ? "active" : ""}" data-leadership-tab="users">Users</button>
+        <button class="${state.leadershipTab === "enrollment" ? "active" : ""}" data-leadership-tab="enrollment">Campus Enrollment</button>
         <button class="${state.leadershipTab === "importantDates" ? "active" : ""}" data-leadership-tab="importantDates">Important Dates</button>
 
         <button class="${state.leadershipTab === "certificates" ? "active" : ""}" data-leadership-tab="certificates">Certificates</button>
@@ -3416,6 +3698,7 @@ function renderLeadership() {
         </div>
       ` : ""}
 
+      ${state.leadershipTab === "enrollment" ? (hasToolPermission(state.session, "campusEnrollment", "manage") ? renderCampusEnrollmentManager() : `<div class="card subtle-card"><h3>Campus Enrollment</h3><p class="helper">You do not have permission to edit campus enrollment. Ask an administrator to enable Campus Enrollment → Update campus enrollment for the DOSO position.</p></div>`) : ""}
       ${state.leadershipTab === "importantDates" ? renderImportantDatesLeadershipTab() : ""}
 
       ${state.leadershipTab === "certificates" ? renderCertificatesLeadershipTab() : ""}
@@ -7414,6 +7697,23 @@ function renderModal() {
   
   
 
+  if (state.modal.type === "bulkBudgetCodes") {
+    return `<div class="modal-backdrop"><form class="modal card" id="bulkBudgetCodesForm">
+      <h2>Update all budget codes</h2>
+      <p class="helper">Apply the same formula and/or rollover setting to ${state.budgetCodes.length} budget codes. Code names, categories and school assignments stay unchanged.</p>
+      <label class="check-row"><input type="checkbox" name="applyFormula" checked /> Update formula for all codes</label>
+      <div data-budget-formula-editor class="vv-budget-formula-editor">
+        <label>Formula <input name="budgetFormula" value="enrollment * 5" /></label>
+        <div class="vv-formula-easy-row"><button type="button" class="secondary small" data-formula-template="enrollment * 5">Enrollment × $5</button><button type="button" class="secondary small" data-formula-template="enrollment * 10">Enrollment × $10</button><button type="button" class="secondary small" data-formula-template="500">Fixed $500</button></div>
+        <div class="vv-formula-easy-row"><label>Variable <select data-formula-variable><option value="enrollment">Enrollment</option><option value="">Fixed amount</option></select></label><label>Operation <select data-formula-operation><option value="*">× Multiply</option><option value="+">+ Add</option><option value="-">− Subtract</option><option value="/">÷ Divide</option></select></label><label>Amount <input type="number" data-formula-value value="5" min="0" step="any" /></label><button type="button" class="secondary small" data-formula-apply>Use this formula</button></div>
+        <p data-formula-preview class="vv-formula-preview">Example with 100 enrolled: $500.00</p>
+      </div>
+      <label class="check-row"><input type="checkbox" name="applyRollover" checked /> Update rollover for all codes</label>
+      <label class="check-row"><input type="checkbox" name="monthlyRollover" checked /> Carry unused funds into the next month</label>
+      <p class="helper">This changes existing budget settings. Review before confirming.</p>
+      <div class="actions"><button type="submit">Apply to ${state.budgetCodes.length} codes</button><button type="button" class="secondary" data-close-modal>Cancel</button></div>
+    </form></div>`;
+  }
   if (state.modal.type === "addBudgetCode" || state.modal.type === "editBudgetCode") {
     const budgetCode = state.modal.budgetCode || {};
     const isEdit = state.modal.type === "editBudgetCode";
@@ -7434,6 +7734,36 @@ function renderModal() {
               <input name="category" required value="${budgetCode.category || ""}" />
             </label>
           </div>
+          <div class="card subtle-card"><h3>Monthly allocation</h3>
+            <div data-budget-formula-editor class="vv-budget-formula-editor">
+              <label>Budget formula <input name="budgetFormula" autocomplete="off" spellcheck="false" placeholder="enrollment * 5" value="${escapeHtml(budgetCode.budgetFormula || "enrollment * 5")}" /></label>
+              <div class="vv-formula-easy">
+                <div class="vv-formula-easy-row"><span class="helper">Quick formula</span><button type="button" class="secondary small" data-formula-template="enrollment * 5">Enrollment × $5</button><button type="button" class="secondary small" data-formula-template="enrollment * 10">Enrollment × $10</button><button type="button" class="secondary small" data-formula-template="500">Fixed $500</button></div>
+                <div class="vv-formula-easy-row"><label>Variable <select data-formula-variable><option value="enrollment">Enrollment</option><option value="">Fixed amount</option></select></label><label>Operation <select data-formula-operation><option value="*">× Multiply</option><option value="+">+ Add</option><option value="-">− Subtract</option><option value="/">÷ Divide</option></select></label><label>Amount <input type="number" data-formula-value min="0" step="any" value="5" /></label><button type="button" class="secondary small" data-formula-apply>Use this formula</button></div>
+                <details><summary>Advanced: build a custom formula</summary><div class="vv-formula-toolbar">
+                  <button type="button" class="secondary small" data-formula-insert="enrollment">Enrollment</button>
+                  <button type="button" class="secondary small" data-formula-insert="+">+</button>
+                  <button type="button" class="secondary small" data-formula-insert="-">−</button>
+                  <button type="button" class="secondary small" data-formula-insert="*">×</button>
+                  <button type="button" class="secondary small" data-formula-insert="/">÷</button>
+                  <button type="button" class="secondary small" data-formula-insert="(">(</button>
+                  <button type="button" class="secondary small" data-formula-insert=")">)</button>
+                  <label class="vv-formula-amount">Number <input type="number" data-formula-unit min="0" step="any" placeholder="5" /></label>
+                  <button type="button" class="secondary small" data-formula-add-unit>Insert number</button>
+                  <button type="button" class="secondary small" data-formula-reset>Reset</button>
+                </div></details>
+              </div>
+              <p class="helper">Click buttons to build your formula, or type directly. Enrollment is entered by the DOSO in Leadership → Campus Enrollment.</p>
+              <p class="vv-formula-preview" data-formula-preview aria-live="polite"></p>
+            </div>
+            <label class="check-row"><input type="checkbox" name="monthlyRollover" ${budgetCode.monthlyRollover ? "checked" : ""}/> Carry unused funds into the next month</label>
+          </div>
+          ${isEdit ? `<div class="card subtle-card"><h3>Current remaining budget</h3><p class="helper">Set the starting remaining balance for each campus this month. This is the amount left now, including this month's allocation. Future months add the new monthly allocation when rollover is on.</p>
+            <div class="grid two">${state.schools.filter(sc=>budgetCodeAppliesToSchool(budgetCode,sc.id)).map(sc=>`<label>${escapeHtml(sc.name)} — remaining now
+              <input type="number" step="0.01" min="0" name="startingBalance_${escapeHtml(sc.id)}" placeholder="Enter starting balance" value="${budgetCode.startingBalances?.[sc.id]?.remaining ?? ''}"/>
+            </label>`).join("")}</div>
+            <p class="helper">Changing a starting balance resets its starting point to today. Leave an existing amount unchanged to keep its original starting date.</p>
+          </div>` : ""}
           <div class="card subtle-card">
             <label class="check-row"><input type="checkbox" name="allSchools" ${(budgetCode.allSchools !== false) ? "checked" : ""} /> Applies to all schools</label>
             <p class="helper">Uncheck this only when a budget should be limited to specific locations.</p>
@@ -7442,6 +7772,7 @@ function renderModal() {
             </div>
           </div>
 
+          ${renderBudgetAccessEditor(budgetCode)}
           <div class="actions">
             <button>${isEdit ? "Save Changes" : "Create Budget Code"}</button>
             ${isEdit ? `<button type="button" class="danger" data-delete-budget-code="${budgetCode.id}">Hide</button>` : ""}
@@ -9380,6 +9711,7 @@ function renderCurrentView() {
     return;
   }
 
+  if (state.currentView === "events") { eventsTool.render(); return; }
   if (state.currentView === "curriculum") { renderCurriculum(); return; }
 
   if (state.currentView === "leadership") {
@@ -9422,6 +9754,7 @@ function render() {
 
 
 $app.addEventListener("input", async (e) => {
+  if (eventsTool.input(e)) return;
   if (state.currentView !== "photoPrint") return;
   const editableTextId = e.target.closest?.("[data-photo-text-content]")?.dataset.photoTextContent;
   if (editableTextId) {
@@ -9452,6 +9785,16 @@ $app.addEventListener("input", async (e) => {
 });
 
 $app.addEventListener("change", async (e) => {
+  if (await eventsTool.change(e)) return;
+  if (e.target.matches("[data-budget-analytics-filter]")) {
+    const field=e.target.dataset.budgetAnalyticsFilter;
+    if (["period","school","chart","metric"].includes(field)) {
+      state.budgetAnalytics[field]=e.target.value;
+      if (field==="period") state.budgetAnalytics.offset=0;
+      renderOwnersPanel();
+    }
+    return;
+  }
   if (e.target.matches('[data-campus-school-switch]')) {
     if (!allowedSchoolIds().includes(e.target.value)) return;
     state.selectedSchoolId = e.target.value;
@@ -9626,6 +9969,13 @@ $app.addEventListener("change", async (e) => {
   }
   if (e.target.matches("[data-campus-status-change]")) { await updateCampusTaskStatus(e.target.dataset.campusStatusChange, e.target.value); return; }
 
+  if (e.target.matches("[data-dev-view-school]")) {
+    state.devViewSchoolId = e.target.value;
+    state.selectedMoneyApprovalIds = [];
+    state.expandedMoneyRequestId = "";
+    renderHome();
+    return;
+  }
   if (e.target.matches("[data-dev-view-position]")) {
     state.devViewPosition = e.target.value;
     state.selectedMoneyApprovalIds = [];
@@ -9792,6 +10142,49 @@ $app.addEventListener('change', async e=>{
  if(e.target.matches('[data-gallery-filter]')){appGalleryCache.selectedAlbum=e.target.value;renderAppCamera();}
  if(e.target.matches('[data-gallery-school]')){if(!allowedSchoolIds().includes(e.target.value))return;state.selectedSchoolId=e.target.value;saveLastSelectedSchool(state.selectedSchoolId);await loadAppGallery();appGalleryCache.selectedAlbum='All';renderAppCamera();}
 });
+// Simple budget builder: buttons update the same editable expression field.
+$app.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-formula-template], [data-formula-apply]");
+  const editor = button?.closest("[data-budget-formula-editor]");
+  if (!editor) return;
+  event.preventDefault(); event.stopPropagation();
+  const field = editor.querySelector('[name="budgetFormula"]');
+  if (button.hasAttribute("data-formula-template")) field.value = button.dataset.formulaTemplate;
+  else {
+    const variable = editor.querySelector('[data-formula-variable]')?.value || "";
+    const operator = editor.querySelector('[data-formula-operation]')?.value || "*";
+    const amount = Number(editor.querySelector('[data-formula-value]')?.value);
+    if (!Number.isFinite(amount) || amount < 0) { showToast("Enter a valid amount."); return; }
+    field.value = variable ? `${variable} ${operator} ${amount}` : String(amount);
+  }
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+});
+// Formula editor inserts at the caret without submitting the budget form.
+$app.addEventListener("click", (event) => {
+  const btn = event.target.closest("[data-formula-insert], [data-formula-add-unit], [data-formula-reset]");
+  const editor = btn?.closest("[data-budget-formula-editor]");
+  if (!editor) return;
+  event.preventDefault(); event.stopPropagation();
+  const field = editor.querySelector('[name="budgetFormula"]');
+  if (btn.hasAttribute("data-formula-reset")) { field.value = "enrollment * 5"; field.dispatchEvent(new Event("input",{bubbles:true})); field.focus(); return; }
+  let value = btn.dataset.formulaInsert;
+  if (btn.hasAttribute("data-formula-add-unit")) {
+    const amount = editor.querySelector("[data-formula-unit]").value.trim();
+    if (!amount || !Number.isFinite(Number(amount)) || Number(amount) < 0) { showToast("Enter a valid amount first."); return; }
+    value = String(Number(amount));
+  }
+  const start = field.selectionStart ?? field.value.length, end = field.selectionEnd ?? start;
+  field.setRangeText(value, start, end, "end");
+  field.dispatchEvent(new Event("input",{bubbles:true})); field.focus();
+});
+$app.addEventListener("input", (event) => {
+  if (!event.target.matches('[data-budget-formula-editor] [name="budgetFormula"]')) return;
+  const editor = event.target.closest("[data-budget-formula-editor]");
+  const preview = editor.querySelector("[data-formula-preview]");
+  const amount = calculateBudgetFormula(event.target.value, 100);
+  preview.textContent = amount === null ? "Formula is incomplete or invalid." : `Example with 100 enrolled: ${formatCurrency(amount)}`;
+  preview.classList.toggle("vv-formula-invalid", amount === null);
+});
 $app.addEventListener("click", async (e) => {
   // Village Forms owns its internal controls. Do not interpret its data-tab attributes as System Admin tabs.
   if (e.target.closest("#village-forms-root")) return;
@@ -9858,8 +10251,12 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (await eventsTool.click(e)) return;
   if (await handleCurriculumClick(e)) return;
   const leadershipTab = e.target.closest("[data-leadership-tab]")?.dataset.leadershipTab;
+  const analyticsStep = e.target.closest("[data-budget-analytics-step]");
+  if (analyticsStep) { state.budgetAnalytics.offset=Math.min(0,state.budgetAnalytics.offset+Number(analyticsStep.dataset.budgetAnalyticsStep)); renderOwnersPanel(); return; }
+  if (e.target.closest("[data-budget-analytics-reset]")) { state.budgetAnalytics.offset=0; renderOwnersPanel(); return; }
   const ownerTab = e.target.closest("[data-owner-tab]")?.dataset.ownerTab;
   const toolId = e.target.closest("[data-tool]")?.dataset.tool;
   const moneyQueueTab = e.target.closest("[data-money-queue-tab]")?.dataset.moneyQueueTab;
@@ -9872,6 +10269,13 @@ $app.addEventListener("click", async (e) => {
   const bookmarkToolId = e.target.closest("[data-bookmark-tool]")?.dataset.bookmarkTool;
   const hideToolId = e.target.closest("[data-hide-tool]")?.dataset.hideTool;
   const restoreToolId = e.target.closest("[data-restore-tool]")?.dataset.restoreTool;
+  const addShortcutId = e.target.closest("[data-add-shortcut]")?.dataset.addShortcut;
+  const openShortcutId = e.target.closest("[data-open-shortcut]")?.dataset.openShortcut;
+  const editShortcutId = e.target.closest("[data-edit-shortcut]")?.dataset.editShortcut;
+  if (addShortcutId) { addShortcut(addShortcutId); renderHome(); return; }
+  if (openShortcutId) { const tool=getAvailableTools(state.session).find(t=>t.id===openShortcutId); if(tool){const target=document.querySelector(`[data-tool="${CSS.escape(openShortcutId)}"]`); if(target) target.click(); else {state.currentView=openShortcutId;renderCurrentView();}} return; }
+  if (e.target.closest("[data-create-shortcut-folder]")) { const name=prompt("Folder name"); if(name?.trim()){const prefs=getToolPrefs();prefs.shortcutFolders=prefs.shortcutFolders||[];prefs.shortcutFolders.push({id:crypto.randomUUID(),name:name.trim().slice(0,60)});saveToolPrefs(prefs);renderHome();}return; }
+  if (editShortcutId) {const prefs=getToolPrefs();const item=(prefs.shortcuts||[]).find(s=>s.id===editShortcutId);if(item){const name=prompt("Shortcut name (leave blank to remove)",item.label);if(name!==null){if(!name.trim()){prefs.shortcuts=prefs.shortcuts.filter(s=>s.id!==editShortcutId);}else{item.label=name.trim().slice(0,80);const choices=(prefs.shortcutFolders||[]);const folder=prompt(`Folder name (blank for top level): ${choices.map(f=>f.name).join(", ")}`,choices.find(f=>f.id===item.folderId)?.name||"");if(folder!==null)item.folderId=choices.find(f=>f.name.toLowerCase()===folder.trim().toLowerCase())?.id||"";}saveToolPrefs(prefs);renderHome();}}return;}
   const saveToolConfigKey = e.target.closest("[data-save-tool-config]")?.dataset.saveToolConfig;
   const nukeMoneyRequests = e.target.closest("[data-nuke-money-requests]");
   const nukeCampusCareRequests = e.target.closest("[data-nuke-campus-care-requests]");
@@ -10008,7 +10412,7 @@ $app.addEventListener("click", async (e) => {
   if (e.target.closest("[data-photo-apply-chroma]")) { const item = getSelectedPhotoPrintItem(); if (item) { const color = document.querySelector("[data-photo-filter-color]")?.value || item.chromaKeyColor || "#00ff00"; const tolerance = Number(document.querySelector("[data-photo-filter-tolerance]")?.value || item.chromaKeyTolerance || 70); await applyPhotoChromaKey(item, color, tolerance); await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
   if (e.target.closest("[data-photo-reset-filter]")) { const item = getSelectedPhotoPrintItem(); if (item?.originalSrc) { item.src = item.originalSrc; delete item.originalSrc; delete item.chromaKeyColor; delete item.chromaKeyTolerance; await savePhotoPrintWorkspaceLocal(); renderPhotoPrintTool(); } return; }
 
-  if (clearDevPreview) { await withAppLoading("Updating view...", async () => { state.devViewRoleKey = ""; state.devViewPosition = ""; renderHome(); }); return; }
+  if (clearDevPreview) { await withAppLoading("Updating view...", async () => { state.devViewRoleKey = ""; state.devViewPosition = ""; state.devViewSchoolId = ""; renderHome(); }); return; }
   if (editImportantDateId) { state.editingImportantDateId = editImportantDateId; renderLeadership(); return; }
   if (cancelImportantDateEdit) { state.editingImportantDateId = ""; renderLeadership(); return; }
   if (deleteImportantDateId) { await withAppLoading("Deleting date...", async () => { await deleteImportantDate(deleteImportantDateId); await refreshAdminData(); renderLeadership(); }); return; }
@@ -10335,6 +10739,7 @@ $app.addEventListener("click", async (e) => {
   }
 
   if (toolId && !canOpenTool(state.session, toolId)) { showToast("This tool is not available for your account."); return; }
+  if (toolId === "events") { state.currentView="events"; await eventsTool.open(); return; }
   if (toolId === "curriculum") { await openCurriculum(); return; }
   if (toolId === "villageForms") { state.currentView="villageForms"; await villageForms.open(); return; }
   if (toolId === "huddle") { state.currentView="huddle"; await huddle.open(); return; }
@@ -10823,12 +11228,12 @@ $app.addEventListener("input", (e) => {
   const photoControl = e.target.closest("[data-photo-control]")?.dataset.photoControl;
   if (photoControl) { applyPhotoControl(photoControl, e.target.value); return; }
 
-  if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; renderHome(); return; }
+  if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; const pos=e.target.selectionStart; renderHome(); const searchBox=document.querySelector("[data-home-tool-search]"); if(searchBox){searchBox.focus();searchBox.setSelectionRange(pos,pos);} return; }
   if (e.target.matches("[data-money-input]")) {
     e.target.value = String(e.target.value || "").replace(/[^0-9.]/g, "");
   }
   if (e.target.matches("[data-budget-code]")) {
-    syncBudgetFromCode(e.target);
+    syncBudgetFromCode(e.target); updateBudgetBalanceHint(e.target);
   }
   if (e.target.matches("[data-profile-crop-zoom]")) {
     if (state.modal?.user) state.modal.user.cropZoom = Number(e.target.value);
@@ -10941,7 +11346,7 @@ document.addEventListener("keydown", (e) => {
 }, true);
 
 $app.addEventListener("blur", (e) => {
-  if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; renderHome(); return; }
+  if (e.target.matches("[data-home-tool-search]")) { state.homeToolSearch = e.target.value; const pos=e.target.selectionStart; renderHome(); const searchBox=document.querySelector("[data-home-tool-search]"); if(searchBox){searchBox.focus();searchBox.setSelectionRange(pos,pos);} return; }
   if (e.target.matches("[data-money-input]")) {
     formatMoneyInput(e.target);
     updateMoneyRequestAddButtons();
@@ -11329,6 +11734,9 @@ document.addEventListener("dblclick", (e) => {
 }, true);
 
 $app.addEventListener("submit", async (e) => {
+  if (e.target.id === "vv-event-form") { await eventsTool.submit(e); return; }
+  if (e.target.id === "vv-event-entry-form") { await eventsTool.submitEntry(e); return; }
+  if (e.target.id === "vv-event-section-form") { await eventsTool.submitSection(e); return; }
   if (e.target.id === "familyPortalLoginForm") {
     e.preventDefault();
     showToast("Family accounts are not enabled yet. The Family Portal login will be connected separately.");
@@ -11382,7 +11790,36 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "roleForm") { await addRole(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "moneyRequestTypeForm") { await addMoneyRequestType(form); await refreshAdminData(); renderSystemAdmin(); }
     if (form.id === "editMoneyRequestTypeForm") { await updateMoneyRequestType(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "budgetCodeForm") { await addBudgetCode(form); await refreshAdminData(); state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
+    if (form.matches("[data-enrollment-form]")) {
+      if (!canUseLeadership(state.session) || !hasToolPermission(state.session, "campusEnrollment", "manage")) throw Error("Campus enrollment permission required.");
+      const schoolId = form.schoolId.value;
+      if (!allowedSchoolIds().includes(schoolId)) throw Error("You can only update enrollment for your assigned campus.");
+      const enrollment = Number(form.enrollment.value);
+      if (!Number.isSafeInteger(enrollment) || enrollment < 0) throw Error("Enrollment must be a nonnegative whole number.");
+      await setDoc(doc(db, "campusEnrollments", schoolId), { enrollment, updatedAt: serverTimestamp(), updatedBy: state.session.uid });
+      await loadCampusEnrollments(); showToast("Campus enrollment saved."); renderLeadership(); hideAppLoading(); return;
+    }
+    if (form.id === "bulkBudgetCodesForm") {
+    e.preventDefault();
+    try {
+      const updates = {};
+      if (form.applyFormula.checked) {
+        const formula = form.budgetFormula.value.trim();
+        if (calculateBudgetFormula(formula, 100) === null) throw Error("Enter a valid formula.");
+        updates.budgetFormula = formula;
+      }
+      if (form.applyRollover.checked) updates.monthlyRollover = form.monthlyRollover.checked;
+      if (!Object.keys(updates).length) throw Error("Select at least one setting to update.");
+      if (!window.confirm(`Apply these settings to all ${state.budgetCodes.length} budget codes?`)) return;
+      for (const code of state.budgetCodes) await updateDoc(doc(db, "budgetCodes", code.id), { ...updates, updatedAt: serverTimestamp() });
+      await loadBudgetCodes();
+      state.modal = null;
+      showToast(`Updated ${state.budgetCodes.length} budget codes.`);
+      renderOwnersPanel();
+    } catch(err) { showToast(err.message || "Unable to update budget codes."); }
+    return;
+  }
+  if (form.id === "budgetCodeForm") { await addBudgetCode(form); await refreshAdminData(); state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
     if (form.id === "editBudgetCodeForm") { await updateBudgetCode(form); await refreshAdminData(); state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
     if (form.id === "moneyRequestSubmissionForm") { await submitMoneyRequest(form); hideAppLoading(); return; }
     if (form.id === "receiptUploadForm") { await saveReceiptForMoneyRequest(form); hideAppLoading(); return; }
@@ -11676,6 +12113,7 @@ profileCropObserver.observe(document.body, { childList: true, subtree: true });
 
 const obWorkspace=createWorkspace({catalog:CONTENT,escape:escapeHtml,actor:()=>state.session,start:async(user,task)=>{await updateDoc(doc(db,"users",user.uid),{onboardingActiveTask:task.id});},error:e=>showToast(e.message||String(e)),listen:(key,cb,err)=>onSnapshot(doc(db,"onboardingSessions",key),snap=>cb(snap.data()||{}),err),write:(key,patch)=>setDoc(doc(db,"onboardingSessions",key),patch,{merge:true}),complete:async id=>{const uid=state.session.uid;await updateDoc(doc(db,"users",uid),{["onboardingScheduleProgress."+id]:new Date().toISOString(),onboardingActiveTask:null,updatedAt:serverTimestamp()});state.session=await readUser(uid);renderScheduleOnboarding();}});
 
+const eventsTool = createEvents({db,collection,doc,getDocs,addDoc,updateDoc,deleteDoc,query,where,serverTimestamp,esc:escapeHtml,schools:()=>state.schools,schoolIds:()=>allowedSchoolIds(),canManage:(schoolId)=>allowedSchoolIds().includes(schoolId)&&(hasToolPermission(state.session,"events","manage")||hasFullDevAccess(state.session)||(getUserRoleKeys(state.session).some(r=>["leader","lead","doso","owner","admin","systemadmin","dev"].includes(String(r).toLowerCase()))&&!state.roles.some(role=>getUserRoleKeys(state.session).includes(normalizeRoleKey(role.key||role.name))&&role.permissions?.events))),toast:showToast,resizeImage:resizeToolImage,shell:()=>{$app.innerHTML=pageShell('<section id="vv-events-root" class="vv-events-workspace"></section>');}});
 const villageForms = createVillageForms({db,collection,doc,getDocs,getDoc,setDoc,updateDoc,deleteDoc,esc:escapeHtml,user:()=>state.session,users:()=>state.users,name:getUserUsedName,schools:()=>state.schools,canManage:()=>hasFullDevAccess(state.session)||getUserRoleKeys(state.session).some(r=>['leader','lead','doso','owner','admin','systemadmin','dev'].includes(String(r).toLowerCase())),shell:()=>{$app.innerHTML=pageShell('<section id="village-forms-root"></section><div id="huddle-toast" role="status"></div>');},toast:showToast,
   notify:(event,f)=>{const ids=event==="response"?[f.createdBy,...(f.collaborators||[]).map(c=>c.id)]:event==="published"?[...(f.audienceIds||[]),...(f.collaborators||[]).map(c=>c.id)]:[...(f.collaborators||[]).map(c=>c.id)];return notifyParticipants("villageForms",ids,event==="response"?"New form response":event==="published"?"Form published":"Form collaboration invitation",event==="response"?`A response was submitted to ${f.title}.`:`${f.title} is ready in Village Forms.`,f.schoolIds||[],"forms");}
 });
@@ -11696,3 +12134,4 @@ document.addEventListener("keydown",event=>{
     document.querySelector("[data-toggle-notifications]")?.focus();
   }
 });
+

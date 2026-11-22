@@ -182,3 +182,11 @@ The bootstrap marker can only be created once by the Firestore rules.
 
 
 Version v97: clean slot persistence fallback for Village Voice drag/drop layout.
+
+
+## v268 Campus Enrollment
+Moved campus enrollment entry from Owners > Budget Codes to Leadership > Campus Enrollment. Added Campus Enrollment > Update campus enrollment to the permissions editor (assign DOSO position). Firestore rules restrict enrollment writes to DOSO role/position; publish the updated rules. Existing data stays in campusEnrollments.
+
+
+### v275 Budget access
+Budget-code editor now has role/position selectors (default Leaders and Owners). Money Request selection and submission respect the configuration, including system-admin preview. IMPORTANT: This is application-level visibility only. The existing Firestore fallback rule allows authenticated users to read the budgetCodes collection. Do not store confidential budget information in these documents until Firestore data access is redesigned and security rules tightened.

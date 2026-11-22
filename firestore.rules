@@ -30,11 +30,36 @@ service cloud.firestore {
       return hasRole('doso') || hasRole('owner') || hasRole('admin') || hasRole('systemAdmin');
     }
 
+    // Events: only leadership and owners can access campus event planning records.
+    function canManageEventSchool(schoolId) {
+      return signedIn() && (isLeaderOrHigher() || myUser().get('teamPosition', '') == 'DOSO') && (
+        hasRole('owner') || hasRole('admin') || hasRole('systemAdmin') ||
+        schoolId in myUser().get('schoolIds', []) ||
+        myUser().get('schoolId', '') == schoolId
+      );
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn() && canManageEventSchool(resource.data.schoolId);
+      allow create: if canManageEventSchool(request.resource.data.schoolId);
+      allow update: if canManageEventSchool(resource.data.schoolId) &&
+        canManageEventSchool(request.resource.data.schoolId);
+      allow delete: if canManageEventSchool(resource.data.schoolId);
+    }
+
     match /users/{uid} {
       allow read: if signedIn();
       allow create: if isLeaderOrHigher() || isSelf(uid);
       allow update: if isLeaderOrHigher() || isSelf(uid);
       allow delete: if hasRole('owner') || hasRole('admin') || hasRole('systemAdmin');
+    }
+
+    // Enrollment affects budget allocations; enforce DOSO authorization on the server.
+    match /campusEnrollments/{schoolId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && (hasRole('doso') || myUser().get('teamPosition', '') == 'DOSO')
+        && (schoolId in myUser().get('schoolIds', []) || myUser().get('schoolId', '') == schoolId);
+      allow delete: if false;
     }
 
     match /appSettings/{docId} {
@@ -84,7 +109,7 @@ service cloud.firestore {
       allow read, delete: if isLeaderOrHigher();
     }
     match /{top}/{document=**} {
-      allow read, write: if signedIn() && !(top in ['huddles','huddleSidebars','villagePublicForms','villagePublicResponses']);
+      allow read, write: if signedIn() && !(top in ['huddles','huddleSidebars','villagePublicForms','villagePublicResponses','campusEnrollments']);
     }
   }
 }
