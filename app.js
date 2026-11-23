@@ -34,7 +34,7 @@ import {
   serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v290-deadline-picker";
+const VV_APP_VERSION = "v293-weather-compact-manual-fetch";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -389,6 +389,10 @@ const PERMISSION_TOOLS = [
   { key: "events", name: "Events", permissions: [
     {key:"view",label:"View Events",description:"Browse event tiles and read planning and history records for assigned campuses."},
     {key:"manage",label:"Manage Events",description:"Add, edit, delete, and import events and upload event images for assigned campuses."}
+  ] },
+  { key: "weatherWatch", name: "Weather Watch", permissions: [
+    { key: "view", label: "View campus weather", description: "View campus weather status and its last update." },
+    { key: "manage", label: "Manage campus weather", description: "Leaders can refresh readings and set a campus-wide outdoor play code." }
   ] },
   { key: "campusEnrollment", name: "Campus Enrollment", permissions: [
     { key: "manage", label: "Update campus enrollment", description: "Enter enrollment for a campus to calculate monthly budgets. Assign to DOSO only." }
@@ -1862,6 +1866,7 @@ function getAvailableTools(user) {
   const tools = [];
   if(user?.accountType!=="family") tools.push({id:"villageForms",title:"Village Forms",icon:"📝",desc:"Build forms, use templates and collect responses."});
   if(user?.accountType!=="family") tools.push({id:"huddle",title:"The Huddle",icon:"💬",desc:"Collaborate, propose solutions and assign approved tasks."});
+  if (user?.accountType !== "family") tools.push({id:"weatherWatch",title:"Weather Watch",icon:"☀",desc:"Campus outdoor-play status, latest conditions and leader refresh."});
 
   if (user?.accountType !== "family" && (hasToolPermission(user,"events","view") || hasToolPermission(user,"events","manage") || hasFullDevAccess(user) || (getUserRoleKeys(user).some(r=>["leader","owner","admin","systemadmin"].includes(r)) && !state.roles.some(role=>getUserRoleKeys(user).includes(normalizeRoleKey(role.key||role.name)) && role.permissions?.events)))) tools.push({id:"events",title:"Events",icon:"📅",desc:"School event planning and historical records."});
   const canSubmitMoney = hasToolPermission(user, "moneyRequests", "submit");
@@ -2294,7 +2299,7 @@ function pageShell(content) {
   ];
   const pageTitles = { profile: "My profile", events: "Events", curriculum: "Curriculum", home: "Home", leadership: "Leadership", ownersPanel: "Owners", systemAdmin: "System admin" };
   const currentTitle = pageTitles[state.currentView] || "Workspace";
-  const pinnedTools = getAvailableTools(state.session).filter(t => isToolBookmarked(t.id));
+  const pinnedTools = getAvailableTools(state.session).filter(t => t.id !== "weatherWatch" && isToolBookmarked(t.id));
   const pinnedHtml = pinnedTools.map(t => `<button type="button" class="vv-nav-link ${state.currentView === t.id ? 'is-current' : ''}" data-tool="${escapeHtml(t.id)}"><span class="vv-nav-icon">${toolLogoAsset(t.id) ? `<img src="${toolLogoAsset(t.id)}" alt="" class="vv-nav-tool-logo" />` : t.icon}</span><span>${escapeHtml(getToolDisplay(t).title)}</span></button>`).join('');
   const navHtml = navigation.filter(item => item[3]).map(([action, icon, label]) =>
     `<button type="button" class="vv-nav-link ${state.currentView === action ? "is-current" : ""}" data-action="${action}" ${state.currentView === action ? 'aria-current="page"' : ""}><span class="vv-nav-icon" aria-hidden="true">${icon}</span><span>${label}</span></button>`
@@ -2314,7 +2319,7 @@ function pageShell(content) {
       <div class="vv-main-column">
         <header class="topbar vv-clean-topbar">
           <div class="topbar-inner">
-            <div class="vv-page-heading"><span class="vv-mobile-brand">Village Vibes <span>·</span> </span><strong>${escapeHtml(currentTitle)}</strong></div>
+            <div class="vv-page-heading"><span class="vv-mobile-brand">Village Vibes <span>·</span> </span><strong>${escapeHtml(currentTitle)}</strong>${state.session?.accountType!=="family"?renderWeatherHeader():""}</div>
             <div class="vv-top-actions">
               <button class="notification-button vv-icon-button" type="button" data-toggle-notifications aria-label="Notifications" title="Notifications">🔔${getUnreadNotificationCount() ? `<span>${getUnreadNotificationCount()}</span>` : ""}</button>
               <button class="user-pill clickable-user-pill vv-account-button" type="button" data-open-self-profile title="My profile">${uAvatarForShell(state.session)}<span class="vv-account-name">${escapeHtml(makeDisplayName(state.session))}</span></button>
@@ -2439,8 +2444,12 @@ function renderShortcutBar(allTools) {
  const prefs=getToolPrefs();const shortcuts=(prefs.shortcuts||[]).filter(x=>x.tabId&&allTools.some(t=>t.id===x.toolId));
  const folders=prefs.shortcutFolders||[];
  const zone=(id,contents,extra='')=>`<div class="vv-shortcut-dropzone ${shortcutUi.drop===id?'vv-drop-target':''} ${extra}" data-shortcut-dropzone="${escapeHtml(id)}">${contents}</div>`;
- return `<div class="card slim-card vv-shortcut-bar"><div class="vv-shortcut-heading"><strong>Shortcuts</strong><button class="secondary small" type="button" data-create-shortcut-folder>+ Folder</button></div><div class="bookmark-tools">${zone('',shortcuts.filter(x=>!x.folderId).map(shortcutChip).join('')||'<span class="helper vv-shortcut-empty">Drag shortcuts here</span>','vv-shortcut-root')}${folders.map(f=>`<div class="vv-shortcut-folder-wrap" draggable="true" data-shortcut-folder-drag="${escapeHtml(f.id)}"><details class="vv-shortcut-folder" ${shortcutUi.drop===f.id?'open':''}><summary>📁 ${escapeHtml(f.name)}</summary>${zone(f.id,shortcuts.filter(x=>x.folderId===f.id).map(shortcutChip).join('')||'<span class="helper">Drop shortcuts here</span>','vv-shortcut-dropdown')}</details></div>`).join('')}</div><p class="helper vv-shortcut-drag-help">Drag to reorder. Drop onto a folder to move a shortcut inside it.</p></div>`;
+ return `<div class="card slim-card vv-shortcut-bar"><div class="vv-shortcut-heading"><strong>Shortcuts</strong><button class="secondary small" type="button" data-create-shortcut-folder>+ Folder</button></div><div class="bookmark-tools">${zone('',shortcuts.filter(x=>!x.folderId).map(shortcutChip).join('')||'<span class="helper vv-shortcut-empty">Drag shortcuts here</span>','vv-shortcut-root')}${folders.map(f=>`<div class="vv-shortcut-folder-wrap" draggable="true" data-shortcut-folder-drag="${escapeHtml(f.id)}"><details class="vv-shortcut-folder"><summary>📁 ${escapeHtml(f.name)}</summary>${zone(f.id,shortcuts.filter(x=>x.folderId===f.id).map(shortcutChip).join('')||'<span class="helper">Drop shortcuts here</span>','vv-shortcut-dropdown')}</details></div>`).join('')}</div></div>`;
 }
+document.addEventListener('pointerdown',event=>{
+  if(event.target.closest('.vv-shortcut-folder'))return;
+  document.querySelectorAll('.vv-shortcut-folder[open]').forEach(folder=>folder.open=false);
+});
 function updateShortcutBar(){const host=document.querySelector('.vv-shortcut-bar');if(host){const wrapper=document.createElement('div');wrapper.innerHTML=renderShortcutBar(getAvailableTools(state.session));host.replaceWith(wrapper.firstElementChild);}}
 function moveShortcut(id,folderId,beforeId=null){const prefs=getToolPrefs();const arr=prefs.shortcuts||[];const from=arr.findIndex(x=>x.id===id);if(from<0)return;const [item]=arr.splice(from,1);item.folderId=folderId;const to=beforeId?arr.findIndex(x=>x.id===beforeId):-1;arr.splice(to<0?arr.length:to,0,item);prefs.shortcuts=arr;saveToolPrefs(prefs);}
 function renameShortcut(id,name){const prefs=getToolPrefs();const item=(prefs.shortcuts||[]).find(x=>x.id===id);if(!item||!name.trim())return;item.label=name.trim().slice(0,80);saveToolPrefs(prefs);}
@@ -2464,7 +2473,7 @@ function renderHome() {
   state.currentView = "home";
   if (state.modal && ["login", "adminPasswordLogin"].includes(state.modal.type)) state.modal = null;
 
-  const allTools = orderToolsForHome(getAvailableTools(state.session).map(getToolDisplay));
+  const allTools = orderToolsForHome(getAvailableTools(state.session).filter(t=>t.id!=="weatherWatch").map(getToolDisplay));
   const prefs = getToolPrefs();
   const bookmarked = allTools.filter(t => (prefs.bookmarks || []).includes(t.id));
   const visibleTools = allTools.filter(t => !(prefs.hidden || []).includes(t.id));
@@ -9706,6 +9715,112 @@ document.addEventListener('input',e=>{if(e.target.matches('[data-ole-catalog-sea
 document.addEventListener('change',async e=>{if(e.target.matches('[data-ole-catalog-move]')){try{await moveOleCatalogTag(e.target.dataset.oleCatalogMove,e.target.value);}catch(err){showToast(err.message);}return;}if(e.target.matches('[data-ole-csv]')){const f=e.target.files?.[0];if(f){if(f.size>500000){showToast('CSV too large.');return;}state.oleImportText=await f.text();const ta=document.querySelector('.ole-import-text');if(ta)ta.value=state.oleImportText;}}});
 document.addEventListener('change',e=>{if(e.target.matches('[data-curriculum-school]')){state.curriculumSchoolId=e.target.value;state.curriculumOleEditId='';renderCurriculum();}});
 
+
+// Weather Watch v291: manual-only. No timers, background polling, or automatic weather-code assignment.
+let weatherSelectedSchool = "";
+let weatherRecord = null;
+let weatherUnsubscribe = null;
+let weatherBusy = false;
+let weatherError = "";
+const weatherCodeNames = { green:"Green — Normal outdoor play", yellow:"Yellow — Use caution", red:"Red — Keep children indoors", unset:"Not set" };
+function weatherSchoolId() {
+  const ids=allowedSchoolIds();
+  return ids.includes(weatherSelectedSchool) ? weatherSelectedSchool : activeSchoolContext();
+}
+function weatherCanManage() { return isLeaderOrAdmin(state.session); }
+function weatherDateText(value) {
+  const date=value?.toDate?.() || (value ? new Date(value) : null);
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'}) : 'Never';
+}
+function weatherEsc(v) { return escapeHtml(String(v??'')); }
+function watchWeatherDocument() {
+  if(weatherUnsubscribe){weatherUnsubscribe();weatherUnsubscribe=null;}
+  weatherRecord=null;weatherError='';
+  const schoolId=weatherSchoolId();
+  if(!schoolId||!state.session)return;
+  weatherUnsubscribe=onSnapshot(doc(db,'campusWeather',schoolId), snap=>{
+    weatherRecord=snap.exists()?snap.data():{};
+    updateWeatherHeader();if(state.currentView==='weatherWatch')renderWeatherWatch();
+  },err=>{weatherError='Could not load weather: '+err.message;updateWeatherHeader();if(state.currentView==='weatherWatch')renderWeatherWatch();});
+}
+function renderWeatherHeader(){
+  if(!weatherUnsubscribe && state.session && weatherSchoolId())queueMicrotask(()=>{if(!weatherUnsubscribe&&state.session)watchWeatherDocument();});
+  const r=weatherRecord||{}, rd=r.readings||{}, code=['green','yellow','red'].includes(r.code)?r.code:'unset';
+  const updated=r.refreshedAt?.toDate?.() || (r.refreshedAt?new Date(r.refreshedAt):null);
+  const age=updated&&!isNaN(updated.getTime())?Date.now()-updated.getTime():Infinity;
+  const stale=age>30*60*1000;
+  const f=Number.isFinite(rd.temperatureC)?Math.round(rd.temperatureC*9/5+32)+'°F':'—';
+  const time=updated&&!isNaN(updated.getTime())?updated.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}):'Never';
+  const label=code==='unset'?'Not set':code[0].toUpperCase()+code.slice(1);
+  return `<span class="vv-weather-strip weather-${code}" title="Campus weather status · ${stale?'Readings may be outdated':'Latest available readings'}"><span class="vv-weather-dot"></span><b>${label}</b><span class="vv-weather-temp">${f}</span><small>${stale?'⚠ ':''}Updated ${time}</small>${weatherCanManage()?`<button type="button" class="vv-weather-refresh" data-weather-refresh aria-label="Refresh campus weather" title="Fetch latest weather">${weatherBusy?'…':'↻'}</button>`:''}<button type="button" class="vv-weather-details" data-tool="weatherWatch" title="Weather settings and details" aria-label="Weather details">⋯</button></span>`;
+}
+function updateWeatherHeader(){
+  const current=document.querySelector('.vv-weather-strip');if(!current)return;
+  const holder=document.createElement('div');holder.innerHTML=renderWeatherHeader();
+  if(holder.firstElementChild)current.replaceWith(holder.firstElementChild);
+}
+function weatherFieldText(name){return document.querySelector(`[data-weather-${name}]`)?.value?.trim()||'';}
+function renderWeatherWatch() {
+  const schoolId=weatherSchoolId();
+  if(!schoolId){$app.innerHTML=pageShell('<section class="card">No assigned campus.</section>');return;}
+  if(!weatherUnsubscribe)watchWeatherDocument();
+  const r=weatherRecord||{};const canManage=weatherCanManage();
+  const status=['green','yellow','red'].includes(r.code)?r.code:'unset';
+  const readings=r.readings||{};
+  const celsius=readings.temperatureC;
+  const temp=Number.isFinite(celsius)?`${Math.round(celsius*9/5+32)}°F`:'—';
+  const feels=Number.isFinite(readings.feelsLikeC)?`${Math.round(readings.feelsLikeC*9/5+32)}°F`:'—';
+  const schoolTabs=allowedSchoolIds().length>1?`<div class="weather-tabs">${allowedSchoolIds().map(id=>`<button type="button" class="${id===schoolId?'active':''}" data-weather-school="${weatherEsc(id)}">${weatherEsc(getSchoolNameById(id))}</button>`).join('')}</div>`:'';
+  $app.innerHTML=pageShell(`<section class="card weather-watch"><div class="tool-heading-row"><div><h2>☀ Weather Watch</h2><p class="helper">Campus-wide outdoor play guidance · refresh on demand</p></div><span class="weather-pill">Auto-update OFF</span></div>${schoolTabs}
+  <div class="weather-status weather-${status}"><div><span class="weather-label">CURRENT CAMPUS CODE</span><h2>${weatherCodeNames[status]}</h2><p>${r.codeReason?weatherEsc(r.codeReason):'A leader has not recorded a reason or status yet.'}</p></div></div>
+  <div class="weather-metrics"><div><small>Temperature</small><strong>${temp}</strong></div><div><small>Feels like</small><strong>${feels}</strong></div><div><small>Wind</small><strong>${Number.isFinite(readings.windKph)?Math.round(readings.windKph/1.60934)+' mph':'—'}</strong></div><div><small>Humidity</small><strong>${Number.isFinite(readings.humidity)?Math.round(readings.humidity)+'%':'—'}</strong></div></div>
+  <div class="weather-meta"><div><b>Last successful weather refresh:</b> ${weatherDateText(r.refreshedAt)}</div><div><b>Observation recorded:</b> ${weatherDateText(readings.observedAt)}</div><div><b>Code last set:</b> ${weatherDateText(r.codeUpdatedAt)} ${r.codeUpdatedByName?'by '+weatherEsc(r.codeUpdatedByName):''}</div><div><b>Weather source:</b> National Weather Service (NWS)</div></div>
+  ${r.refreshedAt?.toDate && Date.now()-r.refreshedAt.toDate().getTime()>30*60*1000?'<p class="weather-warning">⚠ Weather readings are over 30 minutes old. Do not treat them as current.</p>':''}
+  ${weatherError?`<p class="weather-warning">${weatherEsc(weatherError)}</p>`:''}
+  <p class="helper">Refresh calculates a temperature-based guidance color. It does not check air quality, precipitation, or playground conditions; leaders must assess those separately.</p>
+  ${canManage?`<div class="weather-editor"><h3>Leader controls</h3><div class="weather-editor-row"><button type="button" data-weather-refresh ${weatherBusy?'disabled':''}>${weatherBusy?'Refreshing…':'↻ Refresh weather now'}</button><span class="helper">Fetches observations and calculates a temperature-based guidance color. No scheduled requests.</span></div>
+  <div class="weather-editor-grid"><label>Outdoor play code<select data-weather-code><option value="unset">Select a code</option>${['green','yellow','red'].map(code=>`<option value="${code}" ${status===code?'selected':''}>${weatherCodeNames[code]}</option>`).join('')}</select></label><label>Reason / notes<input data-weather-reason maxlength="240" placeholder="Why this code?" value="${weatherEsc(r.codeReason||'')}"></label></div><button type="button" data-weather-save ${weatherBusy?'disabled':''}>Save campus code</button>
+  <details class="weather-location"><summary>Weather station location setup</summary><p class="helper">Enter the campus coordinates once to enable live NWS readings. Coordinates are not automatically inferred.</p><div class="weather-editor-grid"><label>Latitude<input type="number" step="any" min="-90" max="90" data-weather-lat value="${weatherEsc(r.latitude??'')}"></label><label>Longitude<input type="number" step="any" min="-180" max="180" data-weather-lon value="${weatherEsc(r.longitude??'')}"></label></div><button type="button" class="secondary" data-weather-save-location>Save coordinates</button></details>
+  <div class="weather-future"><b>Automatic updates (future)</b><p class="helper">Off for Phase 1. A scheduled 15-minute refresh can be added later with a server-side Firebase function.</p><label><input type="checkbox" disabled> Enable automatic updates (not available yet)</label></div></div>`:'<p class="helper">Only leaders and owners can refresh weather or change the campus code.</p>'}</section>`);
+}
+async function saveWeatherLocation(){
+  if(!weatherCanManage())return;
+  const lat=Number(weatherFieldText('lat'));const lon=Number(weatherFieldText('lon'));
+  if(!weatherFieldText('lat')||!weatherFieldText('lon')||!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180){weatherError='Enter valid latitude and longitude.';renderWeatherWatch();return;}
+  try{await setDoc(doc(db,'campusWeather',weatherSchoolId()),{latitude:lat,longitude:lon,locationUpdatedAt:serverTimestamp()}, {merge:true});weatherError='';showToast('Weather location saved.');}
+  catch(err){weatherError=err.message;renderWeatherWatch();}
+}
+async function saveWeatherCode(){
+  if(!weatherCanManage()||weatherBusy)return;
+  const code=weatherFieldText('code');const reason=weatherFieldText('reason');
+  if(!['green','yellow','red'].includes(code)||!reason){weatherError='Select a color and enter a reason before saving.';renderWeatherWatch();return;}
+  try{await setDoc(doc(db,'campusWeather',weatherSchoolId()),{code,codeReason:reason,codeUpdatedAt:serverTimestamp(),codeUpdatedBy:auth.currentUser?.uid||'',codeUpdatedByName:[state.session?.firstName,state.session?.lastName].filter(Boolean).join(' ')},{merge:true});weatherError='';showToast('Campus weather code saved.');}
+  catch(err){weatherError=err.message;renderWeatherWatch();}
+}
+async function refreshWeatherNow(){
+  if(!weatherCanManage()||weatherBusy)return;
+  const schoolId=weatherSchoolId();const r=weatherRecord||{};
+  if(!Number.isFinite(r.latitude)||!Number.isFinite(r.longitude)){weatherError='Set campus coordinates in Weather details first.';showToast(weatherError);if(state.currentView==='weatherWatch')renderWeatherWatch();return;}
+  weatherBusy=true;weatherError='';updateWeatherHeader();if(state.currentView==='weatherWatch')renderWeatherWatch();
+  try{
+    const getJson=async url=>{const res=await fetch(url,{headers:{Accept:'application/geo+json'}});if(!res.ok)throw new Error('NWS returned '+res.status);return res.json();};
+    const point=await getJson(`https://api.weather.gov/points/${r.latitude},${r.longitude}`);
+    const stations=await getJson(point.properties?.observationStations);
+    const stationUrl=stations.features?.[0]?.id;
+    if(!stationUrl||!stationUrl.startsWith('https://api.weather.gov/'))throw new Error('No NWS observation station found.');
+    const latest=await getJson(stationUrl+'/observations/latest');const p=latest.properties||{};
+    if(!p.timestamp||p.temperature?.value==null)throw new Error('No recent station observation was available.');
+    const temp=Number(p.temperature.value);const heat=p.heatIndex?.value;const chill=p.windChill?.value;
+    const readings={temperatureC:temp,feelsLikeC:Number.isFinite(heat)?heat:Number.isFinite(chill)?chill:temp,windKph:Number.isFinite(p.windSpeed?.value)?p.windSpeed.value: null,humidity:Number.isFinite(p.relativeHumidity?.value)?p.relativeHumidity.value:null,observedAt:p.timestamp,station:stationUrl};
+    const apparentF=(Number.isFinite(readings.feelsLikeC)?readings.feelsLikeC:temp)*9/5+32;
+    // Temperature-only guidance bands. Not a substitute for full NC Weather Watch, AQI, precipitation or local judgment.
+    const suggested=apparentF<=15||apparentF>=105?'red':apparentF<=32||apparentF>=90?'yellow':'green';
+    await setDoc(doc(db,'campusWeather',schoolId),{readings,code:suggested,codeReason:'Temperature-based guidance only; check air quality, precipitation and local conditions.',codeUpdatedAt:serverTimestamp(),refreshedAt:serverTimestamp(),source:'NWS',autoUpdateEnabled:false},{merge:true});
+    showToast('Weather updated. Temperature-based code calculated; check other conditions.');
+  }catch(err){weatherError='Refresh failed: '+err.message;showToast(weatherError);}
+  finally{weatherBusy=false;updateWeatherHeader();if(state.currentView==='weatherWatch')renderWeatherWatch();}
+}
+
 function renderCurrentView() {
   if (state.publicShareView === "signup") {
     renderPublicSignupPage();
@@ -9736,6 +9851,7 @@ function renderCurrentView() {
     return;
   }
 
+  if (state.currentView === "weatherWatch") { renderWeatherWatch(); return; }
   if (state.currentView === "events") { eventsTool.render(); return; }
   if (state.currentView === "curriculum") { renderCurriculum(); return; }
 
@@ -10277,7 +10393,11 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
-  if (await eventsTool.click(e)) return;
+  if (e.target.closest('[data-weather-refresh]')) { await refreshWeatherNow(); return; }
+  if (e.target.closest('[data-weather-save]')) { await saveWeatherCode(); return; }
+  if (e.target.closest('[data-weather-save-location]')) { await saveWeatherLocation(); return; }
+  if (e.target.closest('[data-weather-school]')) { weatherSelectedSchool=e.target.closest('[data-weather-school]').dataset.weatherSchool; watchWeatherDocument(); renderWeatherWatch(); return; }
+    if (await eventsTool.click(e)) return;
   if (await handleCurriculumClick(e)) return;
   const leadershipTab = e.target.closest("[data-leadership-tab]")?.dataset.leadershipTab;
   const analyticsStep = e.target.closest("[data-budget-analytics-step]");
@@ -10796,6 +10916,7 @@ $app.addEventListener("click", async (e) => {
   }
 
   if (toolId && !canOpenTool(state.session, toolId)) { showToast("This tool is not available for your account."); return; }
+  if (toolId === "weatherWatch") { state.currentView="weatherWatch"; watchWeatherDocument(); renderWeatherWatch(); return; }
   if (toolId === "events") { state.currentView="events"; await eventsTool.open(); return; }
   if (toolId === "curriculum") { await openCurriculum(); return; }
   if (toolId === "villageForms") { state.currentView="villageForms"; await villageForms.open(); return; }

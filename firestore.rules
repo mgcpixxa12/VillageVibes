@@ -39,6 +39,18 @@ service cloud.firestore {
       );
     }
 
+    // Campus weather is scoped to the user's assigned school; only leadership can change it.
+    match /campusWeather/{schoolId} {
+      function campusMember() {
+        return signedIn() && (hasRole('owner') || hasRole('admin') || hasRole('systemAdmin') ||
+          schoolId in myUser().get('schoolIds', []) || myUser().get('schoolId', '') == schoolId);
+      }
+      allow read: if campusMember();
+      allow create, update: if campusMember() && isLeaderOrHigher() &&
+        request.resource.data.get('autoUpdateEnabled', false) == false;
+      allow delete: if false;
+    }
+
     match /events/{eventId} {
       allow read: if signedIn() && canManageEventSchool(resource.data.schoolId);
       allow create: if canManageEventSchool(request.resource.data.schoolId);

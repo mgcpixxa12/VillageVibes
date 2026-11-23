@@ -6567,3 +6567,34 @@ body {
 .vv-shortcut-rename{width:150px;min-height:35px;border:1px solid #9eb6a5;border-radius:7px;padding:5px 8px;background:var(--card,#fff);color:var(--text,#253c2c)}.vv-shortcut-rename-action{min-width:28px;border:0;border-radius:6px;color:#bb4141;background:transparent;font-weight:800;font-size:18px;cursor:pointer}.vv-shortcut-rename-action.changed{color:#22834d}
 .vv-shortcut-folder-create{display:flex;gap:4px}.vv-shortcut-folder-create input{width:145px;min-height:32px}.vv-shortcut-folder-create button{min-width:29px}
 .vv-shortcut-dropzone{display:flex;flex-wrap:wrap;gap:7px;min-height:35px;padding:5px;border:2px dashed transparent;border-radius:10px;transition:background .12s,border-color .12s}.vv-shortcut-root{flex:1;min-width:140px}.vv-shortcut-folder-wrap{border-radius:10px;cursor:grab}.vv-shortcut-folder-wrap.vv-drop-target,.vv-shortcut-dropzone.vv-drop-target{background:#51b37a27;border-color:#288a54!important;outline:2px solid #288a5480;outline-offset:2px}.vv-shortcut.vv-drop-before{box-shadow:-5px 0 0 #2c9a59}.vv-shortcut.vv-drop-after{box-shadow:5px 0 0 #2c9a59}.vv-shortcut.vv-dragging{opacity:.4}.vv-shortcut-drag-help{font-size:.75rem;margin:6px 0 0}
+
+/* Weather Watch: campus-specific manual status and on-demand NWS readings */
+.weather-watch{max-width:1040px;margin:auto}.weather-pill{border:1px solid var(--border,#d8dee5);padding:7px 12px;border-radius:999px;font-size:12px;font-weight:700}.weather-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.weather-tabs button.active{background:#194c67;color:#fff}.weather-status{padding:24px;border-radius:18px;margin:18px 0;background:#f0f3f7;border-left:8px solid #8b98a5}.weather-status.weather-green{background:#e3f5e9;border-color:#25834c;color:#17462c}.weather-status.weather-yellow{background:#fff3d0;border-color:#dba42c;color:#59420d}.weather-status.weather-red{background:#fbe5e5;border-color:#bf4242;color:#6a2020}.weather-label{font-size:11px;letter-spacing:1px;font-weight:800}.weather-status h2{margin:6px 0}.weather-status p{margin:0}.weather-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.weather-metrics>div{border:1px solid var(--border,#ddd);border-radius:12px;padding:15px;display:flex;flex-direction:column;gap:7px}.weather-metrics small{opacity:.75}.weather-metrics strong{font-size:22px}.weather-meta{display:grid;gap:7px;font-size:13px;margin:18px 0}.weather-editor{border-top:1px solid var(--border,#ddd);padding-top:20px;margin-top:22px}.weather-editor-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.weather-editor-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.weather-editor-grid label{display:grid;gap:6px}.weather-editor-grid input,.weather-editor-grid select{width:100%}.weather-location,.weather-future{margin-top:20px;border:1px solid var(--border,#ddd);padding:15px;border-radius:12px}.weather-location summary{cursor:pointer;font-weight:700}.weather-warning{border-radius:10px;background:#fff1d9;color:#6a4300;padding:12px}.weather-future input{accent-color:#aaa}@media(max-width:650px){.weather-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.weather-editor-grid{grid-template-columns:1fr}}
+
+/* v292: weather navigation beside the page title */
+.vv-page-heading{display:flex;align-items:center;gap:13px;flex-wrap:wrap}
+.vv-header-weather{font-size:12px;font-weight:750;line-height:1.2;padding:7px 12px;border:1px solid var(--vv-border,var(--border,#d1d9d5));border-radius:999px;background:var(--panel,#fff);color:var(--vv-ink,var(--text,#26352b));cursor:pointer}
+.vv-header-weather:hover,.vv-header-weather.is-current{background:var(--surface,#e7efe9)}
+/* v292: compact shortcut bar; folder menus float above surrounding content */
+.vv-shortcut-bar{padding:9px 13px!important;overflow:visible!important;position:relative;z-index:5}
+.vv-shortcut-heading{margin-bottom:3px!important;gap:12px}
+.vv-shortcut-heading strong{font-size:13px}
+.vv-shortcut-heading>button{padding:4px 9px!important;min-height:27px!important;font-size:12px}
+.vv-shortcut-bar .bookmark-tools{gap:5px!important;overflow:visible!important}
+.vv-shortcut-dropzone{min-height:27px!important;padding:2px!important;gap:5px!important}
+.vv-shortcut-folder-wrap{position:relative;overflow:visible!important}
+.vv-shortcut-folder{padding:0!important;border:0!important;position:relative}
+.vv-shortcut-folder>summary{display:block;list-style:none;padding:5px 9px;border:1px solid var(--vv-border,var(--border,#ccc));border-radius:8px;font-size:12px;font-weight:650;white-space:nowrap;cursor:pointer}
+.vv-shortcut-folder>summary::-webkit-details-marker{display:none}
+.vv-shortcut-folder[open]>summary{background:var(--surface,#e7efe9)}
+.vv-shortcut-folder>.vv-shortcut-dropdown{position:absolute!important;top:calc(100% + 5px);left:0;z-index:200;min-width:220px;max-width:min(340px,80vw);width:max-content;max-height:340px;overflow-y:auto!important;display:flex;flex-direction:column;flex-wrap:nowrap!important;align-items:stretch;gap:6px!important;padding:10px!important;background:var(--panel,var(--card,#fff));color:var(--text,#26352b);border:1px solid var(--vv-border,var(--border,#ccc))!important;border-radius:12px;box-shadow:0 14px 35px #0003}
+.vv-shortcut-folder>.vv-shortcut-dropdown .vv-shortcut{width:100%}
+.vv-shortcut-folder>.vv-shortcut-dropdown .bookmark-chip{flex:1;text-align:left}
+.vv-shortcut-drag-help{display:none!important}
+@media(max-width:650px){.vv-shortcut-bar{padding:8px 10px!important}.vv-page-heading{gap:7px}.vv-header-weather{padding:5px 8px}}
+
+/* v293: compact inline weather status beside page heading */
+.vv-weather-strip{display:inline-flex;align-items:center;gap:7px;padding:3px 6px 3px 9px;border:1px solid var(--vv-border,#d5ded9);border-radius:9px;background:var(--panel,#fff);font-size:12px;line-height:1.25;white-space:nowrap;max-width:100%}
+.vv-weather-dot{width:9px;height:9px;border-radius:50%;background:#8c969b;flex:none}.vv-weather-strip.weather-green .vv-weather-dot{background:#248b50}.vv-weather-strip.weather-yellow .vv-weather-dot{background:#dba52a}.vv-weather-strip.weather-red .vv-weather-dot{background:#c74040}
+.vv-weather-strip small{font-size:10px;opacity:.7}.vv-weather-strip .vv-weather-refresh,.vv-weather-strip .vv-weather-details{min-height:25px;min-width:25px;border:0;background:transparent;color:inherit;border-radius:6px;cursor:pointer;padding:2px 5px;font-size:17px;line-height:1}.vv-weather-strip .vv-weather-refresh:hover,.vv-weather-strip .vv-weather-details:hover{background:var(--surface,#e8eee9)}
+@media(max-width:650px){.vv-weather-strip{gap:4px}.vv-weather-strip small{display:none}.vv-page-heading{flex-wrap:wrap}}
