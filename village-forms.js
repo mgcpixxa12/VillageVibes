@@ -20,6 +20,19 @@ export function createVillageForms(a){
  const current=()=>forms.find(f=>f.id===selected);
  const publicUrl=f=>new URL(`public-form.html?id=${encodeURIComponent(f.publicId||f.id)}`,location.href).href;
  const syncPublic=async f=>{const key=f.publicId||f.id;const ref=doc(db,'villagePublicForms',key);if(f.status==='published'&&f.publicEnabled){const old=await getDoc(ref).catch(()=>null);await setDoc(ref,{title:f.title,description:f.description,questions:f.questions,confirmation:f.confirmation||'Your response has been recorded.',acceptResponses:f.acceptResponses!==false,deadline:f.deadline||'',updatedAt:now(),sourceFormId:f.id,publicEnabled:true,theme:f.theme||'garden',claimed:old?.exists()?old.data().claimed||{}:{}});}else{await deleteDoc(ref).catch(()=>{});}};
+ const showPublishedDialog=f=>{
+  document.getElementById('vf-published-modal')?.remove();
+  const overlay=document.createElement('div');
+  overlay.id='vf-published-modal';overlay.className='vf-published-overlay';
+  overlay.innerHTML=`<div class="vf-published-dialog" role="dialog" aria-modal="true" aria-labelledby="vf-published-heading"><div class="vf-published-check">✓</div><h2 id="vf-published-heading">Your form has been published!</h2><p>${e(f.title)} is now live${f.publicEnabled===false?' for its assigned internal audience':''}.</p><div class="vf-published-actions">${f.publicEnabled!==false?'<button type="button" class="vf-primary" data-vf-published-open>Click here to see the live form!</button>':'<p>This form has no public link enabled. Enable the public link in Settings to preview it externally.</p>'}<button type="button" class="secondary" data-vf-published-close>Close</button></div></div>`;
+  const close=()=>overlay.remove();
+  overlay.addEventListener('click',event=>{
+   if(event.target===overlay||event.target.closest('[data-vf-published-close]'))close();
+   if(event.target.closest('[data-vf-published-open]')){window.open(publicUrl(f),'_blank','noopener');close();}
+  });
+  overlay.addEventListener('keydown',event=>{if(event.key==='Escape')close();});
+  document.body.appendChild(overlay);overlay.querySelector('button')?.focus();
+ };
  const save=async(f,quiet=false)=>{if(!f)return;f.updatedAt=now();await setDoc(doc(db,'villageForms',f.id),JSON.parse(JSON.stringify(f)));await syncPublic(f);dirty=false;if(!quiet)a.toast('Form saved.');};
  async function load(){const [fs,rs,prs]=await Promise.all([getDocs(collection(db,'villageForms')),getDocs(collection(db,'villageFormResponses')),getDocs(collection(db,'villagePublicResponses')).catch(()=>({docs:[]}))]);forms=fs.docs.map(d=>({id:d.id,...d.data()}));responses=[...rs.docs,...prs.docs].map(d=>({id:d.id,...d.data()}));}
  const roles=u=>[...(Array.isArray(u.roles)?u.roles:[]),u.role,u.roleKey,u.teamPosition].filter(Boolean).map(r=>String(typeof r==='object'?r.key||r.name:r).toLowerCase().replace(/[^a-z]/g,''));
@@ -84,7 +97,7 @@ export function createVillageForms(a){
  if(act==='back'){if(preview){preview=false;tab='questions';render();return;}if(dirty&&f&&canEdit(f))await save(f,true);editor=false;selected='';tab='forms';render();return;}
  if(act==='preview'){if(dirty)await save(f,true);preview=!preview;render();return;}
  if(act==='save'){await saveNow();return;}
- if(act==='publish'){if(!f.publicId)f.publicId=uuid();if(f.publicEnabled===undefined)f.publicEnabled=true;if(!f.questions.length){a.toast('Add a question first.');return;}f.status='published';await save(f);a.notify?.('published',f)?.catch?.(console.warn);render();return;}
+ if(act==='publish'){if(!f.publicId)f.publicId=uuid();if(f.publicEnabled===undefined)f.publicEnabled=true;if(!f.questions.length){a.toast('Add a question first.');return;}f.status='published';await save(f,true);a.notify?.('published',f)?.catch?.(console.warn);render();showPublishedDialog(f);return;}
  if(act==='unpublish'){f.status='draft';await save(f);render();return;}
  if(act==='saveTemplate'){const x={...structuredClone(f),id:uuid(),isTemplate:true,status:'draft',title:`${f.title} (template)`,createdAt:now(),updatedAt:now(),createdBy:uid()};forms.push(x);await save(x);a.toast('Saved to Templates.');return;}
  if(act==='delete'){if(b.dataset.confirm!=='yes'){b.dataset.confirm='yes';b.textContent='Confirm delete form';return;}await removeForm(f);editor=false;selected='';tab='forms';render();return;}
@@ -101,3 +114,16 @@ export function createVillageForms(a){
 }
 
 document.addEventListener('keydown',ev=>{if(ev.key==='Escape'&&document.querySelector('#vf-theme-modal')){document.querySelector('#vf-theme-modal').remove();document.body.style.overflow='';}});
+
+// Close the native calendar after a date is selected.
+// Dismiss the deadline date/time picker once a complete value is selected.
+document.addEventListener("input",event=>{
+ const el=event.target;
+ if(el.matches('input[type="datetime-local"][name="deadline"],input[type="datetime-local"][data-form-field="deadline"]') && el.value && el.validity.valid){
+   requestAnimationFrame(()=>el.blur());
+ }
+},true);
+document.addEventListener("change",event=>{
+ const el=event.target;
+ if(el.matches('input[type="datetime-local"][name="deadline"],input[type="datetime-local"][data-form-field="deadline"]') && el.value && el.validity.valid)el.blur();
+},true);

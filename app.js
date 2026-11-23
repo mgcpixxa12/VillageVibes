@@ -34,7 +34,7 @@ import {
   serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v280-event-library";
+const VV_APP_VERSION = "v290-deadline-picker";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -317,7 +317,7 @@ function renderToolTile(tool, extraClass = "") {
     <div class="tool-tile-controls">
       ${t.id === "campusCares" ? `<button class="mini-icon-button" type="button" title="Tool settings" aria-label="Campus Cares settings" data-campus-open-menu>⋯</button>` : ""}
       <button class="mini-icon-button" type="button" title="${bookmarked ? "Unpin" : "Pin to sidebar"}" aria-label="${bookmarked ? "Unpin" : "Pin to sidebar"} ${escapeHtml(t.title)}" data-bookmark-tool="${t.id}">${bookmarked ? "★" : "☆"}</button>
-      <button class="mini-icon-button" type="button" title="Add shortcut" aria-label="Add shortcut to ${escapeHtml(t.title)}" data-add-shortcut="${escapeHtml(t.id)}">↗</button>
+
       <button class="mini-icon-button" type="button" title="Hide tool" aria-label="Hide ${escapeHtml(t.title)}" data-hide-tool="${t.id}">×</button>
       ${t.id === "campusCares" ? `<div class="tool-tile-menu" data-campus-open-menu-panel><strong>Open Campus Cares to:</strong><button type="button" data-campus-open-mode="submitPopup">Submit Request popup</button><button type="button" data-campus-open-mode="tool">Open the tool</button><button type="button" data-campus-open-mode="submitted">View Your Submissions</button></div>` : ""}
     </div>
@@ -2429,18 +2429,35 @@ function renderLanding() {
   `;
 }
 
-function renderShortcutBar(allTools) {
-  const prefs = getToolPrefs();
-  const shortcuts = (prefs.shortcuts || []).filter(s => allTools.some(t => t.id === s.toolId));
-  const folders = prefs.shortcutFolders || [];
-  return `<div class="card slim-card vv-shortcut-bar"><div class="vv-shortcut-heading"><strong>Shortcuts</strong><button class="secondary small" data-create-shortcut-folder type="button">+ Folder</button></div><div class="bookmark-tools">${shortcuts.filter(s=>!s.folderId).map(s=>`<span class="vv-shortcut"><button type="button" class="bookmark-chip" data-open-shortcut="${escapeHtml(s.toolId)}">${escapeHtml(s.label)}</button><button class="secondary small" data-edit-shortcut="${escapeHtml(s.id)}" aria-label="Edit shortcut">⋯</button></span>`).join("")}${folders.map(f=>`<details class="vv-shortcut-folder"><summary>📁 ${escapeHtml(f.name)}</summary><div class="vv-shortcut-dropdown">${shortcuts.filter(s=>s.folderId===f.id).map(s=>`<span class="vv-shortcut"><button type="button" class="bookmark-chip" data-open-shortcut="${escapeHtml(s.toolId)}">${escapeHtml(s.label)}</button><button class="secondary small" data-edit-shortcut="${escapeHtml(s.id)}">⋯</button></span>`).join("") || '<span class="helper">Empty folder</span>'}</div></details>`).join("")}</div></div>`;
+let shortcutUi={menu:null,rename:null,draft:"",moving:null,drag:null,drop:null};
+function shortcutChip(item){
+ const rename=shortcutUi.rename===item.id;
+ const changed=rename&&shortcutUi.draft.trim()!==item.label;
+ return `<span class="vv-shortcut ${shortcutUi.drag===item.id?'vv-dragging':''}" draggable="${rename?'false':'true'}" data-shortcut-drag="${escapeHtml(item.id)}">${rename?`<input class="vv-shortcut-rename" data-shortcut-rename-input="${escapeHtml(item.id)}" value="${escapeHtml(shortcutUi.draft)}" maxlength="80" aria-label="Rename shortcut"><button type="button" class="vv-shortcut-rename-action ${changed?'changed':''}" data-shortcut-rename-action="${escapeHtml(item.id)}" title="${changed?'Save name':'Cancel rename'}">${changed?'✓':'×'}</button>`:`<button type="button" class="bookmark-chip" data-open-shortcut="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button><button type="button" class="secondary small vv-shortcut-dots" data-edit-shortcut="${escapeHtml(item.id)}" aria-label="Options for ${escapeHtml(item.label)}" aria-expanded="${shortcutUi.menu===item.id}">⋯</button>`}${shortcutUi.menu===item.id&&!rename?`<div class="vv-shortcut-menu"><button type="button" data-shortcut-action="rename" data-shortcut-id="${escapeHtml(item.id)}">Rename</button><button type="button" data-shortcut-action="move" data-shortcut-id="${escapeHtml(item.id)}">Move</button><button type="button" data-shortcut-action="remove" data-shortcut-id="${escapeHtml(item.id)}">Remove</button></div>`:''}${shortcutUi.moving===item.id?`<div class="vv-shortcut-move"><strong>Move to</strong><button type="button" data-shortcut-move-to="" data-shortcut-id="${escapeHtml(item.id)}">Home (outside folders)</button>${(getToolPrefs().shortcutFolders||[]).map(f=>`<button type="button" data-shortcut-move-to="${escapeHtml(f.id)}" data-shortcut-id="${escapeHtml(item.id)}">📁 ${escapeHtml(f.name)}</button>`).join('')}<button type="button" data-shortcut-move-cancel>Cancel</button></div>`:''}</span>`;
 }
-function addShortcut(toolId, label) {
-  const tool = getAvailableTools(state.session).map(getToolDisplay).find(t=>t.id===toolId);
-  if (!tool) { showToast("Tool not available."); return; }
-  const prefs=getToolPrefs(); prefs.shortcuts=prefs.shortcuts||[];
-  if (prefs.shortcuts.some(s=>s.toolId===toolId)) { showToast("Shortcut already added."); return; }
-  prefs.shortcuts.push({id:crypto.randomUUID(),toolId,label:label||tool.title,folderId:""}); saveToolPrefs(prefs); showToast("Shortcut added.");
+function renderShortcutBar(allTools) {
+ const prefs=getToolPrefs();const shortcuts=(prefs.shortcuts||[]).filter(x=>x.tabId&&allTools.some(t=>t.id===x.toolId));
+ const folders=prefs.shortcutFolders||[];
+ const zone=(id,contents,extra='')=>`<div class="vv-shortcut-dropzone ${shortcutUi.drop===id?'vv-drop-target':''} ${extra}" data-shortcut-dropzone="${escapeHtml(id)}">${contents}</div>`;
+ return `<div class="card slim-card vv-shortcut-bar"><div class="vv-shortcut-heading"><strong>Shortcuts</strong><button class="secondary small" type="button" data-create-shortcut-folder>+ Folder</button></div><div class="bookmark-tools">${zone('',shortcuts.filter(x=>!x.folderId).map(shortcutChip).join('')||'<span class="helper vv-shortcut-empty">Drag shortcuts here</span>','vv-shortcut-root')}${folders.map(f=>`<div class="vv-shortcut-folder-wrap" draggable="true" data-shortcut-folder-drag="${escapeHtml(f.id)}"><details class="vv-shortcut-folder" ${shortcutUi.drop===f.id?'open':''}><summary>📁 ${escapeHtml(f.name)}</summary>${zone(f.id,shortcuts.filter(x=>x.folderId===f.id).map(shortcutChip).join('')||'<span class="helper">Drop shortcuts here</span>','vv-shortcut-dropdown')}</details></div>`).join('')}</div><p class="helper vv-shortcut-drag-help">Drag to reorder. Drop onto a folder to move a shortcut inside it.</p></div>`;
+}
+function updateShortcutBar(){const host=document.querySelector('.vv-shortcut-bar');if(host){const wrapper=document.createElement('div');wrapper.innerHTML=renderShortcutBar(getAvailableTools(state.session));host.replaceWith(wrapper.firstElementChild);}}
+function moveShortcut(id,folderId,beforeId=null){const prefs=getToolPrefs();const arr=prefs.shortcuts||[];const from=arr.findIndex(x=>x.id===id);if(from<0)return;const [item]=arr.splice(from,1);item.folderId=folderId;const to=beforeId?arr.findIndex(x=>x.id===beforeId):-1;arr.splice(to<0?arr.length:to,0,item);prefs.shortcuts=arr;saveToolPrefs(prefs);}
+function renameShortcut(id,name){const prefs=getToolPrefs();const item=(prefs.shortcuts||[]).find(x=>x.id===id);if(!item||!name.trim())return;item.label=name.trim().slice(0,80);saveToolPrefs(prefs);}
+function isTabShortcutSaved(toolId, tabId) {
+  return (getToolPrefs().shortcuts||[]).some(s=>s.toolId===toolId && s.tabId===tabId);
+}
+function addTabShortcut(toolId, tabId, label) {
+  if(!toolId || !tabId)return;
+  const prefs=getToolPrefs();prefs.shortcuts=prefs.shortcuts||[];
+  const exists=prefs.shortcuts.find(s=>s.toolId===toolId&&s.tabId===tabId);
+  if(exists){prefs.shortcuts=prefs.shortcuts.filter(s=>s!==exists);saveToolPrefs(prefs);showToast("Shortcut removed.");return;}
+  prefs.shortcuts.push({id:crypto.randomUUID(),toolId,tabId,label:label.trim(),folderId:""});
+  saveToolPrefs(prefs);showToast("Tab shortcut added to Home.");
+}
+function shortcutTabMarkup(toolId,tabId,label) {
+  const saved=isTabShortcutSaved(toolId,tabId);
+  return `<span class="vv-shortcut-tab"><button type="button" class="vv-shortcut-tab-link" data-campus-tab="${escapeHtml(tabId)}">${escapeHtml(label)}</button><button type="button" class="vv-shortcut-tab-star ${saved?'is-saved':''}" title="${saved?'Remove shortcut':'Shortcut this tab'}" aria-label="${saved?'Remove shortcut for':'Add shortcut for'} ${escapeHtml(label)}" aria-pressed="${saved}" data-tab-shortcut="${escapeHtml(toolId)}" data-tab-shortcut-id="${escapeHtml(tabId)}" data-tab-shortcut-label="${escapeHtml(label)}">${saved?'★':'☆'}</button></span>`;
 }
 function renderHome() {
   if (state.session && isOnboardingRequired(state.session)) { renderOnboardingPage(); return; }
@@ -3818,12 +3835,16 @@ async function renderPublicSharePage(view) {
   const grouped = state.positions.map(pos => ({ position: pos.name, people: users.filter(u => u.teamPosition === pos.name) })).filter(g => g.people.length);
   const loose = users.filter(u => !u.teamPosition || !state.positions.some(p => p.name === u.teamPosition));
   if (loose.length) grouped.push({ position: "Other Team Members", people: loose });
-  $app.innerHTML = `<main class="shell public-share-shell">
-    <section class="card public-share-hero"><p class="eyebrow">Oak Village Academy</p><h1>Meet the OVA Team!</h1><p class="helper">${escapeHtml(school?.name || "Select a position to find a team member and see the things they like.")}</p></section>
-    <section class="public-position-list">
-      ${grouped.length ? grouped.map(g => `<details class="card public-position-card" data-public-position-card><summary><strong>${escapeHtml(g.position)}</strong><span>${g.people.length} team member${g.people.length === 1 ? "" : "s"}</span></summary><div class="public-teacher-list">${g.people.map(u => `<button type="button" class="public-teacher-card" data-public-person="${escapeHtml(u.uid)}">${u.profileImageData ? `<img src="${u.profileImageData}" alt="" />` : `<b>${escapeHtml((u.firstName || "?").slice(0,1))}</b>`}<span><strong>${escapeHtml(getUserUsedName(u))}</strong><small>${escapeHtml(u.teamPosition || "")}</small></span></button>`).join("")}</div></details>`).join("") : `<div class="card empty">No team information is available yet.</div>`}
-    </section>
-    ${state.modal ? renderModal() : ""}
+  const count=users.length;
+  const avatar=u=>u.profileImageData?`<img src="${escapeHtml(u.profileImageData)}" alt="" loading="lazy" />`:`<span class="ova-share-initial">${escapeHtml((getUserUsedName(u)||"?").slice(0,1))}</span>`;
+  $app.innerHTML = `<main class="ova-parent-share">
+    <div class="ova-share-container">
+      <header class="ova-share-header"><div class="ova-share-brand"><span class="ova-share-brand-mark" aria-hidden="true">✿</span><span><strong>Oak Village Academy</strong><small>A little more about our team</small></span></div><span class="ova-share-header-tag">Made for our families <span aria-hidden="true">♥</span></span></header>
+      <section class="ova-share-welcome" aria-labelledby="ova-share-title"><div class="ova-share-welcome-copy"><span class="ova-share-kicker">GET TO KNOW OUR TEAM</span><h1 id="ova-share-title">The people who make our village <em>special.</em></h1><p>Every teacher brings something wonderful to our community. Discover a few of their favorite things and get to know the people who care for your little ones.</p><div class="ova-share-campus"><span aria-hidden="true">⌂</span>${escapeHtml(school?.name || "Oak Village Academy")}</div></div><div class="ova-share-welcome-art" aria-hidden="true"><span class="ova-art-heart">♥</span><span class="ova-art-sun">☀</span><span class="ova-art-flower">✿</span><span class="ova-art-spark">✦</span></div></section>
+      <section class="ova-share-directory" aria-labelledby="ova-share-directory-title"><div class="ova-share-section-heading"><div><span class="ova-share-kicker">OUR VILLAGE</span><h2 id="ova-share-directory-title">Meet the team</h2><p>Choose a classroom or team to meet the people behind the smiles.</p></div><span class="ova-share-count">${count} team member${count===1?"":"s"}</span></div>
+      <div class="ova-share-positions">${grouped.length?grouped.map(g=>`<details class="ova-share-position" data-public-position-card><summary><span class="ova-share-position-icon" aria-hidden="true">✿</span><span class="ova-share-position-text"><strong>${escapeHtml(g.position)}</strong><small>${g.people.length} team member${g.people.length===1?"":"s"}</small></span><span class="ova-share-chevron" aria-hidden="true">⌄</span></summary><div class="ova-share-people">${g.people.map(u=>`<button type="button" class="ova-share-person" data-public-person="${escapeHtml(u.uid)}">${avatar(u)}<span class="ova-share-person-text"><strong>${escapeHtml(getUserUsedName(u))}</strong><small>${escapeHtml(u.teamPosition||"OVA Team Member")}</small></span><span class="ova-share-person-action">Favorites <span aria-hidden="true">›</span></span></button>`).join("")}</div></details>`).join(""):`<div class="ova-share-empty">Our team profiles are coming soon. Please check back!</div>`}</div></section>
+      <footer class="ova-share-footer"><span aria-hidden="true">♥</span><p>It takes a village. We're so glad you're part of ours.</p><small>Oak Village Academy</small></footer>
+    </div>${state.modal?renderModal():""}
   </main>`;
 }
 
@@ -7396,7 +7417,7 @@ function renderCampusCaresTool(){
   if(!tabs.length) tabs.push(['submitted','Tasks I Have Submitted']);
   if(!tabs.some(t=>t[0]===state.campusCaresTab)) state.campusCaresTab=tabs[0][0];
   const submitButton = canSubmit ? `<button type="button" data-open-campus-submit>Submit a Request</button>` : "";
-  $app.innerHTML=pageShell(`<section class="card"><div class="tool-heading-row"><h2>Campus Cares</h2>${allowedSchoolIds().length>1?`<label class="campus-school-picker">School <select data-campus-school-switch>${allowedSchoolIds().map(id=>`<option value="${escapeHtml(id)}" ${id===activeSchoolContext()?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select></label>`:`<span class="helper">${escapeHtml(getSchoolNameById(activeSchoolContext()))}</span>`}${submitButton}</div><div class="nav-tabs">${tabs.map(([k,l])=>`<button class="${state.campusCaresTab===k?'active':''}" data-campus-tab="${k}">${l}</button>`).join('')}</div>${state.campusCaresTab==='discussions'?renderCampusDiscussionsTab(canManage):renderCampusCareTable(state.campusCaresTab,canManage)}</section>${state.modal?renderModal():""}${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
+  $app.innerHTML=pageShell(`<section class="card"><div class="tool-heading-row"><h2>Campus Cares</h2>${allowedSchoolIds().length>1?`<label class="campus-school-picker">School <select data-campus-school-switch>${allowedSchoolIds().map(id=>`<option value="${escapeHtml(id)}" ${id===activeSchoolContext()?'selected':''}>${escapeHtml(getSchoolNameById(id))}</option>`).join('')}</select></label>`:`<span class="helper">${escapeHtml(getSchoolNameById(activeSchoolContext()))}</span>`}${submitButton}</div><div class="nav-tabs">${tabs.map(([k,l])=>`<span class="${state.campusCaresTab===k?'active':''}">${shortcutTabMarkup("campusCares",k,l)}</span>`).join('')}</div>${state.campusCaresTab==='discussions'?renderCampusDiscussionsTab(canManage):renderCampusCareTable(state.campusCaresTab,canManage)}</section>${state.modal?renderModal():""}${state.toast?`<div class="toast">${state.toast}</div>`:""}`);
 }
 function renderCampusCareSubmitForm(){
   const u=state.session||{}; const defaultBuilding=u.defaultCampusCareBuildingId||""; const loc=state.campusCareLocations.find(l=>l.id===defaultBuilding)||state.campusCareLocations[0]; const defaultSub=u.defaultCampusCareSublocation||"";
@@ -7884,11 +7905,15 @@ if (state.modal.type === "addMoneyRequestType" || state.modal.type === "editMone
   }
 
 if (state.modal.type === "publicWhatILike") {
-    const u = state.modal.user || {};
-    return `<div class="modal-backdrop"><div class="modal card profile-edit-modal public-likes-modal">
-      <div class="tool-heading-row"><h2>${escapeHtml(getUserUsedName(u))}</h2><button type="button" class="secondary small" data-close-modal>Close</button></div>
-      <p class="helper">${escapeHtml(u.teamPosition || "Oak Village Academy Team Member")}</p>
-      ${renderWhatILikeDisplay(u, true)}
+    const u=state.modal.user||{};
+    const favorites=getWhatILike(u);
+    const icons={restaurants:"🍽️",drinks:"🥤",shops:"🛍️",snacks:"🍬",candle:"🕯️",flower:"🌸",color:"🎨",team:"🏆",special:"💛"};
+    const cards=WHAT_I_LIKE_FIELDS.filter(([key])=>favorites[key]?.length).map(([key,label])=>`<section class="ova-favorite-card"><div class="ova-favorite-icon" aria-hidden="true">${icons[key]||"♥"}</div><div><h3>${escapeHtml(label)}</h3><div class="ova-favorite-tags">${favorites[key].map(v=>`<span>${escapeHtml(v)}</span>`).join("")}</div></div></section>`).join("");
+    return `<div class="modal-backdrop ova-favorites-backdrop"><div class="modal card ova-favorites-modal" role="dialog" aria-modal="true" aria-label="Favorite things about ${escapeHtml(getUserUsedName(u))}">
+      <button type="button" class="ova-favorites-close" data-close-modal aria-label="Close favorites">✕</button>
+      <div class="ova-favorites-header"><div class="ova-favorites-photo">${u.profileImageData?`<img src="${escapeHtml(u.profileImageData)}" alt="" />`:`<span>${escapeHtml((getUserUsedName(u)||"?").slice(0,1))}</span>`}</div><span class="ova-share-kicker">A LITTLE ABOUT ME</span><h2>${escapeHtml(getUserUsedName(u))}</h2><p>${escapeHtml(u.teamPosition||"Oak Village Academy Team Member")}</p><span class="ova-favorites-heart" aria-hidden="true">♥</span></div>
+      <div class="ova-favorites-content"><div class="ova-favorites-intro"><h3>My favorite things <span aria-hidden="true">✿</span></h3><p>Little things that make me smile!</p></div><div class="ova-favorites-grid">${cards||'<p class="ova-share-empty">Favorites coming soon!</p>'}</div></div>
+      <div class="ova-favorites-bottom"><button type="button" data-close-modal>Back to our team</button></div>
     </div></div>`;
   }
 
@@ -9754,6 +9779,7 @@ function render() {
 
 
 $app.addEventListener("input", async (e) => {
+  if(e.target.matches('[data-shortcut-rename-input]')){shortcutUi.draft=e.target.value;const action=e.target.closest('.vv-shortcut')?.querySelector('[data-shortcut-rename-action]');const item=(getToolPrefs().shortcuts||[]).find(x=>x.id===shortcutUi.rename);if(action&&item){const changed=shortcutUi.draft.trim()!==item.label;action.textContent=changed?'✓':'×';action.title=changed?'Save name':'Cancel rename';action.classList.toggle('changed',changed);}return;}
   if (eventsTool.input(e)) return;
   if (state.currentView !== "photoPrint") return;
   const editableTextId = e.target.closest?.("[data-photo-text-content]")?.dataset.photoTextContent;
@@ -10272,10 +10298,41 @@ $app.addEventListener("click", async (e) => {
   const addShortcutId = e.target.closest("[data-add-shortcut]")?.dataset.addShortcut;
   const openShortcutId = e.target.closest("[data-open-shortcut]")?.dataset.openShortcut;
   const editShortcutId = e.target.closest("[data-edit-shortcut]")?.dataset.editShortcut;
-  if (addShortcutId) { addShortcut(addShortcutId); renderHome(); return; }
-  if (openShortcutId) { const tool=getAvailableTools(state.session).find(t=>t.id===openShortcutId); if(tool){const target=document.querySelector(`[data-tool="${CSS.escape(openShortcutId)}"]`); if(target) target.click(); else {state.currentView=openShortcutId;renderCurrentView();}} return; }
-  if (e.target.closest("[data-create-shortcut-folder]")) { const name=prompt("Folder name"); if(name?.trim()){const prefs=getToolPrefs();prefs.shortcutFolders=prefs.shortcutFolders||[];prefs.shortcutFolders.push({id:crypto.randomUUID(),name:name.trim().slice(0,60)});saveToolPrefs(prefs);renderHome();}return; }
-  if (editShortcutId) {const prefs=getToolPrefs();const item=(prefs.shortcuts||[]).find(s=>s.id===editShortcutId);if(item){const name=prompt("Shortcut name (leave blank to remove)",item.label);if(name!==null){if(!name.trim()){prefs.shortcuts=prefs.shortcuts.filter(s=>s.id!==editShortcutId);}else{item.label=name.trim().slice(0,80);const choices=(prefs.shortcutFolders||[]);const folder=prompt(`Folder name (blank for top level): ${choices.map(f=>f.name).join(", ")}`,choices.find(f=>f.id===item.folderId)?.name||"");if(folder!==null)item.folderId=choices.find(f=>f.name.toLowerCase()===folder.trim().toLowerCase())?.id||"";}saveToolPrefs(prefs);renderHome();}}return;}
+  if (addShortcutId) { showToast("Open a tool and star a tab to create a shortcut."); return; }
+  if (openShortcutId) {
+    const shortcut=(getToolPrefs().shortcuts||[]).find(s=>s.id===openShortcutId);
+    if(!shortcut?.tabId)return;
+    if(!getAvailableTools(state.session).some(t=>t.id===shortcut.toolId))return;
+    if(shortcut.toolId==="campusCares"){
+      await refreshCampusCaresData();
+      state.campusCaresTab=shortcut.tabId;
+      renderCampusCaresTool();
+    } else {
+      state.currentView=shortcut.toolId;renderCurrentView();
+      const tab=[...document.querySelectorAll(".vv-content .nav-tabs button")].find(b=>Object.entries(b.dataset).some(([key,val])=>key.toLowerCase().endsWith("tab")&&val===shortcut.tabId));
+      tab?.click();
+    }
+    return;
+  }
+  const tabShortcut=e.target.closest("[data-tab-shortcut]");
+  if(tabShortcut){
+    addTabShortcut(tabShortcut.dataset.tabShortcut,tabShortcut.dataset.tabShortcutId,tabShortcut.dataset.tabShortcutLabel);
+    if(state.currentView==="campusCares")renderCampusCaresTool();
+    else {const saved=isTabShortcutSaved(tabShortcut.dataset.tabShortcut,tabShortcut.dataset.tabShortcutId);tabShortcut.textContent=saved?"★":"☆";tabShortcut.title=saved?"Remove home shortcut":"Add home shortcut";}
+    return;
+  }
+  if (e.target.closest('[data-create-shortcut-folder]')){shortcutUi={...shortcutUi,menu:null,moving:null,rename:'folder-new',draft:''};const bar=document.querySelector('.vv-shortcut-heading');if(bar&&!bar.querySelector('[data-new-folder-name]'))bar.insertAdjacentHTML('beforeend',`<span class="vv-shortcut-folder-create"><input data-new-folder-name placeholder="Folder name" maxlength="60" aria-label="New folder name"><button type="button" data-save-new-folder title="Create folder">✓</button><button type="button" data-cancel-new-folder title="Cancel">×</button></span>`);bar?.querySelector('[data-new-folder-name]')?.focus();return;}
+  if(e.target.closest('[data-cancel-new-folder]')){document.querySelector('.vv-shortcut-folder-create')?.remove();shortcutUi.rename=null;return;}
+  if(e.target.closest('[data-save-new-folder]')){const name=document.querySelector('[data-new-folder-name]')?.value.trim();if(name){const prefs=getToolPrefs();prefs.shortcutFolders=prefs.shortcutFolders||[];prefs.shortcutFolders.push({id:crypto.randomUUID(),name:name.slice(0,60)});saveToolPrefs(prefs);shortcutUi.rename=null;updateShortcutBar();}return;}
+  if(editShortcutId){shortcutUi.menu=shortcutUi.menu===editShortcutId?null:editShortcutId;shortcutUi.moving=null;updateShortcutBar();return;}
+  const shortcutActionButton=e.target.closest('[data-shortcut-action]');if(shortcutActionButton){const id=shortcutActionButton.dataset.shortcutId;const prefs=getToolPrefs();const item=(prefs.shortcuts||[]).find(x=>x.id===id);if(!item)return;shortcutUi.menu=null;
+    if(shortcutActionButton.dataset.shortcutAction==='rename'){shortcutUi.rename=id;shortcutUi.draft=item.label;updateShortcutBar();document.querySelector('[data-shortcut-rename-input]')?.focus();}
+    if(shortcutActionButton.dataset.shortcutAction==='move'){shortcutUi.moving=id;updateShortcutBar();}
+    if(shortcutActionButton.dataset.shortcutAction==='remove'){prefs.shortcuts=prefs.shortcuts.filter(x=>x.id!==id);saveToolPrefs(prefs);shortcutUi.moving=null;updateShortcutBar();showToast('Shortcut removed.');}return;}
+  const renameAction=e.target.closest('[data-shortcut-rename-action]');if(renameAction){const id=renameAction.dataset.shortcutRenameAction;const item=(getToolPrefs().shortcuts||[]).find(x=>x.id===id);if(item&&shortcutUi.draft.trim()&&shortcutUi.draft.trim()!==item.label){renameShortcut(id,shortcutUi.draft);showToast('Shortcut renamed.');}shortcutUi.rename=null;updateShortcutBar();return;}
+  const moveTo=e.target.closest('[data-shortcut-move-to]');if(moveTo){moveShortcut(moveTo.dataset.shortcutId,moveTo.dataset.shortcutMoveTo);shortcutUi.moving=null;updateShortcutBar();showToast('Shortcut moved.');return;}
+  if(e.target.closest('[data-shortcut-move-cancel]')){shortcutUi.moving=null;updateShortcutBar();return;}
+  if(shortcutUi.menu&&!e.target.closest('.vv-shortcut-menu')){shortcutUi.menu=null;updateShortcutBar();}
   const saveToolConfigKey = e.target.closest("[data-save-tool-config]")?.dataset.saveToolConfig;
   const nukeMoneyRequests = e.target.closest("[data-nuke-money-requests]");
   const nukeCampusCareRequests = e.target.closest("[data-nuke-campus-care-requests]");
@@ -12135,3 +12192,38 @@ document.addEventListener("keydown",event=>{
   }
 });
 
+
+// v285: decorate tab navigation consistently throughout the tool workspace.
+// Only actual tab controls receive stars; home tool cards retain pin/hide only.
+function decorateToolTabShortcuts(){
+  if(!state.session || !state.currentView || ["home","landing","profile"].includes(state.currentView))return;
+  document.querySelectorAll(".vv-content .nav-tabs button:not([data-tab-shortcut]):not(.vv-shortcut-tab-star)").forEach(button=>{
+    if(button.closest(".vv-shortcut-tab"))return;
+    const entry=Object.entries(button.dataset).find(([key,val])=>key.toLowerCase().endsWith("tab") && val);
+    if(!entry)return;
+    const tabId=entry[1], toolId=state.currentView;
+    const label=button.textContent.trim();
+    if(!label || !tabId)return;
+    const star=document.createElement("button");star.type="button";
+    star.className="vv-shortcut-tab-star";
+    star.dataset.tabShortcut=toolId;star.dataset.tabShortcutId=tabId;star.dataset.tabShortcutLabel=label;
+    const saved=isTabShortcutSaved(toolId,tabId);
+    star.textContent=saved?"★":"☆";star.title=saved?"Remove home shortcut":"Add home shortcut";
+    star.setAttribute("aria-label",`${saved?"Remove":"Add"} shortcut for ${label}`);
+    const wrap=document.createElement("span");wrap.className="vv-shortcut-tab";
+    button.parentNode.insertBefore(wrap,button);wrap.append(button,star);
+  });
+}
+let vvShortcutDecorating=false;
+new MutationObserver(()=>{
+  if(vvShortcutDecorating)return;
+  vvShortcutDecorating=true;
+  try{decorateToolTabShortcuts();}finally{vvShortcutDecorating=false;}
+}).observe($app,{childList:true,subtree:true});
+
+$app.addEventListener('keydown',e=>{if(e.target.matches('[data-shortcut-rename-input]')){if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();if(e.key==='Enter'&&shortcutUi.draft.trim())renameShortcut(shortcutUi.rename,shortcutUi.draft);shortcutUi.rename=null;updateShortcutBar();}}if(e.target.matches('[data-new-folder-name]')&&e.key==='Enter'){e.preventDefault();document.querySelector('[data-save-new-folder]')?.click();}});
+let vvShortcutDrag=null;
+$app.addEventListener('dragstart',e=>{const chip=e.target.closest('[data-shortcut-drag]');if(!chip||e.target.closest('input,button'))return;vvShortcutDrag={id:chip.dataset.shortcutDrag};e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('application/x-vv-shortcut',vvShortcutDrag.id);e.dataTransfer.setData('text/plain',vvShortcutDrag.id);chip.classList.add('vv-dragging');});
+$app.addEventListener('dragover',e=>{if(!vvShortcutDrag)return;const target=e.target.closest('[data-shortcut-dropzone],[data-shortcut-folder-drag],[data-shortcut-drag]');if(!target)return;e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect='move';document.querySelectorAll('.vv-drop-target,.vv-drop-before,.vv-drop-after').forEach(el=>el.classList.remove('vv-drop-target','vv-drop-before','vv-drop-after'));const folder=target.closest('[data-shortcut-folder-drag]');const chip=target.closest('[data-shortcut-drag]');if(folder&&(!chip||chip.dataset.shortcutDrag===vvShortcutDrag.id)){folder.classList.add('vv-drop-target');return;}if(chip&&chip.dataset.shortcutDrag!==vvShortcutDrag.id){const rect=chip.getBoundingClientRect();chip.classList.add(e.clientX<rect.left+rect.width/2?'vv-drop-before':'vv-drop-after');return;}target.closest('[data-shortcut-dropzone]')?.classList.add('vv-drop-target');});
+$app.addEventListener('drop',e=>{if(!vvShortcutDrag)return;const target=e.target.closest('[data-shortcut-dropzone],[data-shortcut-folder-drag],[data-shortcut-drag]');if(!target)return;e.preventDefault();e.stopPropagation();const chip=target.closest('[data-shortcut-drag]');const folder=target.closest('[data-shortcut-folder-drag]');const zone=target.closest('[data-shortcut-dropzone]');const folderId=folder?.dataset.shortcutFolderDrag??zone?.dataset.shortcutDropzone??'';if(chip&&chip.dataset.shortcutDrag!==vvShortcutDrag.id){const before=chip.classList.contains('vv-drop-after')?null:chip.dataset.shortcutDrag;const arr=getToolPrefs().shortcuts||[];const other=arr.find(x=>x.id===chip.dataset.shortcutDrag);if(other){moveShortcut(vvShortcutDrag.id,other.folderId||'',before);if(!before){const prefs=getToolPrefs();const items=prefs.shortcuts;const at=items.findIndex(x=>x.id===vvShortcutDrag.id),to=items.findIndex(x=>x.id===chip.dataset.shortcutDrag);const [moving]=items.splice(at,1);items.splice(items.findIndex(x=>x.id===chip.dataset.shortcutDrag)+1,0,moving);saveToolPrefs(prefs);}}}else moveShortcut(vvShortcutDrag.id,folderId);vvShortcutDrag=null;updateShortcutBar();});
+$app.addEventListener('dragend',()=>{vvShortcutDrag=null;document.querySelectorAll('.vv-dragging,.vv-drop-target,.vv-drop-before,.vv-drop-after').forEach(el=>el.classList.remove('vv-dragging','vv-drop-target','vv-drop-before','vv-drop-after'));});
