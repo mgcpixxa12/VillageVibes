@@ -51,6 +51,33 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Private saved links are readable only by their owner. Shared links are readable
+    // by staff assigned to the same campus. All writes stay with the owner.
+    match /staffLinks/{linkId} {
+      function linkCampusAllowed(schoolId) {
+        return signedIn() && myUser().get('accountType','team') != 'family' && (
+          schoolId in myUser().get('schoolIds', []) || myUser().get('schoolId','') == schoolId ||
+          hasRole('owner') || hasRole('admin') || hasRole('systemAdmin')
+        );
+      }
+      function linkFieldsValid(d) {
+        return d.keys().hasAll(['name','url','ownerUid','ownerName','schoolId','shared','active']) &&
+          d.name is string && d.name.size() > 0 && d.name.size() <= 100 &&
+          d.url is string && d.url.size() <= 2048 && d.url.matches('https?://.+') &&
+          d.ownerUid is string && d.ownerName is string && d.schoolId is string &&
+          d.shared is bool && d.active is bool;
+      }
+      allow get, list: if signedIn() && (resource.data.ownerUid == request.auth.uid ||
+        (resource.data.shared == true && linkCampusAllowed(resource.data.schoolId)));
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid &&
+        linkCampusAllowed(request.resource.data.schoolId) && linkFieldsValid(request.resource.data);
+      allow update: if signedIn() && resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.ownerUid == resource.data.ownerUid &&
+        request.resource.data.schoolId == resource.data.schoolId &&
+        linkFieldsValid(request.resource.data);
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+
     match /events/{eventId} {
       allow read: if signedIn() && canManageEventSchool(resource.data.schoolId);
       allow create: if canManageEventSchool(request.resource.data.schoolId);
@@ -121,7 +148,7 @@ service cloud.firestore {
       allow read, delete: if isLeaderOrHigher();
     }
     match /{top}/{document=**} {
-      allow read, write: if signedIn() && !(top in ['huddles','huddleSidebars','villagePublicForms','villagePublicResponses','campusEnrollments']);
+      allow read, write: if signedIn() && !(top in ['huddles','huddleSidebars','villagePublicForms','villagePublicResponses','campusEnrollments','staffLinks']);
     }
   }
 }

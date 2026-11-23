@@ -1,3 +1,4 @@
+import {createLinksTool} from "./links-tool.js?v=296";
 import {createEvents} from "./events-tool.js?v=282";
 import {createVillageForms} from "./village-forms.js?v=262";
 import {createHuddle} from "./huddle.js?v=262";
@@ -34,7 +35,7 @@ import {
   serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v294-weather-station-fallback-fetch";
+const VV_APP_VERSION = "v298-links-delete-open-left";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -386,6 +387,7 @@ function renderRosterSection(title, users, emptyText = "No users found.") {
 }
 
 const PERMISSION_TOOLS = [
+  { key: "links", name: "Links", permissions: [{key:"use",label:"Use Links",description:"Save personal links, share with the campus, and send links to coworkers."}] },
   { key: "events", name: "Events", permissions: [
     {key:"view",label:"View Events",description:"Browse event tiles and read planning and history records for assigned campuses."},
     {key:"manage",label:"Manage Events",description:"Add, edit, delete, and import events and upload event images for assigned campuses."}
@@ -1864,6 +1866,7 @@ function hasToolPermission(user, toolKey, permissionKey) {
 
 function getAvailableTools(user) {
   const tools = [];
+  if(user?.accountType!=="family") tools.push({id:"links",title:"Links",icon:"🔗",desc:"Save, share, and send useful school links."});
   if(user?.accountType!=="family") tools.push({id:"villageForms",title:"Village Forms",icon:"📝",desc:"Build forms, use templates and collect responses."});
   if(user?.accountType!=="family") tools.push({id:"huddle",title:"The Huddle",icon:"💬",desc:"Collaborate, propose solutions and assign approved tasks."});
   if (user?.accountType !== "family") tools.push({id:"weatherWatch",title:"Weather Watch",icon:"☀",desc:"Campus outdoor-play status, latest conditions and leader refresh."});
@@ -9831,7 +9834,14 @@ async function refreshWeatherNow(){
   finally{weatherBusy=false;updateWeatherHeader();if(state.currentView==='weatherWatch')renderWeatherWatch();}
 }
 
+const linksTool=createLinksTool({
+  db,session:()=>state.session,users:()=>state.users,
+  schoolIds:()=>allowedSchoolIds(),schoolName:getSchoolNameById,
+  notify:createNotification,pageShell,escapeHtml,toast:showToast
+});
+
 function renderCurrentView() {
+  if(state.currentView!=="links")linksTool.close();
   if (state.publicShareView === "signup") {
     renderPublicSignupPage();
     return;
@@ -9861,6 +9871,7 @@ function renderCurrentView() {
     return;
   }
 
+  if (state.currentView === "links") { linksTool.render(); return; }
   if (state.currentView === "weatherWatch") { renderWeatherWatch(); return; }
   if (state.currentView === "events") { eventsTool.render(); return; }
   if (state.currentView === "curriculum") { renderCurriculum(); return; }
@@ -10403,6 +10414,7 @@ $app.addEventListener("click", async (e) => {
     return;
   }
 
+  if (await linksTool.click(e)) return;
   if (e.target.closest('[data-weather-refresh]')) { await refreshWeatherNow(); return; }
   if (e.target.closest('[data-weather-save]')) { await saveWeatherCode(); return; }
   if (e.target.closest('[data-weather-save-location]')) { await saveWeatherLocation(); return; }
@@ -10650,6 +10662,7 @@ $app.addEventListener("click", async (e) => {
     if (n?.toolKey === "moneyRequests") { state.moneyRequestsTab = getNotificationTargetTab(n); renderMoneyRequestsTool(); }
     else if(n?.toolKey==="villageForms"){ await villageForms.open(); }
     else if(n?.toolKey==="huddle"){ await huddle.open(); }
+    else if(n?.toolKey==="links"){ state.currentView="links"; linksTool.openReceived(n); }
     else if(n?.tool==="campusCares"){ state.campusCaresTab=n.targetTab||"submitted";renderCampusCaresTool(); }
     else renderCurrentView();
     return;
@@ -10926,6 +10939,7 @@ $app.addEventListener("click", async (e) => {
   }
 
   if (toolId && !canOpenTool(state.session, toolId)) { showToast("This tool is not available for your account."); return; }
+  if (toolId === "links") { state.currentView="links"; linksTool.open(); return; }
   if (toolId === "weatherWatch") { state.currentView="weatherWatch"; watchWeatherDocument(); renderWeatherWatch(); return; }
   if (toolId === "events") { state.currentView="events"; await eventsTool.open(); return; }
   if (toolId === "curriculum") { await openCurriculum(); return; }
@@ -11922,6 +11936,7 @@ document.addEventListener("dblclick", (e) => {
 }, true);
 
 $app.addEventListener("submit", async (e) => {
+  if (await linksTool.submit(e)) return;
   if (e.target.id === "vv-event-form") { await eventsTool.submit(e); return; }
   if (e.target.id === "vv-event-entry-form") { await eventsTool.submitEntry(e); return; }
   if (e.target.id === "vv-event-section-form") { await eventsTool.submitSection(e); return; }
@@ -12358,3 +12373,13 @@ $app.addEventListener('dragstart',e=>{const chip=e.target.closest('[data-shortcu
 $app.addEventListener('dragover',e=>{if(!vvShortcutDrag)return;const target=e.target.closest('[data-shortcut-dropzone],[data-shortcut-folder-drag],[data-shortcut-drag]');if(!target)return;e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect='move';document.querySelectorAll('.vv-drop-target,.vv-drop-before,.vv-drop-after').forEach(el=>el.classList.remove('vv-drop-target','vv-drop-before','vv-drop-after'));const folder=target.closest('[data-shortcut-folder-drag]');const chip=target.closest('[data-shortcut-drag]');if(folder&&(!chip||chip.dataset.shortcutDrag===vvShortcutDrag.id)){folder.classList.add('vv-drop-target');return;}if(chip&&chip.dataset.shortcutDrag!==vvShortcutDrag.id){const rect=chip.getBoundingClientRect();chip.classList.add(e.clientX<rect.left+rect.width/2?'vv-drop-before':'vv-drop-after');return;}target.closest('[data-shortcut-dropzone]')?.classList.add('vv-drop-target');});
 $app.addEventListener('drop',e=>{if(!vvShortcutDrag)return;const target=e.target.closest('[data-shortcut-dropzone],[data-shortcut-folder-drag],[data-shortcut-drag]');if(!target)return;e.preventDefault();e.stopPropagation();const chip=target.closest('[data-shortcut-drag]');const folder=target.closest('[data-shortcut-folder-drag]');const zone=target.closest('[data-shortcut-dropzone]');const folderId=folder?.dataset.shortcutFolderDrag??zone?.dataset.shortcutDropzone??'';if(chip&&chip.dataset.shortcutDrag!==vvShortcutDrag.id){const before=chip.classList.contains('vv-drop-after')?null:chip.dataset.shortcutDrag;const arr=getToolPrefs().shortcuts||[];const other=arr.find(x=>x.id===chip.dataset.shortcutDrag);if(other){moveShortcut(vvShortcutDrag.id,other.folderId||'',before);if(!before){const prefs=getToolPrefs();const items=prefs.shortcuts;const at=items.findIndex(x=>x.id===vvShortcutDrag.id),to=items.findIndex(x=>x.id===chip.dataset.shortcutDrag);const [moving]=items.splice(at,1);items.splice(items.findIndex(x=>x.id===chip.dataset.shortcutDrag)+1,0,moving);saveToolPrefs(prefs);}}}else moveShortcut(vvShortcutDrag.id,folderId);vvShortcutDrag=null;updateShortcutBar();});
 $app.addEventListener('dragend',()=>{vvShortcutDrag=null;document.querySelectorAll('.vv-dragging,.vv-drop-target,.vv-drop-before,.vv-drop-after').forEach(el=>el.classList.remove('vv-dragging','vv-drop-target','vv-drop-before','vv-drop-after'));});
+
+$app.addEventListener("change", e=>{linksTool.change(e);});
+// Links tool drag sorting: capture before global shortcut drag handlers.
+for (const [eventName,handler] of [['dragstart','dragstart'],['dragover','dragover'],['drop','drop'],['dragend','dragend']]) {
+  document.addEventListener(eventName,e=>{
+    if(!e.target.closest?.('.vv-links-page'))return;
+    const handled=linksTool[handler](e);
+    if(handled)e.stopImmediatePropagation();
+  },true);
+}
