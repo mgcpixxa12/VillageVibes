@@ -34,7 +34,7 @@ import {
   serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v293-weather-compact-manual-fetch";
+const VV_APP_VERSION = "v294-weather-station-fallback-fetch";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -9806,10 +9806,20 @@ async function refreshWeatherNow(){
     const getJson=async url=>{const res=await fetch(url,{headers:{Accept:'application/geo+json'}});if(!res.ok)throw new Error('NWS returned '+res.status);return res.json();};
     const point=await getJson(`https://api.weather.gov/points/${r.latitude},${r.longitude}`);
     const stations=await getJson(point.properties?.observationStations);
-    const stationUrl=stations.features?.[0]?.id;
-    if(!stationUrl||!stationUrl.startsWith('https://api.weather.gov/'))throw new Error('No NWS observation station found.');
-    const latest=await getJson(stationUrl+'/observations/latest');const p=latest.properties||{};
-    if(!p.timestamp||p.temperature?.value==null)throw new Error('No recent station observation was available.');
+    const stationUrls=(stations.features||[]).map(s=>s.id).filter(u=>typeof u==='string'&&u.startsWith('https://api.weather.gov/')).slice(0,8);
+    if(!stationUrls.length)throw new Error('No NWS observation stations found.');
+    let stationUrl=null,p=null;
+    for(const url of stationUrls){
+      try{
+        const latest=await getJson(url+'/observations/latest');
+        const observation=latest.properties||{};
+        const age=Date.now()-Date.parse(observation.timestamp||'');
+        if(Number.isFinite(observation.temperature?.value)&&Number.isFinite(age)&&age>=0&&age<=3*60*60*1000){
+          stationUrl=url;p=observation;break;
+        }
+      }catch(e){console.warn('Weather station unavailable:',url,e);}
+    }
+    if(!p)throw new Error('No usable temperature observation from the nearest 8 NWS stations in the past 3 hours. Try again later.');
     const temp=Number(p.temperature.value);const heat=p.heatIndex?.value;const chill=p.windChill?.value;
     const readings={temperatureC:temp,feelsLikeC:Number.isFinite(heat)?heat:Number.isFinite(chill)?chill:temp,windKph:Number.isFinite(p.windSpeed?.value)?p.windSpeed.value: null,humidity:Number.isFinite(p.relativeHumidity?.value)?p.relativeHumidity.value:null,observedAt:p.timestamp,station:stationUrl};
     const apparentF=(Number.isFinite(readings.feelsLikeC)?readings.feelsLikeC:temp)*9/5+32;
