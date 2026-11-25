@@ -1,4 +1,4 @@
-import {FORM_THEMES} from './form-themes.js?v=304';
+import {FORM_THEMES} from './form-themes.js?v=305';
 export function createVillageForms(a){
  const {db,collection,doc,getDocs,getDoc,setDoc,updateDoc,deleteDoc,esc:e}=a;
  // Short-lived, in-memory form definitions only. Never cache response queries.
