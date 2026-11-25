@@ -1,0 +1,4 @@
+# v300: Forms cache pilot
+Only form definitions are cached in memory for 15 seconds, scoped to the current user profile and management status. Responses are not cached by this feature. Refresh, opening a form, and deleting a form request server data. Save/delete and logout invalidate the cache. Existing Firebase rules and database schema are unchanged.
+Console: `vvFormsCacheEnabled=false` disables the pilot; `vvClearFormsCache()` clears it. `vvReadReport()` reports explicit successful reads. Reload resets the pilot and diagnostics. Local JS/CSS version references are bumped to 300; hosting/browser HTML caching may still require a hard refresh.
+Test: log in, open Forms, Home, Forms within 15 seconds; definition requests should remain at one while response requests increase. Test Refresh, editing, publishing, deleting, and logout/login. Live Firebase integration has not been tested.

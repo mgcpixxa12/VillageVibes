@@ -6622,3 +6622,16 @@ body {
 .vv-link-delete{border:0;background:transparent;color:#b52e38;padding:2px 4px;font-size:14px;cursor:pointer;white-space:nowrap}
 .vv-link-delete:hover{background:#fee9eb;border-radius:5px}
 .vv-link-confirm-delete{background:#b52e38!important;border-color:#b52e38!important;color:#fff!important}
+
+#huddle-root .huddle-reset-bar{display:flex;justify-content:flex-end;padding:8px 0;flex-shrink:0}
+#huddle-root .huddle-reset-bar button{background:#a33b36;color:white;border-color:#a33b36}
+
+#huddle-root .huddle-report-entry{display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid #e5dfd3;margin:0}
+#huddle-root .huddle-report-overview{flex:1;min-width:0}
+#huddle-root .huddle-report-visuals{flex:0 0 32%;min-width:0}
+#huddle-root .huddle-report-overview h2{font-size:16px;margin:0 0 4px}
+#huddle-root .huddle-report-overview h3{font-size:12px;margin:6px 0 3px}
+#huddle-root .huddle-report-overview p{font-size:13px;line-height:1.35;margin:0 0 4px;white-space:pre-wrap;overflow-wrap:anywhere}
+#huddle-root .huddle-report-overview .solution{background:#f7f4ee;padding:4px 6px;margin:3px 0}
+.huddle-report-pictures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:0}.huddle-report-picture{margin:0}.huddle-report-picture:only-child{grid-column:1/-1}.huddle-report-picture img{display:block;width:100%;height:auto;max-height:125px;object-fit:contain;object-position:top center;border-radius:4px}
+@media(max-width:480px){#huddle-root .huddle-report-entry{gap:8px}#huddle-root .huddle-report-visuals{flex-basis:35%}.huddle-report-pictures{grid-template-columns:1fr}}

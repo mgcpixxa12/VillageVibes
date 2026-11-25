@@ -1,10 +1,10 @@
-import {createLinksTool} from "./links-tool.js?v=296";
-import {createEvents} from "./events-tool.js?v=282";
-import {createVillageForms} from "./village-forms.js?v=262";
-import {createHuddle} from "./huddle.js?v=262";
-import {createWorkspace} from "./onboarding-workspace.js?v=231";
-import {CONTENT} from "./onboarding-content.js?v=231";
-import { OVA_SCHEDULE } from "./onboarding-schedule.js?v=231";
+import {createLinksTool} from "./links-tool.js?v=304";
+import {createEvents} from "./events-tool.js?v=304";
+import {createVillageForms} from "./village-forms.js?v=304";
+import {createHuddle} from "./huddle.js?v=304";
+import {createWorkspace} from "./onboarding-workspace.js?v=304";
+import {CONTENT} from "./onboarding-content.js?v=304";
+import { OVA_SCHEDULE } from "./onboarding-schedule.js?v=304";
 import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import {
   getAuth,
@@ -23,8 +23,9 @@ import {
   onSnapshot,
   collection,
   doc,
-  getDoc,
-  getDocs,
+  getDoc as firebaseGetDoc,
+  getDocs as firebaseGetDocs,
+  getDocsFromServer,
   addDoc,
   setDoc,
   updateDoc,
@@ -35,7 +36,17 @@ import {
   serverTimestamp, arrayUnion, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-const VV_APP_VERSION = "v298-links-delete-open-left";
+// Diagnostic counts only: successful explicit SDK reads, not billable usage.
+const vvReadStats = new Map();
+function vvRecordRead(ref, count) {
+  const key = ref?.path || "query (collection/filter)";
+  const row = vvReadStats.get(key) || {requests:0,documents:0};
+  row.requests++; row.documents += count; vvReadStats.set(key,row);
+}
+async function getDoc(ref) { const result=await firebaseGetDoc(ref); vvRecordRead(ref,result.exists()?1:0); return result; }
+async function getDocs(ref, fresh=false) { const result=await (fresh ? getDocsFromServer(ref) : firebaseGetDocs(ref)); vvRecordRead(ref,result.size); return result; }
+window.vvReadReport = () => { const rows=Array.from(vvReadStats,([source,stats])=>({source,...stats})); console.table(rows); return rows; };
+const VV_APP_VERSION = "v304-huddle-compact-reports";
 console.log("VILLAGE VIBES PHASE 1 VERSION:", VV_APP_VERSION);
 const DEV_MODE = false;
 
@@ -263,7 +274,7 @@ async function restorePersistedSessionIfAvailable() {
   }
   state.session = profile;
   rememberPickedUser(profile);
-  await refreshAdminData();
+  await refreshSessionData();
   return true;
 }
 
@@ -898,7 +909,7 @@ async function refreshAdminData({ maxAgeMs = 0 } = {}) {
       loadCoreChampionRounds(), loadMoneyRequestTypes(), loadMoneyRequests(),
       loadCampusCaresAdmin(), loadCampusCareTasks(), loadCampusCareDiscussions(),
       loadBudgetCodes(), loadCampusEnrollments(), loadImportantDates(), loadWeeklyThemes(),
-      loadCertificates(), loadAppSettings(), loadAppTools(), loadNotifications(),
+      loadCertificates(), loadAppSettings(), loadAppTools(), watchNotifications(),
       loadVillageVoiceDraft(), loadPrintableDrafts(), loadIllnessNoticeTemplates()
     ]);
     adminDataLoadedAt = Date.now();
@@ -908,6 +919,14 @@ async function refreshAdminData({ maxAgeMs = 0 } = {}) {
 }
 
 // Switching panels within a short period should not re-download everything.
+async function refreshSessionData() {
+  adminDataLoadedAt=0;
+  await Promise.all([loadSchools(),loadAllUsers(),loadPositions(),loadRoles(),loadImportantDates(),loadWeeklyThemes(),loadCertificates(),loadAppSettings(),loadAppTools(),watchNotifications()]);
+  state.roster=state.users.filter(u=>getUserSchoolIds(u).includes(state.selectedSchoolId));
+}
+async function refreshPrintablesData(){
+  await Promise.all([loadAllUsers(),loadVillageVoiceDraft(),loadPrintableDrafts(),loadIllnessNoticeTemplates()]);
+}
 async function refreshAdminDataForNavigation() {
   return refreshAdminData({ maxAgeMs: 30000 });
 }
@@ -918,12 +937,10 @@ async function refreshMoneyRequestsData() {
   await Promise.all([
     loadMoneyRequestTypes(),
     loadMoneyRequests(),
-    loadCampusCaresAdmin(),
-    loadCampusCareTasks(),
-    loadCampusCareDiscussions(),
+    loadAllUsers(),
     loadBudgetCodes(),
     loadCampusEnrollments(),
-    loadNotifications()
+    watchNotifications()
   ]);
 }
 
@@ -1449,27 +1466,38 @@ function userMatchesNotification(n) {
   return (n.toRoles || []).some(r => roleKeys.includes(normalizeRoleKey(r))) || (position && (n.toPositions || []).includes(position));
 }
 
-let notificationUnsubscribe=null, notificationSubscriberUid=null;
+let notificationUnsubscribe=null, notificationSubscriberUid=null, notificationReady=null, notificationRows=[];
+function stopNotifications(){ notificationUnsubscribe?.(); notificationUnsubscribe=null; notificationSubscriberUid=null; notificationReady=null; notificationRows=[]; state.notifications=[]; }
 function watchNotifications(){
   const currentUid=state.session?.uid;
-  if(notificationSubscriberUid===currentUid)return;
+  if(notificationSubscriberUid===currentUid && notificationUnsubscribe){
+    state.notifications=notificationRows.filter(n=>n.cleared!==true&&!n.clearedBy?.includes(currentUid)).filter(userMatchesNotification).sort((a,b)=>(b.createdAt?.toMillis?.()||0)-(a.createdAt?.toMillis?.()||0)).slice(0,40);
+    return notificationReady;
+  }
   notificationUnsubscribe?.();notificationUnsubscribe=null;notificationSubscriberUid=currentUid||null;
-  if(!currentUid)return;
+  if(!currentUid)return Promise.resolve();
+  let ready; notificationReady=new Promise(resolve=>{ready=resolve;});
+  setTimeout(ready, 5000);
   notificationUnsubscribe=onSnapshot(collection(db,"notifications"),snapshot=>{
+    ready();
     if(state.session?.uid!==currentUid)return;
-    state.notifications=snapshot.docs.map(d=>({id:d.id,...d.data()}))
+    notificationRows=snapshot.docs.map(d=>({id:d.id,...d.data()}));
+    state.notifications=notificationRows
       .filter(n=>n.cleared!==true&&!n.clearedBy?.includes(currentUid))
       .filter(userMatchesNotification)
       .sort((a,b)=>(b.createdAt?.toMillis?.()||0)-(a.createdAt?.toMillis?.()||0)).slice(0,40);
     const badge=document.querySelector(".notification-button");
     if(badge){const count=getUnreadNotificationCount();badge.innerHTML=`🔔${count?`<span>${count}</span>`:""}`;badge.setAttribute("aria-label",count?`Notifications, ${count} unread`:"Notifications");}
     if(state.notificationsOpen){const panel=document.querySelector(".notification-panel");if(panel){const tmp=document.createElement("div");tmp.innerHTML=renderNotificationsPanel();panel.replaceWith(tmp.firstElementChild);}}
-  },err=>console.warn("Notification updates unavailable:",err));
+  },err=>{ready(); console.warn("Notification updates unavailable:",err); if(notificationSubscriberUid===currentUid){notificationUnsubscribe=null;notificationSubscriberUid=null;} });
+  return notificationReady;
 }
 async function loadNotifications() {
+  if(!notificationUnsubscribe || notificationSubscriberUid!==state.session?.uid) { await watchNotifications(); return; }
   try {
     const snap = await getDocs(collection(db, "notifications"));
-    state.notifications = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(n => n.cleared !== true && !n.clearedBy?.includes(state.session?.uid)).filter(userMatchesNotification).sort((a,b)=>{
+    notificationRows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    state.notifications = notificationRows.filter(n => n.cleared !== true && !n.clearedBy?.includes(state.session?.uid)).filter(userMatchesNotification).sort((a,b)=>{
       const at = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
       const bt = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
       return bt-at;
@@ -1550,7 +1578,7 @@ async function loginUser(user, credential, stayLoggedIn = false) {
     state.session = fresh;
     rememberPickedUser(fresh);
     state.modal = null;
-    await refreshAdminData();
+    await refreshSessionData();
     renderHome();
     return;
   }
@@ -1564,7 +1592,7 @@ async function loginUser(user, credential, stayLoggedIn = false) {
   const fresh = await readUser(user.uid);
   state.session = fresh;
   rememberPickedUser(fresh);
-  await refreshAdminData();
+  await refreshSessionData();
 
   if (fresh.pinResetRequired || credential === "0000" || fresh.onboardingRequired === true) {
     state.modal = null;
@@ -1585,6 +1613,8 @@ async function loginUser(user, credential, stayLoggedIn = false) {
 
 
 async function logout() {
+  villageForms.clearCache();
+  stopNotifications(); linksTool.close(); huddle.stopWatch(); weatherUnsubscribe?.(); weatherUnsubscribe=null; weatherRecord=null; weatherSelectedSchool=""; adminDataLoadedAt=0; state.curriculumLoadedAt=0;
   await signOut(auth).catch(() => {});
   state.session = null;
   state.modal = null;
@@ -2293,6 +2323,8 @@ function getOvaLogoHtml(className = "logo", fallbackText = "VV") {
 }
 
 function pageShell(content) {
+  if(state.currentView!=="links") linksTool.close();
+  if(state.currentView!=="huddle") huddle.stopWatch();
   const navigation = [
     ["home", "⌂", "Home", true],
     ["profile", "◉", "My profile", true],
@@ -6626,7 +6658,7 @@ async function saveIllnessTemplate() {
   if (!form) return;
   const draft = updatePrintableDraftFromForm("illnessNotice", form);
   await setDoc(doc(collection(db, "illnessNoticeTemplates")), { ...draft, createdAt: serverTimestamp(), createdBy: state.session?.uid || "" });
-  await refreshAdminData();
+  await loadIllnessNoticeTemplates();
   showToast("Reusable illness flyer saved.");
   renderVillageVoiceTool();
 }
@@ -8096,7 +8128,7 @@ async function adminLeaderLogin(user, password, stayLoggedIn = false) {
   rememberPickedUser(profile);
   state.modal = null;
   state.adminLoginOpen = false;
-  await refreshAdminData();
+  await refreshSessionData();
   showToast("Logged in.");
   renderHome();
 }
@@ -9489,7 +9521,8 @@ async function openCurriculum() {
   if (!canOpenTool(state.session, "curriculum")) { renderHome(); return; }
   state.curriculumTab = state.curriculumTab || "weeklyThemes";
   await withAppLoading("Opening Curriculum...", async()=> {
-    await Promise.all([loadWeeklyThemes(),loadCurriculumData(true)]);
+    await loadWeeklyThemes();
+    if(state.curriculumTab!=="weeklyThemes") await loadCurriculumData(true);
     renderCurriculum();
   });
 }
@@ -9702,7 +9735,7 @@ async function handleCurriculumClick(e) {
   if(e.target.closest('[data-curriculum-wizard-cancel]')){state.curriculumWizard=null;renderCurriculum();return true;}
   if(e.target.closest('[data-curriculum-wizard-back]')){state.curriculumWizard.step=Math.max(0,state.curriculumWizard.step-1);renderCurriculum();return true;}
   const tab=e.target.closest('[data-curriculum-tab]')?.dataset.curriculumTab;
-  if(tab){state.curriculumTab=tab;state.curriculumOleEditId='';state.curriculumFeedbackMode='';renderCurriculum();return true;}
+  if(tab){if(tab!=='weeklyThemes') await loadCurriculumData();state.curriculumTab=tab;state.curriculumOleEditId='';state.curriculumFeedbackMode='';renderCurriculum();return true;}
   const edit=e.target.closest('[data-curriculum-edit-ole]')?.dataset.curriculumEditOle;
   if(edit){if(!curriculumCanEdit())return true;state.curriculumOleEditId=edit;state.oleNewParent='';state.oleWorkspaceMode='edit';renderCurriculum();const item=curriculumOleForSchool().find(x=>x.id===edit);const select=document.querySelector('#curriculumOleForm [name="parentId"]');if(select&&item)select.value=item.parentId||'';return true;}
   const remove=e.target.closest('[data-curriculum-remove-ole]')?.dataset.curriculumRemoveOle;
@@ -10134,6 +10167,7 @@ $app.addEventListener("change", async (e) => {
 
   if (e.target.matches("[data-dev-view-school]")) {
     state.devViewSchoolId = e.target.value;
+    adminDataLoadedAt=0; state.curriculumLoadedAt=0;
     state.selectedMoneyApprovalIds = [];
     state.expandedMoneyRequestId = "";
     renderHome();
@@ -10450,6 +10484,10 @@ $app.addEventListener("click", async (e) => {
       state.campusCaresTab=shortcut.tabId;
       renderCampusCaresTool();
     } else {
+      if(shortcut.toolId==="moneyRequests") await refreshMoneyRequestsData();
+      if(shortcut.toolId==="villageVoice") await refreshPrintablesData();
+      if(shortcut.toolId==="coreChampion") await Promise.all([loadAllUsers(),loadCoreChampionRounds()]);
+      if(shortcut.toolId==="curriculum") await openCurriculum();
       state.currentView=shortcut.toolId;renderCurrentView();
       const tab=[...document.querySelectorAll(".vv-content .nav-tabs button")].find(b=>Object.entries(b.dataset).some(([key,val])=>key.toLowerCase().endsWith("tab")&&val===shortcut.tabId));
       tab?.click();
@@ -10614,8 +10652,8 @@ $app.addEventListener("click", async (e) => {
   if (clearDevPreview) { await withAppLoading("Updating view...", async () => { state.devViewRoleKey = ""; state.devViewPosition = ""; state.devViewSchoolId = ""; renderHome(); }); return; }
   if (editImportantDateId) { state.editingImportantDateId = editImportantDateId; renderLeadership(); return; }
   if (cancelImportantDateEdit) { state.editingImportantDateId = ""; renderLeadership(); return; }
-  if (deleteImportantDateId) { await withAppLoading("Deleting date...", async () => { await deleteImportantDate(deleteImportantDateId); await refreshAdminData(); renderLeadership(); }); return; }
-  if (deleteCertificateId) { await withAppLoading("Deleting certificate...", async () => { await deleteCertificate(deleteCertificateId); await refreshAdminData(); renderLeadership(); }); return; }
+  if (deleteImportantDateId) { await withAppLoading("Deleting date...", async () => { await deleteImportantDate(deleteImportantDateId); await loadImportantDates(); adminDataLoadedAt=0; renderLeadership(); }); return; }
+  if (deleteCertificateId) { await withAppLoading("Deleting certificate...", async () => { await deleteCertificate(deleteCertificateId); await loadCertificates(); adminDataLoadedAt=0; renderLeadership(); }); return; }
   if (e.target.closest("[data-add-education-row]")) { const builder = e.target.closest("[data-education-builder]"); const wrap = builder?.querySelector("[data-education-rows]"); if (wrap) { wrap.insertAdjacentHTML("beforeend", renderEducationRow({})); refreshEducationCertificateOptions(builder); } return; }
   if (e.target.closest("[data-remove-education-row]")) { const builder = e.target.closest("[data-education-builder]"); const rows = builder?.querySelector("[data-education-rows]"); e.target.closest("[data-education-row]")?.remove(); if (rows && !rows.querySelector("[data-education-row]")) rows.insertAdjacentHTML("beforeend", renderEducationRow({})); refreshEducationCertificateOptions(builder || document); return; }
   if (e.target.closest("[data-add-village-block]")) { addVillageVoiceBlock(); return; }
@@ -10659,11 +10697,11 @@ $app.addEventListener("click", async (e) => {
     const n = state.notifications.find(x => x.id === openNotificationId);
     state.notificationsOpen = false;
     await loadNotifications();
-    if (n?.toolKey === "moneyRequests") { state.moneyRequestsTab = getNotificationTargetTab(n); renderMoneyRequestsTool(); }
-    else if(n?.toolKey==="villageForms"){ await villageForms.open(); }
-    else if(n?.toolKey==="huddle"){ await huddle.open(); }
+    if (n?.toolKey === "moneyRequests") { await refreshMoneyRequestsData(); state.moneyRequestsTab = getNotificationTargetTab(n); renderMoneyRequestsTool(); }
+    else if(n?.toolKey==="villageForms"){ state.currentView="villageForms"; await villageForms.open(); }
+    else if(n?.toolKey==="huddle"){ state.currentView="huddle"; await huddle.open(); }
     else if(n?.toolKey==="links"){ state.currentView="links"; linksTool.openReceived(n); }
-    else if(n?.tool==="campusCares"){ state.campusCaresTab=n.targetTab||"submitted";renderCampusCaresTool(); }
+    else if(n?.tool==="campusCares" || n?.toolKey==="campusCares"){ await refreshCampusCaresData(); state.campusCaresTab=n.targetTab||"submitted";renderCampusCaresTool(); }
     else renderCurrentView();
     return;
   }
@@ -10948,7 +10986,7 @@ $app.addEventListener("click", async (e) => {
   if (toolId === "campusCares") { await withAppLoading("Opening Campus Cares...", async () => { await refreshCampusCaresData(); const mode=getCampusCaresOpenPreference(); if (mode === "submitted") state.campusCaresTab = "submitted"; renderCampusCaresTool(); if (mode === "submitPopup") { state.modal = { type:"campusCareSubmit" }; renderCampusCaresTool(); } }); return; }
   if (toolId === "appCamera") { await loadAppGallery();renderAppCamera();return; }
   if (toolId === "photoPrint") { await withAppLoading("Opening Photo Print and Edit...", async () => { await loadPhotoPrintWorkspace(); renderPhotoPrintTool(); }); return; }
-  if (toolId === "villageVoice") { await withAppLoading("Opening Printables...", async () => { await refreshAdminData(); state.printableTab = state.printableTab || "villageVoice"; renderVillageVoiceTool(); }); return; }
+  if (toolId === "villageVoice") { await withAppLoading("Opening Printables...", async () => { await refreshPrintablesData(); state.printableTab = state.printableTab || "villageVoice"; renderVillageVoiceTool(); }); return; }
   if (toolId === "moneyRequests") {
     await withAppLoading("Opening Money Requests...", async () => {
       await refreshMoneyRequestsData();
@@ -10956,7 +10994,7 @@ $app.addEventListener("click", async (e) => {
     });
     return;
   }
-  if (toolId === "coreChampion") { await withAppLoading("Opening Core Count Champion...", async () => { await refreshAdminData(); renderCoreChampionTool(); }); return; }
+  if (toolId === "coreChampion") { await withAppLoading("Opening Core Count Champion...", async () => { await Promise.all([loadAllUsers(),loadCoreChampionRounds()]); renderCoreChampionTool(); }); return; }
 
   const coreOpenRound = e.target.closest("[data-core-open-round]")?.dataset.coreOpenRound;
   const coreCloseRound = e.target.closest("[data-core-close-round]")?.dataset.coreCloseRound;
@@ -11959,8 +11997,8 @@ $app.addEventListener("submit", async (e) => {
     }
     if (form.dataset.campusAssignForm) { await assignCampusTask(form.dataset.campusAssignForm, form); hideAppLoading(); return; }
     if (form.id === "campusCareRequestForm") { await submitCampusCareRequest(form); hideAppLoading(); return; }
-    if (form.id === "campusCareLocationForm") { await saveCampusCareLocation(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
-    if (form.id === "campusCareStatusForm") { await saveCampusCareStatus(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
+    if (form.id === "campusCareLocationForm") { await saveCampusCareLocation(form); await loadCampusCaresAdmin(); adminDataLoadedAt=0; renderSystemAdmin(); hideAppLoading(); return; }
+    if (form.id === "campusCareStatusForm") { await saveCampusCareStatus(form); await loadCampusCaresAdmin(); adminDataLoadedAt=0; renderSystemAdmin(); hideAppLoading(); return; }
     if (form.id === "campusCareNotesForm" || form.id === "campusCareLeaderNotesForm") { await saveCampusTaskNote(form); hideAppLoading(); return; }
     if (form.id === "employeeIdLoginForm") { await loginWithEmployeeId(form); hideAppLoading(); return; }
     if (form.id === "appGalleryUploadForm") {await saveAppGalleryPhotos(form);hideAppLoading();return;}
@@ -11986,13 +12024,13 @@ $app.addEventListener("submit", async (e) => {
     if (form.id === "pinChangeForm") { await saveNewPin(form.pin.value.trim()); renderCurrentView(); hideAppLoading(); return; }
     if (form.id === "selfProfileForm") { await updateSelfProfile(form); hideAppLoading(); return; }
     if (form.id === "onboardingStepForm") { await saveOnboardingStep(form); hideAppLoading(); return; }
-    if (form.id === "schoolForm") { await addSchool(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "editSchoolForm") { await updateSchool(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "positionForm") { await addPosition(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "editPositionForm") { await updatePosition(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "roleForm") { await addRole(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "moneyRequestTypeForm") { await addMoneyRequestType(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "editMoneyRequestTypeForm") { await updateMoneyRequestType(form); await refreshAdminData(); renderSystemAdmin(); }
+    if (form.id === "schoolForm") { await addSchool(form); await loadSchools(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "editSchoolForm") { await updateSchool(form); await loadSchools(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "positionForm") { await addPosition(form); await loadPositions(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "editPositionForm") { await updatePosition(form); await loadPositions(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "roleForm") { await addRole(form); await loadRoles(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "moneyRequestTypeForm") { await addMoneyRequestType(form); await loadMoneyRequestTypes(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "editMoneyRequestTypeForm") { await updateMoneyRequestType(form); await loadMoneyRequestTypes(); adminDataLoadedAt=0; renderSystemAdmin(); }
     if (form.matches("[data-enrollment-form]")) {
       if (!canUseLeadership(state.session) || !hasToolPermission(state.session, "campusEnrollment", "manage")) throw Error("Campus enrollment permission required.");
       const schoolId = form.schoolId.value;
@@ -12022,23 +12060,23 @@ $app.addEventListener("submit", async (e) => {
     } catch(err) { showToast(err.message || "Unable to update budget codes."); }
     return;
   }
-  if (form.id === "budgetCodeForm") { await addBudgetCode(form); await refreshAdminData(); state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
-    if (form.id === "editBudgetCodeForm") { await updateBudgetCode(form); await refreshAdminData(); state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
+  if (form.id === "budgetCodeForm") { await addBudgetCode(form); await loadBudgetCodes(); adminDataLoadedAt=0; state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
+    if (form.id === "editBudgetCodeForm") { await updateBudgetCode(form); await loadBudgetCodes(); adminDataLoadedAt=0; state.modal = null; state.currentView === "ownersPanel" ? renderOwnersPanel() : renderSystemAdmin(); }
     if (form.id === "moneyRequestSubmissionForm") { await submitMoneyRequest(form); hideAppLoading(); return; }
     if (form.id === "receiptUploadForm") { await saveReceiptForMoneyRequest(form); hideAppLoading(); return; }
-    if (form.id === "editRoleForm") { await updateRole(form); await refreshAdminData(); renderSystemAdmin(); }
-    if (form.id === "permissionsForm") { await savePermissionsMatrix(form); await refreshAdminData(); renderSystemAdmin(); }
+    if (form.id === "editRoleForm") { await updateRole(form); await loadRoles(); adminDataLoadedAt=0; renderSystemAdmin(); }
+    if (form.id === "permissionsForm") { await savePermissionsMatrix(form); await loadRoles(); adminDataLoadedAt=0; renderSystemAdmin(); }
     if (form.id === "villageVoiceForm") { await saveVillageVoice(form); hideAppLoading(); return; }
     if (form.id === "teacherBioForm") { await saveGenericPrintable("teacherBio", form); hideAppLoading(); return; }
     if (form.id === "illnessNoticeForm") { await saveGenericPrintable("illnessNotice", form); hideAppLoading(); return; }
     if (form.id === "doorRemindersForm") { await saveDoorReminders(form); hideAppLoading(); return; }
-    if (form.id === "importantDateEditForm") { await updateImportantDate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
-    if (form.id === "importantDateForm") { await addImportantDate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "importantDateEditForm") { await updateImportantDate(form); await loadImportantDates(); adminDataLoadedAt=0; renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "importantDateForm") { await addImportantDate(form); await loadImportantDates(); adminDataLoadedAt=0; renderLeadership(); hideAppLoading(); return; }
     if (form.id === "weeklyThemesForm") { if (!curriculumCanEdit()) throw new Error("Permission denied."); await saveWeeklyThemes(form); await loadWeeklyThemes(); if(state.currentView === "curriculum") renderCurriculum(); else renderLeadership(); hideAppLoading(); return; }
-    if (form.id === "certificateForm") { await addCertificate(form); await refreshAdminData(); renderLeadership(); hideAppLoading(); return; }
-    if (form.id === "brandingSettingsForm") { await saveBrandingSettings(form); await refreshAdminData(); renderSystemAdmin(); hideAppLoading(); return; }
-    if (form.id === "userForm") { await addUser(form); await refreshAdminData(); renderLeadership(); }
-    if (form.id === "editUserForm") { await updateAppUser(form); await refreshAdminData(); renderLeadership(); }
+    if (form.id === "certificateForm") { await addCertificate(form); await loadCertificates(); adminDataLoadedAt=0; renderLeadership(); hideAppLoading(); return; }
+    if (form.id === "brandingSettingsForm") { await saveBrandingSettings(form); await loadAppSettings(); adminDataLoadedAt=0; renderSystemAdmin(); hideAppLoading(); return; }
+    if (form.id === "userForm") { await addUser(form); await Promise.all([loadAllUsers(),loadRoster()]); adminDataLoadedAt=0; renderLeadership(); }
+    if (form.id === "editUserForm") { await updateAppUser(form); await Promise.all([loadAllUsers(),loadRoster()]); adminDataLoadedAt=0; renderLeadership(); }
     hideAppLoading();
   } catch (err) {
     hideAppLoading();
@@ -12288,7 +12326,6 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
     const shareParam = new URLSearchParams(window.location.search).get("share");
     if (shareParam) state.publicShareView = shareParam;
     try {
-      await refreshLandingData();
       if (!shareParam) {
         const restored = await restorePersistedSessionIfAvailable();
         if (restored) {
@@ -12296,6 +12333,7 @@ document.addEventListener("click", async function vvLetterlandExtraActions(e) {
           return;
         }
       }
+      await refreshLandingData();
     } catch (err) {
       console.warn("Initial load failed. This is expected until Firebase config/rules are set.", err);
     }
@@ -12320,7 +12358,7 @@ const eventsTool = createEvents({db,collection,doc,getDocs,addDoc,updateDoc,dele
 const villageForms = createVillageForms({db,collection,doc,getDocs,getDoc,setDoc,updateDoc,deleteDoc,esc:escapeHtml,user:()=>state.session,users:()=>state.users,name:getUserUsedName,schools:()=>state.schools,canManage:()=>hasFullDevAccess(state.session)||getUserRoleKeys(state.session).some(r=>['leader','lead','doso','owner','admin','systemadmin','dev'].includes(String(r).toLowerCase())),shell:()=>{$app.innerHTML=pageShell('<section id="village-forms-root"></section><div id="huddle-toast" role="status"></div>');},toast:showToast,
   notify:(event,f)=>{const ids=event==="response"?[f.createdBy,...(f.collaborators||[]).map(c=>c.id)]:event==="published"?[...(f.audienceIds||[]),...(f.collaborators||[]).map(c=>c.id)]:[...(f.collaborators||[]).map(c=>c.id)];return notifyParticipants("villageForms",ids,event==="response"?"New form response":event==="published"?"Form published":"Form collaboration invitation",event==="response"?`A response was submitted to ${f.title}.`:`${f.title} is ready in Village Forms.`,f.schoolIds||[],"forms");}
 });
-const huddle = createHuddle({db,collection,doc,getDocs,getDoc,setDoc,updateDoc,query,where,runTransaction,onSnapshot,deleteDoc,esc:escapeHtml,user:()=>state.session,users:()=>state.users,name:getUserUsedName,schools:()=>state.schools,locations:()=>state.campusCareLocations,schoolName:getSchoolNameById,legacy:()=>state.campusCareDiscussions.filter(d=>campusDiscussionInUserScope(d)),compress:compressDiscussionImage,timestamp:serverTimestamp,assignable:(u,s)=>userSchoolMatchesScope([s],u)&&(hasToolPermission(u,'campusCares','assigned')||hasToolPermission(u,'campusCares','manage')),can:k=>{const defaults=hasViewedRole(state.session,k==='approve'?['doso','owner','admin','systemadmin','dev']:['leader','lead','doso','owner','admin','systemadmin','dev']);const r=state.roles.find(r=>getUserRoleKeys(getViewedRoleUser(state.session)).includes(normalizeRoleKey(r.key)));return defaults&&(!r?.permissions?.huddle?.[k]||hasToolPermission(state.session,'huddle',k));},prepare:async()=>{await Promise.all([loadAllUsers(),loadCampusCaresAdmin(),loadCampusCareDiscussions()]);},shell:()=>{$app.innerHTML=pageShell('<section id="huddle-root" class="card"></section><div id="huddle-toast" role="status"></div>');},notify:(event,h,ids)=>notifyParticipants("huddle",ids,event==="new"?"New Huddle":event==="proposal"?"New Huddle proposal":event==="approval"?"Huddle decision":"Huddle update",`An update is available in ${h.title}.`,h.schoolIds||[],"open"),
+const huddle = createHuddle({isSystemAdmin:()=>isSystemAdmin(state.session),db,collection,doc,getDocs,getDoc,setDoc,updateDoc,query,where,runTransaction,onSnapshot,deleteDoc,esc:escapeHtml,user:()=>state.session,users:()=>state.users,name:getUserUsedName,schools:()=>state.schools,locations:()=>state.campusCareLocations,schoolName:getSchoolNameById,legacy:()=>state.campusCareDiscussions.filter(d=>campusDiscussionInUserScope(d)),compress:compressDiscussionImage,timestamp:serverTimestamp,assignable:(u,s)=>userSchoolMatchesScope([s],u)&&(hasToolPermission(u,'campusCares','assigned')||hasToolPermission(u,'campusCares','manage')),can:k=>{const defaults=hasViewedRole(state.session,k==='approve'?['doso','owner','admin','systemadmin','dev']:['leader','lead','doso','owner','admin','systemadmin','dev']);const r=state.roles.find(r=>getUserRoleKeys(getViewedRoleUser(state.session)).includes(normalizeRoleKey(r.key)));return defaults&&(!r?.permissions?.huddle?.[k]||hasToolPermission(state.session,'huddle',k));},prepare:async()=>{await Promise.all([loadAllUsers(),loadCampusCaresAdmin(),loadCampusCareDiscussions()]);},shell:()=>{$app.innerHTML=pageShell('<section id="huddle-root" class="card"></section><div id="huddle-toast" role="status"></div>');},notify:(event,h,ids)=>notifyParticipants("huddle",ids,event==="new"?"New Huddle":event==="proposal"?"New Huddle proposal":event==="approval"?"Huddle decision":"Huddle update",`An update is available in ${h.title}.`,h.schoolIds||[],"open"),
 toast:m=>{const t=document.getElementById('huddle-toast');if(t){t.textContent=m;setTimeout(()=>{t.textContent=''},5000);}}});
 
 
